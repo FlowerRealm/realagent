@@ -8,6 +8,8 @@ endif()
 
 project(realagent CXX)
 
+enable_testing()
+
 add_subdirectory(core)
 
 # TUI（Go + Bubble Tea）：go build 产物 realagent-tui
