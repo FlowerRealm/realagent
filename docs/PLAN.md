@@ -145,7 +145,7 @@ M6 TUI              → M7 集成与测试
 - Bubble Tea Model/Update/View 模式；异步事件（推送流）→ tea.Msg 桥接。
 
 **风险**
-- [ ] R15: Bubble Tea 事件模型与 QUIC 异步事件流集成（异步事件 → tea.Msg 的桥接）
+- [x] R15: Bubble Tea 事件模型与 QUIC 异步事件流集成（异步事件 → tea.Msg 的桥接）——**已完成（2026-08-10）**：TUI 订阅 /events 推送流渲染流式打字 + 审批对话框（permission_request → y/n → POST /approval-response）。
 
 ## M7：集成与测试
 
@@ -174,4 +174,4 @@ M6 TUI              → M7 集成与测试
 | R12 | HTTP/3 应用层 | ✅ 已解决（ngtcp2+nghttp3） |
 | R13 | 推送可靠性机制 | ✅ 已定（全可靠流） |
 | R14 | quic-go 支持度 | ✅ 已解除 |
-| R15 | Bubble Tea 事件桥接 | ⬜ 待定（M6） |
+| R15 | Bubble Tea 事件桥接 | ✅ 已完成（TUI 流式 + 审批对话框） |
