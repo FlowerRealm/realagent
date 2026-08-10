@@ -66,15 +66,23 @@ int main(int argc, char** argv) {
     Executor exe(ctx);
     Agent agent(ctx, exe);
 
-    // 事件 → stderr（M6 接入推送流）
-    ctx.emit_fn = [](const std::string& type, const std::string& payload) {
-        fprintf(stderr, "[event] %s %s\n", type.c_str(), payload.c_str());
-    };
-
     QuicServerConfig scfg;
+    // 证书用全局绝对路径（不依赖 cwd）
+    {
+        const std::string home = getenv_or("HOME", ".");
+        scfg.cert_file = home + "/.realagent/cert.pem";
+        scfg.key_file = home + "/.realagent/key.pem";
+    }
+    QuicServer server(scfg);
+
+    // agent 事件 → 推送流（GET /events 订阅的客户端收到流式事件）
+    ctx.emit_fn = [&server](const std::string& type, const std::string& payload) {
+        server.push_event(type, payload);
+    };
     QuicCallbacks cbs;
     cbs.on_message = [&agent](const std::string& body) {
         // POST /message：body 为 {"message":"..."}
+        fprintf(stderr, "[msg] 收到: %.80s\n", body.c_str());
         auto msg = json::parse(body).value_or(json{});
         const std::string user_input = msg["message"].as_string().value_or("");
         if (user_input.empty()) return std::string("{\"error\":\"empty message\"}");
@@ -101,7 +109,6 @@ int main(int argc, char** argv) {
         return reply.dump();
     };
 
-    QuicServer server(scfg);
     server.set_callbacks(cbs);
     server.run(); // 阻塞事件循环
 

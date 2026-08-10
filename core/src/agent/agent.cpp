@@ -30,7 +30,8 @@ static void feed_sink(void* sink_ctx, const char* type, const char* payload);
 
 struct CurlSink {
     Plugin* proto;
-    LlmOutcome* out; // 同时作为 feed_sink 的 sink_ctx
+    LlmOutcome* out;
+    CoreContext* ctx; // 实时广播 message_update 到推送流（流式打字）
 };
 
 static size_t curl_write_cb(char* ptr, size_t size, size_t nmemb, void* userdata) {
@@ -40,18 +41,21 @@ static size_t curl_write_cb(char* ptr, size_t size, size_t nmemb, void* userdata
     if (!chunk) return 0;
     memcpy(chunk, ptr, n);
     chunk[n] = '\0';
-    s->proto->api->parse_feed(s->proto->instance, chunk, feed_sink, s->out);
+    s->proto->api->parse_feed(s->proto->instance, chunk, feed_sink, s);
     free(chunk);
     return n;
 }
 
 /* parse_feed 事件接收器（协议插件 → agent） */
 static void feed_sink(void* sink_ctx, const char* type, const char* payload) {
-    auto* out = static_cast<LlmOutcome*>(sink_ctx);
+    auto* s = static_cast<CurlSink*>(sink_ctx);
+    auto* out = s->out;
     const json ev = json::parse(payload).value_or(json{});
     const std::string t(type ? type : "");
     if (t == "message_update") {
         out->text += ev["delta"].as_string().value_or("");
+        // 实时广播增量（推送流 → TUI 打字效果）
+        if (s->ctx->emit_fn) s->ctx->emit_fn("message_update", payload);
     } else if (t == "tool_use") {
         LlmOutcome::ToolUse tu;
         tu.id = ev["id"].as_string().value_or("");
@@ -80,7 +84,7 @@ bool Agent::llm_call(const json& dialog, LlmOutcome& out) {
     // libcurl 流式 POST
     CURL* curl = curl_easy_init();
     if (!curl) return false;
-    CurlSink sink{proto, &out};
+    CurlSink sink{proto, &out, &ctx_};
     curl_easy_setopt(curl, CURLOPT_URL, req.url);
     curl_easy_setopt(curl, CURLOPT_POST, 1L);
     curl_easy_setopt(curl, CURLOPT_POSTFIELDS, req.body);

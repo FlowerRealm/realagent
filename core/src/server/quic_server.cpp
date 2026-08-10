@@ -37,6 +37,9 @@ struct QuicConn {
     std::string request_body;
     uint64_t request_stream_id = 0;
     bool expecting_body = false;
+    /* 事件推送流（GET /events 订阅） */
+    bool events_subscribed = false;
+    int64_t events_stream = -1;
 };
 
 struct QuicServer::Impl {
@@ -54,6 +57,23 @@ struct QuicServer::Impl {
 
 QuicServer::QuicServer(const QuicServerConfig& cfg) : cfg_(cfg) {}
 QuicServer::~QuicServer() = default;
+
+/* 推送事件到所有订阅 /events 的客户端（SSE 语义，事件循环线程内调用） */
+void QuicServer::push_event(const std::string& type, const std::string& payload) {
+    if (!impl_ || !impl_->running) return;
+    const std::string frame = "event: " + type + "\ndata: " + payload + "\n\n";
+    for (auto& [_, c] : impl_->conns) {
+        if (!c.h3 || !c.events_subscribed || c.events_stream < 0) continue;
+        if (!c.conn || !quiche_conn_is_established(c.conn)) continue;
+        quiche_h3_send_body(c.h3, c.conn, (uint64_t)c.events_stream,
+                            (const uint8_t*)frame.data(), frame.size(), false);
+        // 立即发送（agent 事件要流式到达，不等事件循环下次 tick）
+        uint8_t out[65536];
+        quiche_send_info si{};
+        ssize_t sent = quiche_conn_send(c.conn, out, sizeof(out), &si);
+        if (sent > 0) sendto(impl_->fd, out, sent, 0, (sockaddr*)&c.peer, c.peer_len);
+    }
+}
 
 /* ==================== 证书 ==================== */
 
@@ -123,9 +143,6 @@ void QuicServer::run() {
     }
 
     fprintf(stderr, "[server] QUIC/HTTP3（quiche）运行在 127.0.0.1:%d\n", cfg_.port);
-    quiche_enable_debug_logging([](const char* line, void*) {
-        fprintf(stderr, "[quiche] %s\n", line);
-    }, nullptr);
 
     // 事件循环
     std::vector<pollfd> pfds(1);
@@ -225,27 +242,44 @@ void QuicServer::run() {
                         }
                     } else if (t == QUICHE_H3_EVENT_FINISHED) {
                         // 处理请求
-                        std::string resp_body;
-                        if (c.request_method == "POST" && c.request_path == "/message") {
+                        if (c.request_method == "GET" && c.request_path == "/events") {
+                            // 事件推送流订阅：响应 200（fin=false），持续推送 agent 事件
+                            c.events_subscribed = true;
+                            c.events_stream = stream_id;
+                            quiche_h3_header ev_headers[] = {
+                                {(uint8_t*)":status", 7, (uint8_t*)"200", 3},
+                                {(uint8_t*)"content-type", 12, (uint8_t*)"text/event-stream", 17},
+                            };
+                            quiche_h3_send_response(c.h3, c.conn, stream_id,
+                                                    ev_headers, 2, false);
+                        } else if (c.request_method == "POST" && c.request_path == "/message") {
+                            std::string resp_body;
                             if (impl_->cbs.on_message)
                                 resp_body = impl_->cbs.on_message(c.request_body);
                             else
                                 resp_body = "{\"status\":\"ok\"}";
+                            quiche_h3_header resp_headers[] = {
+                                {(uint8_t*)":status", 7, (uint8_t*)"200", 3},
+                                {(uint8_t*)"content-type", 12, (uint8_t*)"application/json", 16},
+                                {(uint8_t*)"server", 6, (uint8_t*)"realagent", 9},
+                            };
+                            quiche_h3_send_response(c.h3, c.conn, c.request_stream_id,
+                                                    resp_headers, 3, false);
+                            quiche_h3_send_body(c.h3, c.conn, c.request_stream_id,
+                                                (const uint8_t*)resp_body.data(),
+                                                resp_body.size(), true);
                         } else {
-                            resp_body = "{\"error\":\"not found\"}";
+                            const char* err = "{\"error\":\"not found\"}";
+                            quiche_h3_header resp_headers[] = {
+                                {(uint8_t*)":status", 7, (uint8_t*)"404", 3},
+                                {(uint8_t*)"content-type", 12, (uint8_t*)"application/json", 16},
+                            };
+                            quiche_h3_send_response(c.h3, c.conn, c.request_stream_id,
+                                                    resp_headers, 2, false);
+                            quiche_h3_send_body(c.h3, c.conn, c.request_stream_id,
+                                                (const uint8_t*)err, strlen(err), true);
                         }
-                        // HTTP/3 响应头
-                        quiche_h3_header resp_headers[] = {
-                            {(uint8_t*)":status", 7, (uint8_t*)"200", 3},
-                            {(uint8_t*)"content-type", 12, (uint8_t*)"application/json", 16},
-                            {(uint8_t*)"server", 6, (uint8_t*)"realagent", 9},
-                        };
-                        quiche_h3_send_response(c.h3, c.conn, c.request_stream_id,
-                                                resp_headers, 3, false); // fin=false：还有 body
-                        quiche_h3_send_body(c.h3, c.conn, c.request_stream_id,
-                                            (const uint8_t*)resp_body.data(),
-                                            resp_body.size(), true);
-                                                c.request_method.clear();
+                        c.request_method.clear();
                         c.request_path.clear();
                         c.request_body.clear();
                         c.expecting_body = false;
@@ -258,7 +292,7 @@ void QuicServer::run() {
             uint8_t out[65536];
             quiche_send_info send_info{};
             ssize_t sent = quiche_conn_send(c.conn, out, sizeof(out), &send_info);
-                        if (sent > 0) sendto(impl_->fd, out, sent, 0, (sockaddr*)&c.peer, c.peer_len);
+            if (sent > 0) sendto(impl_->fd, out, sent, 0, (sockaddr*)&c.peer, c.peer_len);
         }
 
         // 所有连接：定时器 + 发送挂起数据

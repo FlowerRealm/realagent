@@ -2,12 +2,14 @@
 package client
 
 import (
+	"bufio"
 	"bytes"
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/quic-go/quic-go/http3"
@@ -63,4 +65,37 @@ func (c *Client) Close() {
 	if c.rt != nil {
 		c.rt.Close()
 	}
+}
+
+// Event 是推送流中的一条事件（PROTOCOL.md 帧）
+type Event struct {
+	Type    string // message_start / message_update / tool_execution_* / turn_end ...
+	Payload string // JSON 载荷
+}
+
+// SubscribeEvents 订阅 /events 推送流，把事件持续发送到 ch。
+// 流断开或出错时关闭 ch 返回。阻塞调用（goroutine 中使用）。
+func (c *Client) SubscribeEvents(ch chan<- Event) error {
+	resp, err := c.hc.Get(c.url + "/events")
+	if err != nil {
+		close(ch)
+		return fmt.Errorf("订阅事件流失败: %w", err)
+	}
+	defer resp.Body.Close()
+	defer close(ch)
+
+	sc := bufio.NewScanner(resp.Body)
+	sc.Buffer(make([]byte, 65536), 65536)
+	var evType string
+	for sc.Scan() {
+		line := sc.Text()
+		if strings.HasPrefix(line, "event: ") {
+			evType = strings.TrimPrefix(line, "event: ")
+		} else if strings.HasPrefix(line, "data: ") {
+			payload := strings.TrimPrefix(line, "data: ")
+			ch <- Event{Type: evType, Payload: payload}
+			evType = ""
+		}
+	}
+	return sc.Err()
 }

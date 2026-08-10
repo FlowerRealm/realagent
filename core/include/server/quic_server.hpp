@@ -48,6 +48,9 @@ public:
     /* 设置回调（agent 线程注册） */
     void set_callbacks(const QuicCallbacks& cbs) { cbs_ = cbs; }
 
+    /* 推送事件到所有订阅了 /events 的客户端（agent 事件流，SSE 语义） */
+    void push_event(const std::string& type, const std::string& payload);
+
     /* 运行事件循环（阻塞，信号退出） */
     void run();
     /* 请求停止 */
