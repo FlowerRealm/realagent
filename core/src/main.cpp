@@ -82,6 +82,22 @@ int main(int argc, char** argv) {
         // 返回 agent 最后一条 assistant 文本
         json reply;
         reply["status"] = "ok";
+        const json& msgs = agent.messages();
+        if (msgs.is_array() && msgs.size() > 0) {
+            for (auto it = msgs.as_array().rbegin(); it != msgs.as_array().rend(); ++it) {
+                const json m = json(*it);
+                if (m["role"].as_string() == "assistant") {
+                    const json content = m["content"];
+                    if (content.is_array() && content.size() > 0) {
+                        const json text = content[0]["text"];
+                        if (auto s = text.as_string()) {
+                            reply["reply"] = *s;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
         return reply.dump();
     };
 
