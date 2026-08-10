@@ -19,10 +19,10 @@ import (
 type Client struct {
 	hc  *http.Client
 	rt  *http3.Transport
-	url string
+	url string // 基地址 https://<addr>，路径按端点拼接
 }
 
-// Reply 是 POST /message 的响应
+// Reply 是请求-响应端点的通用响应
 type Reply struct {
 	Status string `json:"status"`
 	Reply  string `json:"reply,omitempty"`
@@ -37,14 +37,14 @@ func New(addr string) *Client {
 	return &Client{
 		hc:  &http.Client{Transport: rt, Timeout: 120 * time.Second},
 		rt:  rt,
-		url: fmt.Sprintf("https://%s/message", addr),
+		url: fmt.Sprintf("https://%s", addr),
 	}
 }
 
-// Send 发送用户消息并等待 agent 完整回复
+// Send 提交用户消息。core 立即返回 {"status":"processing"}，完整回复经 /events 推送流送达。
 func (c *Client) Send(message string) (Reply, error) {
 	body, _ := json.Marshal(map[string]string{"message": message})
-	resp, err := c.hc.Post(c.url, "application/json", bytes.NewReader(body))
+	resp, err := c.hc.Post(c.url+"/message", "application/json", bytes.NewReader(body))
 	if err != nil {
 		return Reply{}, fmt.Errorf("发送失败: %w", err)
 	}
@@ -60,6 +60,28 @@ func (c *Client) Send(message string) (Reply, error) {
 	return r, nil
 }
 
+// RespondApproval 回传审批裁决（POST /approval-response，PROTOCOL.md）
+func (c *Client) RespondApproval(id string, allow bool) error {
+	body, _ := json.Marshal(map[string]any{"id": id, "allow": allow})
+	resp, err := c.hc.Post(c.url+"/approval-response", "application/json", bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("回传审批失败: %w", err)
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("读取审批响应失败: %w", err)
+	}
+	var r Reply
+	if err := json.Unmarshal(data, &r); err != nil {
+		return fmt.Errorf("解析审批响应失败: %s", string(data))
+	}
+	if r.Error != "" {
+		return fmt.Errorf("审批回传被拒: %s", r.Error)
+	}
+	return nil
+}
+
 // Close 关闭传输层
 func (c *Client) Close() {
 	if c.rt != nil {
@@ -69,7 +91,7 @@ func (c *Client) Close() {
 
 // Event 是推送流中的一条事件（PROTOCOL.md 帧）
 type Event struct {
-	Type    string // message_start / message_update / tool_execution_* / turn_end ...
+	Type    string // message_start / message_update / tool_execution_* / turn_end / permission_request ...
 	Payload string // JSON 载荷
 }
 

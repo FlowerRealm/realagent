@@ -1,3 +1,4 @@
+// 用 pty 驱动 TUI：创建伪终端，spawn TUI，发送消息 + 审批交互
 package main
 
 import (
@@ -31,10 +32,12 @@ func main() {
 		}
 	}()
 
-	time.Sleep(5 * time.Second)
-	fmt.Println("\n--- 发送消息 ---")
-	time.Sleep(1 * time.Second)
-	fmt.Fprint(f, "say hi in one word\r")
+	time.Sleep(4 * time.Second)
+	fmt.Println("\n--- 发送消息（触发 bash 工具） ---")
+	fmt.Fprint(f, "use bash to list files in /tmp\r")
+	time.Sleep(10 * time.Second)
+	fmt.Println("\n--- 按 y 允许审批 ---")
+	fmt.Fprint(f, "y")
 	time.Sleep(12 * time.Second)
 	fmt.Println("\n--- 退出 ---")
 	fmt.Fprint(f, "\x03")

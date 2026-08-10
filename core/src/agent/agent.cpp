@@ -10,6 +10,10 @@ Agent::Agent(CoreContext& ctx, Executor& exe) : ctx_(ctx), exe_(exe) {
     messages_ = json::array();
 }
 
+void Agent::reset() {
+    messages_ = json::array();
+}
+
 void Agent::broadcast(const std::string& type, const json& payload) {
     if (ctx_.emit_fn) ctx_.emit_fn(type, payload.dump());
 }

@@ -40,6 +40,9 @@ public:
     /* 会话消息（抽象格式，供持久化/构建 dialog） */
     json& messages() { return messages_; }
 
+    /* 清空会话（/new 命令：新建会话） */
+    void reset();
+
 private:
     /* 构建抽象对话（system/messages/tools） */
     json build_dialog() const;

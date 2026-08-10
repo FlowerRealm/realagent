@@ -97,6 +97,24 @@ int main(int argc, char** argv) {
         auto msg = json::parse(body).value_or(json{});
         const std::string user_input = msg["message"].as_string().value_or("");
         if (user_input.empty()) return std::string("{\"error\":\"empty message\"}");
+
+        // 斜杠命令：会话管理（v1 内置 /new /resume，与 agent 互斥加锁；
+        // session-manager 插件化后置）。命令不启动 agent，直接返回结果。
+        if (user_input[0] == '/') {
+            std::lock_guard<std::mutex> lk(agent_mtx);
+            if (user_input == "/new") {
+                agent.reset(); // 新建会话：清空对话历史
+                return std::string("{\"ok\":true,\"command\":\"new\"}");
+            }
+            if (user_input == "/resume") {
+                // v1 仅报会话统计；完整 JSONL 恢复后置（PLAN.md R9）
+                const int n = (int)agent.messages().size();
+                return std::string("{\"ok\":true,\"command\":\"resume\",\"messages\":" +
+                                   std::to_string(n) + "}");
+            }
+            return std::string("{\"error\":\"unknown command\"}");
+        }
+
         std::thread([&agent, &agent_mtx, user_input]() {
             std::lock_guard<std::mutex> lk(agent_mtx);
             agent.run(user_input);

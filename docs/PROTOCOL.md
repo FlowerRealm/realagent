@@ -55,6 +55,10 @@ data: <json>
 
 完整 message / tool_result 作为独立帧或结束帧，与增量同流保证最终一致。
 
+## 命令（v1）
+
+`POST /command` 端点（`GET /sessions` / `POST /session` 同理）为完整会话管理的最终形态。首版不实现独立端点：斜杠命令（`/new`、`/resume`）由 `POST /message` 的 `message` 字段以 `/` 前缀触发，core 直接返回命令结果 JSON（`{"ok":true,"command":...}`），不启动 agent turn。未识别命令返回 `{"error":"unknown command"}`。`/new` 清空当前会话；`/resume` 首版仅返回会话消息数（`messages`），JSONL 恢复后置。
+
 ## 握手
 
 - 首次连接：QUIC 1-RTT（TLS 1.3）。
