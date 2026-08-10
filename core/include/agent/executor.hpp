@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "extension/loader.hpp"
+#include "agent/approval.hpp"
 
 namespace realagent {
 
@@ -22,12 +23,12 @@ struct ExecResult {
 
 class Executor {
 public:
-    explicit Executor(CoreContext& ctx);
+    explicit Executor(CoreContext& ctx, ApprovalCoordinator& approval);
 
     /* 按名查工具；不存在返回 nullptr */
     const ToolEntry* find_tool(const std::string& name) const;
 
-    /* 权限检查：dangerous 工具经权限插件裁决。ask 在无客户端时按 allow 处理（M5 接入客户端）。 */
+    /* 权限检查：dangerous 工具经权限插件裁决。ASK → 协调器真等用户裁决（ADR-0005）。 */
     bool check_permission(const ToolEntry& tool, const std::string& params_json,
                           std::string* denied_reason);
 
@@ -36,6 +37,7 @@ public:
 
 private:
     CoreContext& ctx_;
+    ApprovalCoordinator& approval_;
 };
 
 } // namespace realagent

@@ -30,8 +30,12 @@ struct QuicServerConfig {
 
 /* QUIC 服务端回调（agent 线程注册） */
 struct QuicCallbacks {
-    /* 收到用户消息 → 启动 agent loop（M6 接入）。返回 JSON 响应字符串。 */
+    /* 收到用户消息 → 投递 agent 线程。返回 JSON 响应字符串。 */
     std::function<std::string(const std::string& body)> on_message;
+    /* 收到审批裁决（POST /approval-response）→ 交给审批协调器 */
+    std::function<void(const std::string& id, bool allow)> on_approval_response;
+    /* 每轮事件循环调用（main 把事件队列 flush 到推送流，ADR-0002 线程模型） */
+    std::function<void()> on_tick;
     /* 新推送流注册（M6 接入：agent 事件推送给客户端） */
     std::function<void(uint64_t stream_id)> on_push_stream;
 };

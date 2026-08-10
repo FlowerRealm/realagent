@@ -23,6 +23,7 @@ add_executable(realagent-core
   src/config.cpp
   src/extension/loader.cpp
   src/agent/executor.cpp
+  src/agent/approval.cpp
   src/agent/agent.cpp
   src/server/quic_server.cpp
 )

@@ -39,6 +39,12 @@ OpenCode 的 Agent Loop（参考）：stateless agentic loop——`Run(userMessa
 
 **事件流实现形态（2026-08-09）**：Agent loop 就是一个 `while(1)`——调 LLM → 逐个收事件 → 产生事件时广播给订阅者列表（fan-out 到推送流/插件/日志）→ 顺序执行工具 → 结果回传 → 直到 LLM 完成。协程仅用于 LLM 流式请求的异步等待。无 generator / 队列-消费者 / 回调链等额外形态。
 
+**线程模型（2026-08-10 补充）**：core 拆两条线：
+- **agent 线程**：跑 `agent.run`（`while(1)` loop 形态不变）。`on_message` 回调只把用户消息投递给 agent 线程并立即返回（POST /message 响应 `{"status":"processing"}`），不阻塞事件循环。
+- **事件循环线程**：持续处理 QUIC/HTTP3（收请求、审批裁决、推送事件）。
+
+**quiche 非线程安全**，agent 线程不能直接调推送流。所有 core → 客户端的推送经**线程安全事件队列**：agent 线程 emit 入队，事件循环每轮（`on_tick`）flush 到推送流。这是审批等待（见 ADR-0005）的必要前提。
+
 ## 后果
 
 - 需要引入异步基础设施（协程，见 ADR-0003）。

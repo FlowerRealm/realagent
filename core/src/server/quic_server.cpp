@@ -24,6 +24,8 @@
 
 #include <quiche.h>
 
+#include "json.hpp"
+
 namespace realagent {
 
 struct QuicConn {
@@ -151,6 +153,9 @@ void QuicServer::run() {
     uint8_t buf[65536];
 
     while (running_ && impl_->running) {
+        // main 注册的钩子：flush 事件队列到推送流（agent 线程 emit → 事件循环投递）
+        if (impl_->cbs.on_tick) impl_->cbs.on_tick();
+
         int rv = poll(pfds.data(), pfds.size(), 1000);
         if (rv < 0) { if (errno == EINTR) continue; break; }
 
@@ -265,6 +270,27 @@ void QuicServer::run() {
                             };
                             quiche_h3_send_response(c.h3, c.conn, c.request_stream_id,
                                                     resp_headers, 3, false);
+                            quiche_h3_send_body(c.h3, c.conn, c.request_stream_id,
+                                                (const uint8_t*)resp_body.data(),
+                                                resp_body.size(), true);
+                        } else if (c.request_method == "POST" && c.request_path == "/approval-response") {
+                            // 审批裁决回传（PROTOCOL.md）→ 审批协调器
+                            std::string resp_body;
+                            if (impl_->cbs.on_approval_response) {
+                                auto b = json::parse(c.request_body).value_or(json{});
+                                const std::string id = b["id"].as_string().value_or("");
+                                const bool allow = b["allow"].as_bool().value_or(false);
+                                impl_->cbs.on_approval_response(id, allow);
+                                resp_body = "{\"status\":\"ok\"}";
+                            } else {
+                                resp_body = "{\"error\":\"no approval handler\"}";
+                            }
+                            quiche_h3_header resp_headers[] = {
+                                {(uint8_t*)":status", 7, (uint8_t*)"200", 3},
+                                {(uint8_t*)"content-type", 12, (uint8_t*)"application/json", 16},
+                            };
+                            quiche_h3_send_response(c.h3, c.conn, c.request_stream_id,
+                                                    resp_headers, 2, false);
                             quiche_h3_send_body(c.h3, c.conn, c.request_stream_id,
                                                 (const uint8_t*)resp_body.data(),
                                                 resp_body.size(), true);

@@ -6,7 +6,8 @@
 
 namespace realagent {
 
-Executor::Executor(CoreContext& ctx) : ctx_(ctx) {}
+Executor::Executor(CoreContext& ctx, ApprovalCoordinator& approval)
+    : ctx_(ctx), approval_(approval) {}
 
 const ToolEntry* Executor::find_tool(const std::string& name) const {
     const auto it = ctx_.tools.find(name);
@@ -17,7 +18,6 @@ bool Executor::check_permission(const ToolEntry& tool, const std::string& params
                                 std::string* denied_reason) {
     if (!tool.def.dangerous) return true; // 只读工具不触发
     // 遍历权限插件：首版 perm-allow-all 返回 ALLOW。
-    // ask：无客户端接入（M5）前按 allow 处理，记录日志。
     bool any_perm_plugin = false;
     for (const auto* p : ctx_.all_plugins) {
         if (!p || !p->api || p->api->type != PLUGIN_TYPE_PERMISSION || !p->api->decide) continue;
@@ -27,9 +27,14 @@ bool Executor::check_permission(const ToolEntry& tool, const std::string& params
             if (denied_reason) *denied_reason = "denied by permission plugin";
             return false;
         }
-        // PLUGIN_PERM_ASK：core 应发询问（M5）；首版按 allow 放行
         if (verdict == PLUGIN_PERM_ASK) {
-            fprintf(stderr, "[perm] %s: ASK 无客户端，首版按 allow\n", tool.def.name);
+            // 审批链路（ADR-0005）：core 发 permission_request → 用户界面裁决 → 回传
+            // agent 线程真等裁决（30s 超时 deny），事件循环线程收 /approval-response 唤醒
+            const auto user_verdict = approval_.await(tool.def.name, params_json);
+            if (user_verdict != PLUGIN_PERM_ALLOW) {
+                if (denied_reason) *denied_reason = "denied by user";
+                return false;
+            }
         }
     }
     if (!any_perm_plugin) {

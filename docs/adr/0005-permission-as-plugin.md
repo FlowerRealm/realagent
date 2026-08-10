@@ -47,3 +47,13 @@
 - 安全检查点独立于工具实现——同一检查点适用于所有危险工具。
 - 权限策略演进不触碰 core 和工具实现。
 - 审批请求在协议层走推送流（全可靠，PROTOCOL.md），裁决经 `POST /approval-response` 回传。
+
+## 审批等待实现（2026-08-10 补充，ADR-0002 线程模型的依赖）
+
+权限插件返回 `ASK` 时，agent **真等用户裁决，绝不按 allow 放行**：
+
+- 询问**只发往用户交互界面（TUI/gui）**，core 不自行裁决。
+- agent 线程：executor 检查点遇 ASK → 发 `permission_request`（事件队列 → 推送流）→ **阻塞在条件变量**等裁决。
+- 事件循环线程：持续收 `POST /approval-response`（body `{id, allow}`）→ 匹配挂起请求 → 唤醒 agent 线程。
+- 超时（30s）按 deny（危险工具默认拒绝，宁可不执行）。
+- 依赖 ADR-0002 线程模型：agent 独立线程 + 事件队列，否则事件循环线程被 agent 占住无法收裁决。

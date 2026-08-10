@@ -10,6 +10,8 @@
 #include <cstdio>
 #include <string>
 #include <thread>
+#include <deque>
+#include <mutex>
 
 #include "config.hpp"
 #include "extension/loader.hpp"
@@ -20,7 +22,8 @@
 using namespace realagent;
 
 static int run_tool_test(CoreContext& ctx) {
-    Executor exe(ctx);
+    ApprovalCoordinator approval; // 测试模式无客户端，ASK 会 30s 超时按 deny
+    Executor exe(ctx, approval);
 
     {
         const auto r = exe.execute("read", "{\"file_path\":\".realagent/extensions/core-tools/plugin.json\"}");
@@ -63,8 +66,20 @@ int main(int argc, char** argv) {
     }
 
     // —— 常驻服务模式 ——
-    Executor exe(ctx);
+    // 线程安全事件队列：agent 线程 emit → 事件循环 on_tick flush 到推送流
+    // （ADR-0002 线程模型：quiche 非线程安全，推送必须在事件循环线程）
+    std::mutex ev_mtx;
+    std::deque<std::pair<std::string, std::string>> ev_queue;
+    ctx.emit_fn = [&ev_mtx, &ev_queue](const std::string& type, const std::string& payload) {
+        std::lock_guard<std::mutex> lk(ev_mtx);
+        ev_queue.emplace_back(type, payload);
+    };
+
+    ApprovalCoordinator approval;
+    approval.set_emit(ctx.emit_fn); // permission_request 也走队列
+    Executor exe(ctx, approval);
     Agent agent(ctx, exe);
+    std::mutex agent_mtx; // 串行化 agent 运行（一次一个任务）
 
     QuicServerConfig scfg;
     // 证书用全局绝对路径（不依赖 cwd）
@@ -75,38 +90,30 @@ int main(int argc, char** argv) {
     }
     QuicServer server(scfg);
 
-    // agent 事件 → 推送流（GET /events 订阅的客户端收到流式事件）
-    ctx.emit_fn = [&server](const std::string& type, const std::string& payload) {
-        server.push_event(type, payload);
-    };
     QuicCallbacks cbs;
-    cbs.on_message = [&agent](const std::string& body) {
-        // POST /message：body 为 {"message":"..."}
-        fprintf(stderr, "[msg] 收到: %.80s\n", body.c_str());
+    cbs.on_message = [&](const std::string& body) {
+        // POST /message：body 为 {"message":"..."}。agent 在独立线程运行
+        // （ADR-0002 线程模型）：不阻塞事件循环，审批等待期间仍能收裁决。
         auto msg = json::parse(body).value_or(json{});
         const std::string user_input = msg["message"].as_string().value_or("");
         if (user_input.empty()) return std::string("{\"error\":\"empty message\"}");
-        agent.run(user_input);
-        // 返回 agent 最后一条 assistant 文本
-        json reply;
-        reply["status"] = "ok";
-        const json& msgs = agent.messages();
-        if (msgs.is_array() && msgs.size() > 0) {
-            for (auto it = msgs.as_array().rbegin(); it != msgs.as_array().rend(); ++it) {
-                const json m = json(*it);
-                if (m["role"].as_string() == "assistant") {
-                    const json content = m["content"];
-                    if (content.is_array() && content.size() > 0) {
-                        const json text = content[0]["text"];
-                        if (auto s = text.as_string()) {
-                            reply["reply"] = *s;
-                            break;
-                        }
-                    }
-                }
-            }
+        std::thread([&agent, &agent_mtx, user_input]() {
+            std::lock_guard<std::mutex> lk(agent_mtx);
+            agent.run(user_input);
+        }).detach();
+        return std::string("{\"status\":\"processing\"}");
+    };
+    cbs.on_approval_response = [&approval](const std::string& id, bool allow) {
+        approval.respond(id, allow);
+    };
+    // 事件循环每轮：把 agent 线程入队的事件 flush 到推送流
+    cbs.on_tick = [&]() {
+        std::deque<std::pair<std::string, std::string>> batch;
+        {
+            std::lock_guard<std::mutex> lk(ev_mtx);
+            batch.swap(ev_queue);
         }
-        return reply.dump();
+        for (auto& [t, p] : batch) server.push_event(t, p);
     };
 
     server.set_callbacks(cbs);
