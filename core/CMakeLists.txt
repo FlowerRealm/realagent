@@ -14,18 +14,24 @@ find_package(spdlog REQUIRED)
 # macOS 的 libcurl 是系统库（SDK 自带头），FindCURL 会把 SDK usr/include 当 include dir
 # 注入为 isystem——与 brew libc++ 头冲突。因此只取库路径，不用 CURL::libcurl target。
 find_package(CURL REQUIRED)
+# quiche（QUIC/HTTP3）：brew install cloudflare-quiche
+find_path(QUICHE_INCLUDE_DIR quiche.h)
+find_library(QUICHE_LIBRARY NAMES quiche)
 
 add_executable(realagent-core
   src/main.cpp
   src/config.cpp
   src/extension/loader.cpp
   src/agent/executor.cpp
+  src/agent/agent.cpp
+  src/server/quic_server.cpp
 )
-target_include_directories(realagent-core PRIVATE include)
+target_include_directories(realagent-core PRIVATE include ${QUICHE_INCLUDE_DIR})
 target_link_libraries(realagent-core PRIVATE
   Boost::json
   spdlog::spdlog
   ${CURL_LIBRARIES}
+  ${QUICHE_LIBRARY}
 )
 
 enable_testing()

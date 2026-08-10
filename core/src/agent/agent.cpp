@@ -23,6 +23,9 @@ static Plugin* find_protocol_plugin(CoreContext& ctx) {
     return nullptr;
 }
 
+/* parse_feed 事件接收器（协议插件 → agent）——前向声明 */
+static void feed_sink(void* sink_ctx, const char* type, const char* payload);
+
 /* —— curl 写回调：把响应体 chunk feed 给协议插件 parse_feed —— */
 
 struct CurlSink {
