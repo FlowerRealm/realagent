@@ -1,0 +1,5 @@
+build/
+.realagent/
+*.o
+*.dylib
+*.so
