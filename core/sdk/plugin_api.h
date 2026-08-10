@@ -110,8 +110,9 @@ typedef void (*plugin_event_sink_t)(void* sink_ctx, const char* type, const char
 
 /* 构造的请求（插件分配内存，core 用完调 api->free 释放） */
 typedef struct {
-    const char* url;  /* 完整请求 URL（含 base_url + 路径） */
-    const char* body; /* 请求体 JSON */
+    const char* url;     /* 完整请求 URL（含 base_url + 路径） */
+    const char* headers; /* JSON 对象：{"Authorization":"Bearer ...","Content-Type":"application/json"} */
+    const char* body;    /* 请求体 JSON */
 } plugin_request_t;
 
 /* ==================== core → 插件 API ==================== */

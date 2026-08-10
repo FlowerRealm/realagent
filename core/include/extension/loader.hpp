@@ -39,6 +39,8 @@ struct CoreContext {
     const Config* config = nullptr;
     std::unordered_map<std::string, ToolEntry> tools;
     std::unordered_map<std::string, CommandEntry> commands;
+    /* 已加载插件（PluginManager::load_all 后填充，供 executor/agent 遍历） */
+    std::vector<Plugin*> all_plugins;
     /* 事件出口：把事件推给客户端（TUI/gui 推送流）。M5 接入，首版可为空。 */
     std::function<void(const std::string& type, const std::string& payload)> emit_fn;
 };

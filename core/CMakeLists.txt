@@ -19,6 +19,7 @@ add_executable(realagent-core
   src/main.cpp
   src/config.cpp
   src/extension/loader.cpp
+  src/agent/executor.cpp
 )
 target_include_directories(realagent-core PRIVATE include)
 target_link_libraries(realagent-core PRIVATE
