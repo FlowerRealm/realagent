@@ -55,8 +55,20 @@ data: <json>
 | `tool_output` | stdout 行 | bash 实时输出 |
 | `tool_execution_start/end` | 工具信息 | 工具生命周期 |
 | `turn_start/end` | 轮次信息 | Turn 生命周期 |
+| `usage` | token 计数 | 模型上报的真实用量（见下） |
 | `permission_request` | 审批问询 | 审批请求（可靠，卡点） |
 | `agent_start/end` | 运行信息 | Agent 生命周期 |
+
+### usage 帧
+
+```json
+{"input": 12345, "output": 842, "cache_read": 0, "cache_write": 0}
+```
+
+- **本次 run 累计**：一次用户输入触发的全部 turn 之和，`POST /message` 起算清零。多 turn 会重发完整历史，`input` 因此逐轮膨胀——这是真实计费口径，core 不做修正。
+- **绝对值，非增量**：客户端覆盖写即可，不累加。丢帧不产生永久偏差。
+- **数据来源是模型上报**，core 与客户端都不估算。协议层从 `/v1/messages` SSE 的 `message_start`（`input_tokens`）与 `message_delta`（`output_tokens`）取值，在插件内合并为完整一组后上报；端点不给 usage 就不发帧（客户端按"无数据"处理，不显示为 0）。
+- 每轮至少两帧（`message_start` 后一帧、`message_delta` 后一帧），`message_delta` 的 usage 帧**先于** `stop` 送出，保证客户端收工时数字已定。
 
 完整 message / tool_result 作为独立帧或结束帧，与增量同流保证最终一致。
 

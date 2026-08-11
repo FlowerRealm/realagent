@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -27,6 +28,8 @@ var (
 	errorStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
 	dimStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
 	approvalStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("205")).Bold(true)
+	spinnerStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("205"))
+	statusStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
 	menuStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
 	menuSelStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("229")).Background(lipgloss.Color("238")).Bold(true)
 )
@@ -99,6 +102,7 @@ type model struct {
 	approval  *pendingApproval // 非 nil = 审批模态（忽略除 y/n 外按键）
 	commands  []client.Command // 斜杠命令列表（GET /commands，启动时拉取）
 	menuSel   int              // 斜杠菜单高亮项（menuMatches 索引）
+	busy      activity         // 读秒状态行（status.go）：模型在干什么 + 已耗时
 }
 
 func initialModel(c *client.Client) model {
@@ -152,7 +156,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, waitEventCmd(m.eventsCh)
 
 	case eventsDone:
+		m.busy.stop()
 		return m, subscribeCmd(m.client) // 断线重连
+
+	case tickMsg:
+		return m, m.busy.tick(v)
 
 	case commandsMsg:
 		if v.err == nil {
@@ -162,8 +170,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case eventMsg:
 		ev := client.Event(v)
-		m.handleEvent(ev)
-		return m, waitEventCmd(m.eventsCh)
+		cmd := m.handleEvent(ev)
+		return m, tea.Batch(cmd, waitEventCmd(m.eventsCh))
 
 	case tea.KeyMsg:
 		return m.handleKey(v)
@@ -175,8 +183,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			switch {
 			case v.err != nil:
 				m.finalize("发送失败: "+v.err.Error(), "error")
+				m.busy.stop()
 			case v.reply.Error != "":
 				m.finalize(v.reply.Error, "error")
+				m.busy.stop()
 			case v.reply.Ok:
 				// 斜杠命令结果（core 返回 {"ok":true,"command":...}），渲染为 info 消息。
 				// plugins 命令携带 data 载荷（[]PluginInfo），可直接展示。
@@ -185,8 +195,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					text = renderPlugins(v.reply.Data)
 				}
 				m.finalize(text, "info")
+				m.busy.stop() // 命令不启动 agent turn，收到结果即收工
 			case v.reply.Reply != "":
 				m.finalize(v.reply.Reply, "assistant")
+				m.busy.stop()
 			}
 		}
 		return m, nil
@@ -307,7 +319,8 @@ func (m *model) submitInput() (tea.Model, tea.Cmd) {
 	m.input = ""
 	m.messages = append(m.messages, message{role: "user", text: input})
 	m.streaming = &message{role: "assistant"}
-	return m, sendCmd(m.client, input)
+	// 读秒从按下 Enter 起算（不等 turn_start，网络往返也是等待）
+	return m, tea.Batch(sendCmd(m.client, input), m.busy.begin("发送中", time.Now()))
 }
 
 // decideApproval 处理审批裁决：记录结果 → 退出审批模态 → 回传 core
@@ -322,12 +335,14 @@ func (m *model) decideApproval(allow bool) (tea.Model, tea.Cmd) {
 	}
 	m.messages = append(m.messages, message{role: "info", text: fmt.Sprintf("🔐 %s工具 %s", verdict, p.tool)})
 	m.approval = nil
-	return m, approvalCmd(m.client, p.id, allow)
+	return m, tea.Batch(approvalCmd(m.client, p.id, allow), m.busy.begin("执行工具", time.Now()))
 }
 
-// handleEvent 处理推送流事件
-func (m *model) handleEvent(ev client.Event) {
+// handleEvent 处理推送流事件，返回需要执行的 tea.Cmd（读秒计时循环的启动）
+func (m *model) handleEvent(ev client.Event) tea.Cmd {
 	switch ev.Type {
+	case "turn_start":
+		return m.busy.begin("思考中", time.Now())
 	case "message_start":
 		if m.streaming == nil {
 			m.streaming = &message{role: "assistant"}
@@ -341,10 +356,12 @@ func (m *model) handleEvent(ev client.Event) {
 			m.streaming = &message{role: "assistant"}
 		}
 		m.streaming.text += d.Delta
+		return m.busy.begin("生成回复", time.Now())
 	case "thinking_start":
 		if m.streaming == nil {
 			m.streaming = &message{role: "assistant"}
 		}
+		return m.busy.begin("思考中", time.Now())
 	case "thinking_update":
 		var d struct {
 			Delta string `json:"delta"`
@@ -354,8 +371,12 @@ func (m *model) handleEvent(ev client.Event) {
 			m.streaming = &message{role: "assistant"}
 		}
 		m.streaming.thinking += d.Delta
+		return m.busy.begin("思考中", time.Now())
 	case "thinking_stop":
 		// 思考块结束：thinking 已累积在 streaming.thinking，无需处理
+	case "usage":
+		// core 给的是本次 run 累计的绝对值：覆盖写，TUI 不做任何算术
+		jsonUnmarshal(ev.Payload, &m.busy.tokens)
 	case "tool_execution_start":
 		var d struct {
 			Name string `json:"name"`
@@ -365,6 +386,7 @@ func (m *model) handleEvent(ev client.Event) {
 			m.streaming = &message{role: "assistant"}
 		}
 		m.streaming.text += "\n" + toolStyle.Render("🔧 "+d.Name+" …")
+		return m.busy.begin(toolVerb(d.Name), time.Now())
 	case "tool_execution_end":
 		var d struct {
 			Name   string `json:"name"`
@@ -378,6 +400,7 @@ func (m *model) handleEvent(ev client.Event) {
 			}
 			m.streaming.text += "\n" + toolStyle.Render("   "+mark+" "+d.Name)
 		}
+		return m.busy.begin("思考中", time.Now()) // 工具完事，等下一轮 LLM
 	case "permission_request":
 		// ADR-0005：core 请求审批（agent 阻塞等待），进入审批模态
 		var d struct {
@@ -387,13 +410,24 @@ func (m *model) handleEvent(ev client.Event) {
 		}
 		jsonUnmarshal(ev.Payload, &d)
 		m.approval = &pendingApproval{id: d.ID, tool: d.Tool, params: string(d.Params)}
+		return m.busy.begin("等待你的审批", time.Now())
 	case "turn_end":
 		m.finalize("", "assistant") // 定稿当前 streaming
+		// 带 tool_uses 的 turn_end 只是本轮结束（下一轮继续跑，读秒不断）；
+		// stop_reason / error 才是真正收工。
+		var d struct {
+			ToolUses int `json:"tool_uses"`
+		}
+		jsonUnmarshal(ev.Payload, &d)
+		if d.ToolUses == 0 {
+			m.busy.stop()
+		}
 	case "message_end":
 		if m.streaming != nil && (m.streaming.text != "" || m.streaming.thinking != "") {
 			m.finalize("", "assistant")
 		}
 	}
+	return nil
 }
 
 // finalize 把 streaming 消息定稿进 messages（text 非空时同时覆盖角色）
@@ -431,7 +465,12 @@ func (m model) View() string {
 	}
 	menuMatches := m.menuMatches()
 	menuLines := len(menuMatches)
-	avail := m.height - 3 - approvalLines - menuLines
+	status := m.busy.render(m.width)
+	statusLines := 0
+	if status != "" {
+		statusLines = 1
+	}
+	avail := m.height - 3 - approvalLines - menuLines - statusLines
 	if avail < 5 {
 		avail = 5
 	}
@@ -458,6 +497,10 @@ func (m model) View() string {
 	}
 	if len(menuMatches) > 0 {
 		b.WriteString(renderMenu(menuMatches, m.menuIndex(menuMatches), m.width))
+	}
+	if status != "" {
+		b.WriteString(status)
+		b.WriteString("\n")
 	}
 	b.WriteString(userStyle.Render("> ") + m.input)
 	return b.String()

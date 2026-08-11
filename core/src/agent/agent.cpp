@@ -13,6 +13,7 @@ Agent::Agent(CoreContext& ctx, Executor& exe) : ctx_(ctx), exe_(exe) {
 
 void Agent::reset() {
     messages_ = json::array();
+    run_usage_ = Usage{};
 }
 
 void Agent::broadcast(const std::string& type, const json& payload) {
@@ -50,7 +51,8 @@ static void feed_sink(void* sink_ctx, const char* type, const char* payload);
 struct CurlSink {
     Plugin* proto;
     LlmOutcome* out;
-    CoreContext* ctx; // 实时广播 message_update 到推送流（流式打字）
+    CoreContext* ctx;   // 实时广播 message_update 到推送流（流式打字）
+    const Usage* base;  // 本次 run 已完成 turn 的 token 累计（广播时叠加当前 turn）
 };
 
 static size_t curl_write_cb(char* ptr, size_t size, size_t nmemb, void* userdata) {
@@ -92,6 +94,21 @@ static void feed_sink(void* sink_ctx, const char* type, const char* payload) {
         tu.name = ev["name"].as_string().value_or("");
         tu.input = ev["input"].is_null() ? "{}" : json(ev["input"]).dump();
         out->tool_uses.push_back(std::move(tu));
+    } else if (t == "usage") {
+        // 插件给的是本次调用的绝对值（后到覆盖先到），累加只在 Agent 跨 turn 做一次。
+        out->usage.input = ev["input"].as_int64().value_or(0);
+        out->usage.output = ev["output"].as_int64().value_or(0);
+        out->usage.cache_read = ev["cache_read"].as_int64().value_or(0);
+        out->usage.cache_write = ev["cache_write"].as_int64().value_or(0);
+        // 推送流里的 usage 帧一律是"本次 run 累计"：已完成 turn + 当前 turn
+        if (s->ctx->emit_fn) {
+            const Usage total = *s->base + out->usage;
+            s->ctx->emit_fn("usage", json{{"input", total.input},
+                                          {"output", total.output},
+                                          {"cache_read", total.cache_read},
+                                          {"cache_write", total.cache_write}}
+                                         .dump());
+        }
     } else if (t == "stop") {
         out->stop_reason = ev["reason"].as_string().value_or("stop");
     }
@@ -125,7 +142,7 @@ bool Agent::llm_call(const json& dialog, LlmOutcome& out) {
     // libcurl 流式 POST
     CURL* curl = curl_easy_init();
     if (!curl) return false;
-    CurlSink sink{proto, &out, &ctx_};
+    CurlSink sink{proto, &out, &ctx_, &run_usage_};
     curl_easy_setopt(curl, CURLOPT_URL, req.url);
     curl_easy_setopt(curl, CURLOPT_POST, 1L);
     curl_easy_setopt(curl, CURLOPT_POSTFIELDS, req.body);
@@ -145,8 +162,8 @@ bool Agent::llm_call(const json& dialog, LlmOutcome& out) {
     if (hdrs) curl_easy_setopt(curl, CURLOPT_HTTPHEADER, hdrs);
 
     CURLcode rc = curl_easy_perform(curl);
-    // 通知插件流结束（flush）
-    proto->api->parse_feed(proto->instance, nullptr, feed_sink, &out);
+    // 通知插件流结束（flush）——sink_ctx 必须与 curl 回调一致（feed_sink 按 CurlSink* 解引用）
+    proto->api->parse_feed(proto->instance, nullptr, feed_sink, &sink);
     curl_easy_cleanup(curl);
     if (hdrs) curl_slist_free_all(hdrs);
     // 释放协议插件分配的请求内存（api->free = delete[]）
@@ -186,6 +203,7 @@ json Agent::build_dialog() const {
 }
 
 void Agent::run(const std::string& user_input) {
+    run_usage_ = Usage{}; // token 计数按"一次用户输入"归零（读秒同口径）
     // 用户消息入会话
     json um;
     um["role"] = "user";
@@ -204,6 +222,7 @@ void Agent::run(const std::string& user_input) {
             broadcast("turn_end", json{{"error", "llm_call failed"}});
             break;
         }
+        run_usage_ += out.usage; // 本轮结账：之后的广播以此为基数
 
         if (!out.tool_uses.empty()) {
             // assistant 消息（thinking + tool_use blocks）入会话

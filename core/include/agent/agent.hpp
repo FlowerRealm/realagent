@@ -9,6 +9,7 @@
  */
 #pragma once
 
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -17,6 +18,28 @@
 #include "agent/executor.hpp"
 
 namespace realagent {
+
+/* token 计数（协议插件的 usage 事件；一次 LLM 调用内为绝对值，跨 turn 由 Agent 累加） */
+struct Usage {
+    int64_t input = 0;
+    int64_t output = 0;
+    int64_t cache_read = 0;
+    int64_t cache_write = 0;
+
+    Usage& operator+=(const Usage& o) {
+        input += o.input;
+        output += o.output;
+        cache_read += o.cache_read;
+        cache_write += o.cache_write;
+        return *this;
+    }
+    Usage operator+(const Usage& o) const {
+        Usage r = *this;
+        r += o;
+        return r;
+    }
+    bool empty() const { return input == 0 && output == 0 && cache_read == 0 && cache_write == 0; }
+};
 
 /* 协议插件的解析结果（一次 LLM 调用的产出） */
 struct LlmOutcome {
@@ -30,6 +53,7 @@ struct LlmOutcome {
     };
     std::vector<ToolUse> tool_uses;
     std::string stop_reason;
+    Usage usage;                         // 本次调用的 token 计数（绝对值，后到覆盖先到）
 };
 
 class Agent {
@@ -56,6 +80,7 @@ private:
     CoreContext& ctx_;
     Executor& exe_;
     json messages_; // 抽象对话历史
+    Usage run_usage_; // 本次 run 已完成 turn 的 token 累计（run/reset 清零）
 };
 
 } // namespace realagent

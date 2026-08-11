@@ -10,6 +10,7 @@
  */
 #include <dlfcn.h>
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -312,6 +313,7 @@ static void test_deepseek_parse_feed(const plugin_api_t* api, plugin_t* inst) {
         std::string thinking;
         int thinking_stops = 0;
         std::string text;
+        std::string usage;
     } sink;
     const auto cb = [](void* ctx, const char* type, const char* payload) {
         auto* s = static_cast<Sink*>(ctx);
@@ -320,8 +322,11 @@ static void test_deepseek_parse_feed(const plugin_api_t* api, plugin_t* inst) {
         else if (t == "thinking_update") s->thinking += payload;
         else if (t == "thinking_stop") ++s->thinking_stops;
         else if (t == "message_update") s->text += payload;
+        else if (t == "usage") s->usage = payload;
     };
     const char* chunk =
+        "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"m1\","
+        "\"usage\":{\"input_tokens\":77}}}\n\n"
         "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,"
         "\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\",\"signature\":\"sig-9\"}}\n\n"
         "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,"
@@ -338,6 +343,67 @@ static void test_deepseek_parse_feed(const plugin_api_t* api, plugin_t* inst) {
     CHECK(sink.thinking.find("想一下") != std::string::npos, "thinking_update 经壳透传");
     CHECK(sink.thinking_stops == 1, "thinking_stop 经壳透传");
     CHECK(sink.text.find("答案") != std::string::npos, "message_update 经壳透传");
+    CHECK(sink.usage.find("77") != std::string::npos, "usage 经壳透传（壳不碰计数）");
+}
+
+/* 测试 5：v1-messages usage 事件（message_start 给 input，message_delta 给 output，合并上报） */
+static void test_v1_usage(const plugin_api_t* api, plugin_t* inst) {
+    printf("[v1-messages usage]\n");
+    struct Sink {
+        std::vector<std::string> usages;
+        std::vector<std::string> order; // 事件顺序（验证 usage 先于 stop）
+    } sink;
+    const auto cb = [](void* ctx, const char* type, const char* payload) {
+        auto* s = static_cast<Sink*>(ctx);
+        const std::string t(type ? type : "");
+        s->order.emplace_back(t);
+        if (t == "usage") s->usages.emplace_back(payload);
+    };
+
+    const char* chunk =
+        "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"m1\","
+        "\"usage\":{\"input_tokens\":1200,\"output_tokens\":1,"
+        "\"cache_read_input_tokens\":300,\"cache_creation_input_tokens\":0}}}\n\n"
+        "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,"
+        "\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n"
+        "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,"
+        "\"delta\":{\"type\":\"text_delta\",\"text\":\"答\"}}\n\n"
+        "event: message_delta\ndata: {\"type\":\"message_delta\","
+        "\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":842}}\n\n";
+    api->parse_feed(inst, chunk, cb, &sink);
+    api->parse_feed(inst, nullptr, cb, &sink);
+
+    CHECK(sink.usages.size() == 2, "产出 2 个 usage 事件（message_start + message_delta）");
+    if (sink.usages.size() == 2) {
+        boost::system::error_code ec;
+        const bj::value first = bj::parse(sink.usages[0], ec);
+        const bj::value last = bj::parse(sink.usages[1], ec);
+        CHECK(!ec, "usage 是合法 JSON");
+        if (!ec) {
+            const auto& f = first.as_object();
+            CHECK(f.at("input").as_int64() == 1200, "首帧 input=1200");
+            CHECK(f.at("cache_read").as_int64() == 300, "首帧 cache_read=300");
+            const auto& l = last.as_object();
+            CHECK(l.at("output").as_int64() == 842, "末帧 output=842");
+            CHECK(l.at("input").as_int64() == 1200,
+                  "末帧仍带 input=1200（缺字段的帧不清零，插件内合并为完整一组）");
+        }
+    }
+    // usage 必须先于 stop（客户端收工时数字已定）
+    const auto usage_pos = std::find(sink.order.begin(), sink.order.end(), "usage");
+    const auto stop_pos = std::find(sink.order.begin(), sink.order.end(), "stop");
+    CHECK(usage_pos < stop_pos, "usage 事件先于 stop 送出");
+
+    // 端点不给 usage：一个 usage 事件都不发（客户端按"无数据"处理，不显示为 0）
+    sink.usages.clear();
+    sink.order.clear();
+    const char* no_usage =
+        "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"m2\"}}\n\n"
+        "event: message_delta\ndata: {\"type\":\"message_delta\","
+        "\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n";
+    api->parse_feed(inst, no_usage, cb, &sink);
+    api->parse_feed(inst, nullptr, cb, &sink);
+    CHECK(sink.usages.empty(), "无 usage 字段时不发 usage 事件（且上条 message 的计数已清零）");
 }
 
 int main() {
@@ -387,6 +453,7 @@ int main() {
                                 "https://api.deepseek.com/anthropic/v1/messages");
     test_deepseek_build_request(ds_api, ds_cfg, "http://127.0.0.1:18080/v1/messages");
     test_deepseek_parse_feed(ds_api, ds_default);
+    test_v1_usage(v1_api, v1a);
 
     if (v1_api->destroy) { v1_api->destroy(v1b); v1_api->destroy(v1a); }
     if (ds_api->destroy) { ds_api->destroy(ds_cfg); ds_api->destroy(ds_default); }
