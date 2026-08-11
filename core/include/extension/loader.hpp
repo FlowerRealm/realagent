@@ -6,6 +6,8 @@
  *  - 解析 plugin.json（名称/描述/版本/ABI/前置依赖/type）
  *  - dlopen + ABI 强校验（PLUGIN_ABI_VERSION）+ 创建实例 + init
  *  - 按前置依赖声明组装嵌套链（ADR-0004）
+ *  - 插件生命周期管理（R15）：known_ 发现登记（loaded/disabled/failed）
+ *    + 运行时 enable/disable（GET /plugins 数据源）
  */
 #pragma once
 
@@ -36,7 +38,7 @@ struct CommandEntry {
 
 /* core 运行上下文：配置 + 注册表 + 事件出口。插件经 plugin_core_t.ctx 访问。 */
 struct CoreContext {
-    const Config* config = nullptr;
+    Config* config = nullptr; // 非 const：plugins 禁用清单写入（Config::set/persist）需写路径
     std::unordered_map<std::string, ToolEntry> tools;
     std::unordered_map<std::string, CommandEntry> commands;
     /* 已加载插件（PluginManager::load_all 后填充，供 executor/agent 遍历） */
@@ -62,6 +64,18 @@ struct Plugin {
     CoreContext* core_ctx = nullptr; // 指向所属 CoreContext
 };
 
+/* 插件状态快照（GET /plugins 数据源；status: loaded / disabled / failed） */
+struct PluginInfo {
+    std::string name;
+    std::string version;
+    std::string type_name;
+    std::string description;
+    std::string dir;
+    std::string status; // loaded / disabled / failed
+    std::string error;  // 加载失败原因（status=failed 时填充）
+    std::vector<std::string> deps;
+};
+
 class PluginManager {
 public:
     explicit PluginManager(CoreContext& ctx);
@@ -70,22 +84,47 @@ public:
     PluginManager(const PluginManager&) = delete;
     PluginManager& operator=(const PluginManager&) = delete;
 
-    /* 扫描 + 加载 + ABI 校验 + init + 嵌套组装。返回失败数量。 */
+    /* 扫描 + 加载 + ABI 校验 + init + 嵌套组装。
+     * 遵守配置 plugins.disabled 禁用清单；返回失败数量。 */
     int load_all();
 
     /* 逆序 destroy + dlclose */
     void shutdown();
 
+    /* 全部已发现插件（loaded/disabled/failed，含失败原因），按发现顺序 */
+    std::vector<PluginInfo> list() const;
+
+    /* 运行时启用：从 known 目录重载 + 移出禁用清单 + persist。未知/加载失败 → false */
+    bool enable(const std::string& name);
+
+    /* 运行时禁用：destroy + dlclose + 注销工具/命令 + 加入禁用清单 + persist。未知 → false */
+    bool disable(const std::string& name);
+
     const std::vector<std::unique_ptr<Plugin>>& plugins() const { return plugins_; }
     Plugin* find(const std::string& name) const;
 
 private:
-    void load_one_dir(const std::string& dir_path);
-    void load_plugin(const std::string& plugin_dir);
+    /* 发现：解析 plugin.json 并登记 known_（元数据/目录）。非插件目录返回 nullptr */
+    PluginInfo* discover(const std::string& plugin_dir);
+    /* 加载主体（load_all 与 enable 共用）：从已发现条目载入。
+     * 成功 → plugins_ 追加 + known_ 状态 loaded；失败 → known_ failed + 日志，返回 false */
+    bool load_plugin(PluginInfo* info);
+    void load_one_dir(const std::string& dir_path, const std::vector<std::string>& disabled);
     void assemble_nested();
+    /* 注销插件注册的 tool/command（owner 匹配） */
+    void unregister_entries(const Plugin* p);
+    /* destroy + dlclose（shutdown / disable 共用） */
+    void destroy(Plugin* p);
+
+    PluginInfo* find_known(const std::string& name);
+    /* 读配置禁用清单（合并树 plugins.disabled 数组，write_disabled 的反向） */
+    std::vector<std::string> read_disabled() const;
+    /* 写配置禁用清单（Config::set + persist） */
+    bool write_disabled(const std::vector<std::string>& list);
 
     CoreContext& ctx_;
-    std::vector<std::unique_ptr<Plugin>> plugins_;
+    std::vector<std::unique_ptr<Plugin>> plugins_; // 仅已加载（消费方遍历此表，语义不变）
+    std::vector<PluginInfo> known_;                // 全部已发现（含 disabled/failed）
 };
 
 } // namespace realagent

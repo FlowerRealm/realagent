@@ -26,8 +26,11 @@ TUI ◀──(2) 长生命周期单向流────────────  c
 |---|---|
 | `POST /message` | 提交用户消息 → 启动 agent turn |
 | `POST /command` | 执行命令（/new /resume 等） |
-| `GET /commands` | 斜杠命令列表 `[{name, description}]`（TUI 菜单数据源，core 是唯一真相） |
+| `GET /commands` | 斜杠命令列表 `[{name, description}]`（TUI 菜单数据源，core 是唯一真相；内置 new/resume 与插件注册命令合并） |
 | `POST /approval-response` | 审批裁决回传（TUI → core） |
+| `GET /plugins` | 插件列表（TUI /plugins 数据源：loaded/disabled/failed + error） |
+| `POST /plugins/enable` | 启用插件（体 `{"name"}`） |
+| `POST /plugins/disable` | 禁用插件（体 `{"name"}`） |
 | `GET /sessions` / `POST /session` | 会话列表 / 新建-恢复 |
 
 ### (2) 推送流（HTTP/3 单向流，SSE 语义）
@@ -59,6 +62,31 @@ data: <json>
 ## 命令（v1）
 
 `POST /command` 端点（`GET /sessions` / `POST /session` 同理）为完整会话管理的最终形态。首版不实现独立端点：斜杠命令（`/new`、`/resume`）由 `POST /message` 的 `message` 字段以 `/` 前缀触发，core 直接返回命令结果 JSON（`{"ok":true,"command":...}`），不启动 agent turn。未识别命令返回 `{"error":"unknown command"}`。`/new` 清空当前会话；`/resume` 首版仅返回会话消息数（`messages`），JSONL 恢复后置。
+
+## 插件管理
+
+`POST /message` 斜杠命令扩展（首个空白分词为命令名），与独立端点返回同一数据形状：
+
+| 斜杠命令 | 行为 | 返回 |
+|---|---|---|
+| `/plugins` | 查看插件列表 | `{"ok":true,"command":"plugins","data":[...]}` |
+| `/plugins enable <n>` | 启用插件 | 同上（`data` 为更新后列表） |
+| `/plugins disable <n>` | 禁用插件 | 同上 |
+| 失败 | — | `{"ok":false,"command":"plugins","error":"..."}` |
+
+### GET /plugins
+
+```json
+[
+  {"name": "core-tools", "version": "0.1.0", "type": "tool",
+   "description": "...", "dir": ".realagent/extensions/core-tools",
+   "status": "loaded", "error": "", "deps": []}
+]
+```
+
+- `status`：`loaded` / `disabled` / `failed`；`error` 仅在 `status=failed` 时填充原因。
+- `POST /plugins/enable` / `POST /plugins/disable` 体为 `{"name"}`，成功返回 `{"ok":true}`，失败（未知插件/加载失败）返回 `{"error":"..."}`。
+- 运行态变更同时写入配置禁用清单（`plugins.disabled`）并持久化到 `.realagent/settings.json`。
 
 ## 握手
 

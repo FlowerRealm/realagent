@@ -89,6 +89,19 @@ static bool ensure_cert(const std::string& cert_file, const std::string& key_fil
     return system(cmd) == 0;
 }
 
+/* ==================== 响应辅助 ==================== */
+
+/* 发 JSON 响应（200 application/json；事件循环线程内调用） */
+static void send_json(QuicConn& c, const std::string& body) {
+    quiche_h3_header resp_headers[] = {
+        {(uint8_t*)":status", 7, (uint8_t*)"200", 3},
+        {(uint8_t*)"content-type", 12, (uint8_t*)"application/json", 16},
+    };
+    quiche_h3_send_response(c.h3, c.conn, c.request_stream_id, resp_headers, 2, false);
+    quiche_h3_send_body(c.h3, c.conn, c.request_stream_id,
+                        (const uint8_t*)body.data(), body.size(), true);
+}
+
 /* ==================== 事件循环 ==================== */
 
 void QuicServer::Impl::cleanup() {
@@ -274,6 +287,36 @@ void QuicServer::run() {
                             quiche_h3_send_body(c.h3, c.conn, c.request_stream_id,
                                                 (const uint8_t*)resp_body.data(),
                                                 resp_body.size(), true);
+                        } else if (c.request_method == "GET" && c.request_path == "/plugins") {
+                            // 插件列表（TUI /plugins 数据源）：loaded/disabled/failed + error
+                            std::string resp_body;
+                            if (impl_->cbs.on_plugins)
+                                resp_body = impl_->cbs.on_plugins();
+                            else
+                                resp_body = "[]";
+                            send_json(c, resp_body);
+                        } else if (c.request_method == "POST" && c.request_path == "/plugins/enable") {
+                            // 启用插件（体 {"name"}）
+                            std::string resp_body;
+                            if (impl_->cbs.on_plugin_enable) {
+                                auto b = json::parse(c.request_body).value_or(json{});
+                                resp_body = impl_->cbs.on_plugin_enable(
+                                    b["name"].as_string().value_or(""));
+                            } else {
+                                resp_body = "{\"error\":\"no plugins handler\"}";
+                            }
+                            send_json(c, resp_body);
+                        } else if (c.request_method == "POST" && c.request_path == "/plugins/disable") {
+                            // 禁用插件（体 {"name"}）
+                            std::string resp_body;
+                            if (impl_->cbs.on_plugin_disable) {
+                                auto b = json::parse(c.request_body).value_or(json{});
+                                resp_body = impl_->cbs.on_plugin_disable(
+                                    b["name"].as_string().value_or(""));
+                            } else {
+                                resp_body = "{\"error\":\"no plugins handler\"}";
+                            }
+                            send_json(c, resp_body);
                         } else if (c.request_method == "POST" && c.request_path == "/message") {
                             std::string resp_body;
                             if (impl_->cbs.on_message)

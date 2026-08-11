@@ -48,8 +48,28 @@ static int run_tool_test(CoreContext& ctx) {
     return 0;
 }
 
+/* GET /plugins 响应：PluginInfo → JSON（字段名与契约逐字一致，type 映射 type_name） */
+static json plugins_payload(const std::vector<PluginInfo>& list) {
+    json arr = json::array();
+    for (const auto& p : list) {
+        json e;
+        e["name"] = p.name;
+        e["version"] = p.version;
+        e["type"] = p.type_name;
+        e["description"] = p.description;
+        e["dir"] = p.dir;
+        e["status"] = p.status;
+        e["error"] = p.error;
+        json deps = json::array();
+        for (const auto& d : p.deps) deps.push_back(d);
+        e["deps"] = std::move(deps);
+        arr.push_back(std::move(e));
+    }
+    return arr;
+}
+
 int main(int argc, char** argv) {
-    const auto cfg = Config::load();
+    auto cfg = Config::load(); // 非 const：CoreContext::config 需写路径（插件禁用清单 persist）
     CoreContext ctx;
     ctx.config = &cfg;
 
@@ -92,9 +112,9 @@ int main(int argc, char** argv) {
 
     QuicCallbacks cbs;
     // 斜杠命令列表（GET /commands，TUI 菜单数据源）。
-    // 与下方 /message 的斜杠命令分支共用同一内置命令集——新增命令两处同步（v1 义务，
-    // 插件化后置：插件命令经 loader 的 register_command 注册表，届时此处改为合并 ctx.commands）。
-    cbs.on_commands = []() {
+    // 内置 new/resume + 插件注册命令（ctx.commands，loader register_command 注册表）合并，
+    // 与下方 /message 的斜杠命令分支共用同一内置命令集——新增内置命令两处同步（v1 义务）。
+    cbs.on_commands = [&ctx]() {
         json arr = json::array();
         {
             json cmd;
@@ -108,6 +128,19 @@ int main(int argc, char** argv) {
             cmd["description"] = "查看当前会话消息数";
             arr.push_back(std::move(cmd));
         }
+        {
+            json cmd;
+            cmd["name"] = "plugins";
+            cmd["description"] = "查看插件列表（/plugins enable|disable <name> 启停插件）";
+            arr.push_back(std::move(cmd));
+        }
+        // 插件注册的斜杠命令（名称不带 '/'，core 是唯一真相源）
+        for (const auto& [name, ce] : ctx.commands) {
+            json cmd;
+            cmd["name"] = name;
+            cmd["description"] = ce.def.description ? ce.def.description : "";
+            arr.push_back(std::move(cmd));
+        }
         return arr.dump();
     };
     cbs.on_message = [&](const std::string& body) {
@@ -118,7 +151,8 @@ int main(int argc, char** argv) {
         if (user_input.empty()) return std::string("{\"error\":\"empty message\"}");
 
         // 斜杠命令：会话管理（v1 内置 /new /resume，与 agent 互斥加锁；
-        // session-manager 插件化后置）。命令不启动 agent，直接返回结果。
+        // session-manager 插件化后置）。插件管理（/plugins）同锁。
+        // 命令不启动 agent，直接返回结果。
         if (user_input[0] == '/') {
             std::lock_guard<std::mutex> lk(agent_mtx);
             if (user_input == "/new") {
@@ -131,6 +165,45 @@ int main(int argc, char** argv) {
                 return std::string("{\"ok\":true,\"command\":\"resume\",\"messages\":" +
                                    std::to_string(n) + "}");
             }
+            // 首空白分词为命令名：/plugins[ enable|disable <name>]
+            const std::string cmd = user_input.substr(0, user_input.find(' '));
+            if (cmd == "/plugins") {
+                const std::string rest = user_input.size() > cmd.size()
+                    ? user_input.substr(cmd.size() + 1) : "";
+                if (!rest.empty()) {
+                    const std::string action = rest.substr(0, rest.find(' '));
+                    const std::string name = rest.size() > action.size()
+                        ? rest.substr(action.size() + 1) : "";
+                    if (action == "enable") {
+                        if (name.empty() || !mgr.enable(name)) {
+                            json err;
+                            err["ok"] = false;
+                            err["command"] = "plugins";
+                            err["error"] = "plugin enable failed: " + name;
+                            return err.dump();
+                        }
+                    } else if (action == "disable") {
+                        if (name.empty() || !mgr.disable(name)) {
+                            json err;
+                            err["ok"] = false;
+                            err["command"] = "plugins";
+                            err["error"] = "plugin disable failed: " + name;
+                            return err.dump();
+                        }
+                    } else {
+                        json err;
+                        err["ok"] = false;
+                        err["command"] = "plugins";
+                        err["error"] = "unknown action: " + action;
+                        return err.dump();
+                    }
+                }
+                json out;
+                out["ok"] = true;
+                out["command"] = "plugins";
+                out["data"] = plugins_payload(mgr.list());
+                return out.dump();
+            }
             return std::string("{\"error\":\"unknown command\"}");
         }
 
@@ -142,6 +215,23 @@ int main(int argc, char** argv) {
     };
     cbs.on_approval_response = [&approval](const std::string& id, bool allow) {
         approval.respond(id, allow);
+    };
+    // —— 插件管理端点（TUI /plugins 命令的数据源） ——
+    // 写操作锁 agent_mtx（对齐 /new 线程纪律：与 agent 运行互斥，避免执行中改注册表）
+    cbs.on_plugins = [&mgr]() { return plugins_payload(mgr.list()).dump(); };
+    cbs.on_plugin_enable = [&mgr, &agent_mtx](const std::string& name) {
+        std::lock_guard<std::mutex> lk(agent_mtx);
+        if (mgr.enable(name)) return std::string("{\"ok\":true}");
+        json err;
+        err["error"] = "plugin enable failed: " + name;
+        return err.dump();
+    };
+    cbs.on_plugin_disable = [&mgr, &agent_mtx](const std::string& name) {
+        std::lock_guard<std::mutex> lk(agent_mtx);
+        if (mgr.disable(name)) return std::string("{\"ok\":true}");
+        json err;
+        err["error"] = "plugin disable failed: " + name;
+        return err.dump();
     };
     // 事件循环每轮：把 agent 线程入队的事件 flush 到推送流
     cbs.on_tick = [&]() {

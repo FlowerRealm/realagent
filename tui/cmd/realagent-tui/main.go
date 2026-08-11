@@ -176,8 +176,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case v.reply.Error != "":
 				m.finalize(v.reply.Error, "error")
 			case v.reply.Ok:
-				// 斜杠命令结果（core 返回 {"ok":true,"command":...}），渲染为 info 消息
-				m.finalize(describeCommand(v.reply.Command, v.reply.Messages), "info")
+				// 斜杠命令结果（core 返回 {"ok":true,"command":...}），渲染为 info 消息。
+				// plugins 命令携带 data 载荷（[]PluginInfo），可直接展示。
+				text := describeCommand(v.reply.Command, v.reply.Messages)
+				if v.reply.Command == "plugins" {
+					text = renderPlugins(v.reply.Data)
+				}
+				m.finalize(text, "info")
 			case v.reply.Reply != "":
 				m.finalize(v.reply.Reply, "assistant")
 			}
@@ -500,6 +505,42 @@ func describeCommand(name string, messages int) string {
 		return fmt.Sprintf("📄 当前会话共 %d 条消息", messages)
 	}
 	return "✅ 命令已执行: /" + name
+}
+
+// renderPlugins 把 /plugins 结果（[]PluginInfo JSON）渲染为 info 消息。
+// 每行：名称 v版本 [type] 状态，failed 附加 error。
+func renderPlugins(data json.RawMessage) string {
+	var list []client.PluginInfo
+	if err := json.Unmarshal(data, &list); err != nil {
+		return "✅ 命令已执行: /plugins" // 载荷解析失败降级为通用提示
+	}
+	if len(list) == 0 {
+		return "✅ /plugins: 未发现插件"
+	}
+	var b strings.Builder
+	for _, p := range list {
+		line := p.Name
+		if p.Version != "" {
+			line += " v" + p.Version
+		}
+		if p.Type != "" {
+			line += " [" + p.Type + "]"
+		}
+		switch p.Status {
+		case "failed":
+			line += errorStyle.Render("  " + p.Status)
+			if p.Error != "" {
+				line += dimStyle.Render("  " + p.Error)
+			}
+		case "disabled":
+			line += toolStyle.Render("  " + p.Status)
+		default: // loaded
+			line += "  " + p.Status
+		}
+		b.WriteString(line)
+		b.WriteString("\n")
+	}
+	return strings.TrimSuffix(b.String(), "\n")
 }
 
 // renderApproval 渲染审批对话框（模态，等待 y/n 裁决）

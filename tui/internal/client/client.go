@@ -24,12 +24,25 @@ type Client struct {
 
 // Reply 是请求-响应端点的通用响应
 type Reply struct {
-	Status   string `json:"status"`
-	Reply    string `json:"reply,omitempty"`
-	Error    string `json:"error,omitempty"`
-	Ok       bool   `json:"ok,omitempty"`
-	Command  string `json:"command,omitempty"`
-	Messages int    `json:"messages,omitempty"`
+	Status   string          `json:"status"`
+	Reply    string          `json:"reply,omitempty"`
+	Error    string          `json:"error,omitempty"`
+	Ok       bool            `json:"ok,omitempty"`
+	Command  string          `json:"command,omitempty"`
+	Data     json.RawMessage `json:"data,omitempty"` // 斜杠命令结果载荷（/plugins 的 []PluginInfo JSON）
+	Messages int             `json:"messages,omitempty"`
+}
+
+// PluginInfo 是一条插件记录（GET /plugins，status: loaded/disabled/failed + error）。
+type PluginInfo struct {
+	Name        string   `json:"name"`
+	Version     string   `json:"version"`
+	Type        string   `json:"type"` // 插件类型（core 的 type_name 映射，契约字段名）
+	Description string   `json:"description"`
+	Dir         string   `json:"dir"`
+	Status      string   `json:"status"`
+	Error       string   `json:"error"`
+	Deps        []string `json:"deps"`
 }
 
 // Command 是一条可用的斜杠命令（GET /commands，core 是唯一真相源）
@@ -107,6 +120,75 @@ func (c *Client) FetchCommands() ([]Command, error) {
 		return nil, fmt.Errorf("解析命令列表失败: %s", string(data))
 	}
 	return cmds, nil
+}
+
+// getJSON 发起 GET 并把响应体 JSON 解码到 v（传指针）。失败返回错误。
+func (c *Client) getJSON(path string, v any) error {
+	resp, err := c.hc.Get(c.url + path)
+	if err != nil {
+		return fmt.Errorf("请求失败: %w", err)
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("读取响应失败: %w", err)
+	}
+	if err := json.Unmarshal(data, v); err != nil {
+		return fmt.Errorf("解析响应失败: %s", string(data))
+	}
+	return nil
+}
+
+// postJSON 发起 POST（JSON 体），返回解析后的 Reply（ok/error 由调用方判断）。
+func (c *Client) postJSON(path string, body any) (Reply, error) {
+	data, _ := json.Marshal(body)
+	resp, err := c.hc.Post(c.url+path, "application/json", bytes.NewReader(data))
+	if err != nil {
+		return Reply{}, fmt.Errorf("请求失败: %w", err)
+	}
+	defer resp.Body.Close()
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return Reply{}, fmt.Errorf("读取响应失败: %w", err)
+	}
+	var r Reply
+	if err := json.Unmarshal(respBody, &r); err != nil {
+		return Reply{}, fmt.Errorf("解析响应失败: %s", string(respBody))
+	}
+	return r, nil
+}
+
+// FetchPlugins 拉取插件列表（GET /plugins，含 loaded/disabled/failed 全部状态）。
+func (c *Client) FetchPlugins() ([]PluginInfo, error) {
+	var list []PluginInfo
+	if err := c.getJSON("/plugins", &list); err != nil {
+		return nil, err
+	}
+	return list, nil
+}
+
+// EnablePlugin 启用插件（POST /plugins/enable，core 从 known dir 重载）。
+func (c *Client) EnablePlugin(name string) error {
+	r, err := c.postJSON("/plugins/enable", map[string]string{"name": name})
+	if err != nil {
+		return err
+	}
+	if r.Error != "" {
+		return fmt.Errorf("启用插件失败: %s", r.Error)
+	}
+	return nil
+}
+
+// DisablePlugin 禁用插件（POST /plugins/disable，core 卸载并持久化禁用清单）。
+func (c *Client) DisablePlugin(name string) error {
+	r, err := c.postJSON("/plugins/disable", map[string]string{"name": name})
+	if err != nil {
+		return err
+	}
+	if r.Error != "" {
+		return fmt.Errorf("禁用插件失败: %s", r.Error)
+	}
+	return nil
 }
 
 // Close 关闭传输层

@@ -2,6 +2,8 @@
 
 #include <dlfcn.h>
 
+#include <algorithm>
+#include <cstdio>
 #include <filesystem>
 #include <fstream>
 
@@ -69,6 +71,19 @@ const plugin_core_api_t k_core_api = {
     .depends_on = api_depends_on,
 };
 
+/* 标记 known_ 条目加载失败：打日志 + 记录原因（保留原有日志行为） */
+void mark_failed(PluginInfo* info, const std::string& reason) {
+    fprintf(stderr, "[extension] %s: %s\n", info->name.c_str(), reason.c_str());
+    info->status = "failed";
+    info->error = reason;
+}
+
+/* 标记 known_ 条目为禁用（不加载） */
+void mark_disabled(PluginInfo* info) {
+    info->status = "disabled";
+    info->error.clear();
+}
+
 } // namespace
 
 PluginManager::PluginManager(CoreContext& ctx) : ctx_(ctx) {}
@@ -77,81 +92,126 @@ PluginManager::~PluginManager() { shutdown(); }
 
 int PluginManager::load_all() {
     int failures = 0;
-    for (const auto& dir : ctx_.config->extension_dirs()) load_one_dir(dir);
+    const auto disabled = read_disabled(); // 遵守配置 plugins.disabled 禁用清单
+    for (const auto& dir : ctx_.config->extension_dirs()) load_one_dir(dir, disabled);
     assemble_nested();
-    // 统计失败：加载数 vs 期望数（首版不做严格计数，失败已打日志）
+    // 统计失败：known_ 中 status=failed 的数量
+    for (const auto& k : known_) {
+        if (k.status == "failed") {
+            ++failures;
+            fprintf(stderr, "[extension] %s: 加载失败: %s\n", k.name.c_str(), k.error.c_str());
+        }
+    }
     return failures;
 }
 
-void PluginManager::load_one_dir(const std::string& dir_path) {
+void PluginManager::load_one_dir(const std::string& dir_path,
+                                 const std::vector<std::string>& disabled) {
     if (!fs::is_directory(dir_path)) return;
     for (const auto& entry : fs::directory_iterator(dir_path)) {
         if (!entry.is_directory()) continue;
-        load_plugin(entry.path().string());
+        PluginInfo* info = discover(entry.path().string());
+        if (!info) continue; // 无 plugin.json / 解析失败（已打日志），不登记 known_
+        if (std::find(disabled.begin(), disabled.end(), info->name) != disabled.end()) {
+            mark_disabled(info); // 禁用清单内：登记为 disabled，不加载
+            fprintf(stderr, "[extension] 已跳过（禁用清单）: %s\n", info->name.c_str());
+            continue;
+        }
+        load_plugin(info);
     }
 }
 
-void PluginManager::load_plugin(const std::string& plugin_dir) {
+PluginInfo* PluginManager::discover(const std::string& plugin_dir) {
     // 解析 plugin.json
     const auto meta_path = fs::path(plugin_dir) / "plugin.json";
     std::ifstream f(meta_path);
-    if (!f) return; // 无 plugin.json 的目录跳过
+    if (!f) return nullptr; // 无 plugin.json 的目录跳过
     std::string text((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
     auto meta = json::parse(text);
     if (!meta) {
         fprintf(stderr, "[extension] 解析 plugin.json 失败: %s\n", plugin_dir.c_str());
-        return;
+        return nullptr;
     }
     const json& m = *meta; // 用链式 operator[]（读缺键返回 null，不抛异常）
     const auto name = m["name"].as_string();
-    if (!name) return;
+    if (!name) return nullptr;
 
-    auto p = std::make_unique<Plugin>();
-    p->dir = plugin_dir;
-    p->name = *name;
-    p->description = m["description"].as_string().value_or("");
-    p->version = m["version"].as_string().value_or("0");
-    p->type_name = m["type"].as_string().value_or("");
-    if (const json deps = m["deps"]; deps.is_array()) {
-        for (const auto& d : deps.as_array()) {
-            if (auto s = json(d).as_string()) p->deps.push_back(*s);
+    // 同名多目录（项目级+全局级均发现）：复用条目，dir/元数据以最后发现为准
+    for (auto& k : known_) {
+        if (k.name == *name) {
+            k.dir = plugin_dir;
+            k.description = m["description"].as_string().value_or("");
+            k.version = m["version"].as_string().value_or("0");
+            k.type_name = m["type"].as_string().value_or("");
+            k.deps.clear();
+            if (const json d = m["deps"]; d.is_array()) {
+                for (const auto& dd : d.as_array())
+                    if (auto s = json(dd).as_string()) k.deps.push_back(*s);
+            }
+            return &k;
         }
     }
 
+    PluginInfo info;
+    info.dir = plugin_dir;
+    info.name = *name;
+    info.description = m["description"].as_string().value_or("");
+    info.version = m["version"].as_string().value_or("0");
+    info.type_name = m["type"].as_string().value_or("");
+    if (const json d = m["deps"]; d.is_array()) {
+        for (const auto& dd : d.as_array())
+            if (auto s = json(dd).as_string()) info.deps.push_back(*s);
+    }
+    known_.push_back(std::move(info));
+    return &known_.back();
+}
+
+bool PluginManager::load_plugin(PluginInfo* info) {
+    // 构造插件实例；元数据取自已发现条目（load_all 与 enable 共用的加载主体）
+    auto p = std::make_unique<Plugin>();
+    p->dir = info->dir;
+    p->name = info->name;
+    p->description = info->description;
+    p->version = info->version;
+    p->type_name = info->type_name;
+    p->deps = info->deps;
+
     // dlopen 插件库（.dylib 优先，次 .so）
     std::string lib_path;
-    for (const auto& cand : {fs::path(plugin_dir) / (name->c_str() + std::string(".dylib")),
-                             fs::path(plugin_dir) / (name->c_str() + std::string(".so"))}) {
+    for (const auto& cand : {fs::path(info->dir) / (info->name + ".dylib"),
+                             fs::path(info->dir) / (info->name + ".so")}) {
         if (fs::exists(cand)) { lib_path = cand.string(); break; }
     }
     if (lib_path.empty()) {
-        fprintf(stderr, "[extension] %s: 找不到插件库 .dylib/.so\n", name->c_str());
-        return;
+        mark_failed(info, "找不到插件库 .dylib/.so");
+        return false;
     }
     p->dl_handle = dlopen(lib_path.c_str(), RTLD_NOW | RTLD_LOCAL);
     if (!p->dl_handle) {
-        fprintf(stderr, "[extension] %s: dlopen 失败: %s\n", name->c_str(), dlerror());
-        return;
+        mark_failed(info, std::string("dlopen 失败: ") + dlerror());
+        return false;
     }
     auto create_fn = reinterpret_cast<plugin_create_fn>(dlsym(p->dl_handle, PLUGIN_CREATE_SYM));
     if (!create_fn) {
-        fprintf(stderr, "[extension] %s: 缺少导出符号 %s\n", name->c_str(), PLUGIN_CREATE_SYM);
+        mark_failed(info, std::string("缺少导出符号 ") + PLUGIN_CREATE_SYM);
         dlclose(p->dl_handle);
-        return;
+        return false;
     }
     p->instance = create_fn(&p->api);
     if (!p->instance || !p->api) {
-        fprintf(stderr, "[extension] %s: plugin_create 失败\n", name->c_str());
+        mark_failed(info, "plugin_create 失败");
         if (p->dl_handle) dlclose(p->dl_handle);
-        return;
+        return false;
     }
     // ABI 强校验
     if (p->api->abi_version != PLUGIN_ABI_VERSION) {
-        fprintf(stderr, "[extension] %s: ABI 版本不符 (插件 %d, core %d)，请重编插件\n",
-                name->c_str(), p->api->abi_version, PLUGIN_ABI_VERSION);
+        char buf[128];
+        snprintf(buf, sizeof buf, "ABI 版本不符 (插件 %d, core %d)，请重编插件",
+                 p->api->abi_version, PLUGIN_ABI_VERSION);
+        mark_failed(info, buf);
         dlclose(p->dl_handle);
         p->dl_handle = nullptr;
-        return;
+        return false;
     }
     // 初始化：core 句柄 ctx 指向 Plugin（api 函数经 Plugin::core_ctx 取 CoreContext）
     p->core_ctx = &ctx_;
@@ -159,12 +219,16 @@ void PluginManager::load_plugin(const std::string& plugin_dir) {
     p->core_handle.ctx = p.get();
     if (p->api->init) {
         if (p->api->init(p->instance, &p->core_handle) != PLUGIN_OK) {
-            fprintf(stderr, "[extension] %s: init 失败\n", name->c_str());
+            fprintf(stderr, "[extension] %s: init 失败\n", p->name.c_str());
         }
     }
     fprintf(stderr, "[extension] 已加载: %s (%s) v%s\n", p->name.c_str(), p->type_name.c_str(),
             p->version.c_str());
+    info->status = "loaded";
+    info->error.clear();
+    info->deps = p->deps; // init 中 depends_on 追加的依赖同步回 known_
     plugins_.push_back(std::move(p));
+    return true;
 }
 
 void PluginManager::assemble_nested() {
@@ -181,14 +245,28 @@ void PluginManager::assemble_nested() {
     }
 }
 
-void PluginManager::shutdown() {
-    for (auto it = plugins_.rbegin(); it != plugins_.rend(); ++it) {
-        auto& p = *it;
-        if (p->instance && p->api && p->api->destroy) p->api->destroy(p->instance);
-        if (p->dl_handle) dlclose(p->dl_handle);
-        p->instance = nullptr;
-        p->dl_handle = nullptr;
+void PluginManager::unregister_entries(const Plugin* p) {
+    // 注销该插件注册的 tool / command（owner 匹配），其余条目不动
+    for (auto it = ctx_.tools.begin(); it != ctx_.tools.end();) {
+        if (it->second.owner == p) it = ctx_.tools.erase(it);
+        else ++it;
     }
+    for (auto it = ctx_.commands.begin(); it != ctx_.commands.end();) {
+        if (it->second.owner == p) it = ctx_.commands.erase(it);
+        else ++it;
+    }
+}
+
+void PluginManager::destroy(Plugin* p) {
+    if (p->instance && p->api && p->api->destroy) p->api->destroy(p->instance);
+    if (p->dl_handle) dlclose(p->dl_handle);
+    p->instance = nullptr;
+    p->dl_handle = nullptr;
+}
+
+void PluginManager::shutdown() {
+    // 逆序销毁（依赖插件先销毁）+ dlclose
+    for (auto it = plugins_.rbegin(); it != plugins_.rend(); ++it) destroy(it->get());
     plugins_.clear();
 }
 
@@ -196,6 +274,94 @@ Plugin* PluginManager::find(const std::string& name) const {
     for (const auto& p : plugins_)
         if (p->name == name) return p.get();
     return nullptr;
+}
+
+std::vector<PluginInfo> PluginManager::list() const { return known_; }
+
+PluginInfo* PluginManager::find_known(const std::string& name) {
+    for (auto& k : known_)
+        if (k.name == name) return &k;
+    return nullptr;
+}
+
+std::vector<std::string> PluginManager::read_disabled() const {
+    std::vector<std::string> out;
+    // 禁用清单存于合并树 plugins.disabled 数组（write_disabled 写入的结构，读取为其反向）
+    const json d = ctx_.config->to_json()["plugins"]["disabled"];
+    if (d.is_array()) {
+        for (const auto& v : d.as_array())
+            if (auto s = json(v).as_string()) out.push_back(*s);
+    }
+    return out;
+}
+
+bool PluginManager::write_disabled(const std::vector<std::string>& list) {
+    // 写入合并树 plugins.disabled 并持久化（契约：Config::set + persist）
+    json plugins;
+    json arr = json::array();
+    for (const auto& n : list) arr.push_back(n);
+    plugins["disabled"] = std::move(arr);
+    ctx_.config->set("plugins", plugins);
+    return ctx_.config->persist();
+}
+
+bool PluginManager::enable(const std::string& name) {
+    PluginInfo* info = find_known(name);
+    if (!info) {
+        fprintf(stderr, "[extension] enable: 未知插件 %s（未发现，无法启用）\n", name.c_str());
+        return false;
+    }
+    if (info->status == "loaded") return true; // 幂等
+
+    // 从 known 目录重载（load_plugin 内部同步 known_ 状态）
+    if (!load_plugin(info)) return false;
+
+    // 移出禁用清单 + persist
+    auto disabled = read_disabled();
+    auto it = std::find(disabled.begin(), disabled.end(), name);
+    if (it != disabled.end()) {
+        disabled.erase(it);
+        if (!write_disabled(disabled)) {
+            // persist 失败：本会话已加载，重启后仍按禁用清单跳过
+            fprintf(stderr, "[extension] enable: %s 移出禁用清单失败（配置未持久化）\n",
+                    name.c_str());
+        }
+    }
+    return true;
+}
+
+bool PluginManager::disable(const std::string& name) {
+    PluginInfo* info = find_known(name);
+    if (!info) {
+        fprintf(stderr, "[extension] disable: 未知插件 %s\n", name.c_str());
+        return false;
+    }
+    if (info->status == "disabled") return true; // 幂等
+
+    // destroy + dlclose + 注销工具/命令（同名多目录 → 全部处理）
+    for (auto it = plugins_.begin(); it != plugins_.end();) {
+        if ((*it)->name != name) {
+            ++it;
+            continue;
+        }
+        unregister_entries(it->get());
+        destroy(it->get());
+        it = plugins_.erase(it);
+    }
+
+    // 加入禁用清单 + persist（failed 插件无实例可销毁，仅登记禁用）
+    auto disabled = read_disabled();
+    if (std::find(disabled.begin(), disabled.end(), name) == disabled.end()) {
+        disabled.push_back(name);
+        if (!write_disabled(disabled)) {
+            fprintf(stderr, "[extension] disable: %s 加入禁用清单失败（配置未持久化）\n",
+                    name.c_str());
+            return false;
+        }
+    }
+    mark_disabled(info);
+    fprintf(stderr, "[extension] 已禁用: %s\n", name.c_str());
+    return true;
 }
 
 } // namespace realagent
