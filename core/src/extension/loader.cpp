@@ -62,6 +62,18 @@ plugin_status_t api_depends_on(plugin_core_t* core, const char* plugin_name) {
     return PLUGIN_OK;
 }
 
+/* get_dependency：嵌套组装（ADR-0004）——外层插件取内层 api + 实例（须已加载） */
+plugin_status_t api_get_dependency(plugin_core_t* core, const char* plugin_name,
+                                   const plugin_api_t** out_api, plugin_t** out_instance) {
+    auto* ctx = ctx_of(core);
+    if (!plugin_name || !out_api || !out_instance || !ctx->find_plugin) return PLUGIN_ERR;
+    auto* dep = ctx->find_plugin(plugin_name);
+    if (!dep || !dep->api || !dep->instance) return PLUGIN_ERR;
+    *out_api = dep->api;
+    *out_instance = dep->instance;
+    return PLUGIN_OK;
+}
+
 const plugin_core_api_t k_core_api = {
     .register_tool = api_register_tool,
     .register_command = api_register_command,
@@ -69,6 +81,7 @@ const plugin_core_api_t k_core_api = {
     .log = api_log,
     .get_config = api_get_config,
     .depends_on = api_depends_on,
+    .get_dependency = api_get_dependency,
 };
 
 /* 标记 known_ 条目加载失败：打日志 + 记录原因（保留原有日志行为） */
@@ -93,7 +106,55 @@ PluginManager::~PluginManager() { shutdown(); }
 int PluginManager::load_all() {
     int failures = 0;
     const auto disabled = read_disabled(); // 遵守配置 plugins.disabled 禁用清单
-    for (const auto& dir : ctx_.config->extension_dirs()) load_one_dir(dir, disabled);
+
+    // 注入按名查已加载插件（api_get_dependency 依赖注入用）
+    ctx_.find_plugin = [this](const std::string& name) -> Plugin* { return find(name); };
+
+    // 第一遍：发现全部（登记 known_），按前置依赖序加载。
+    // 注意：discover 返回 PluginInfo*，指向 known_ 内部元素；known_ 是 vector，
+    // 后续 push_back 会扩容并令悬空指针。故先发现完所有条目（确定 known_ 不再增），
+    // 再取稳定指针压入 pending。
+    for (const auto& dir : ctx_.config->extension_dirs()) {
+        if (!fs::is_directory(dir)) continue;
+        for (const auto& entry : fs::directory_iterator(dir)) {
+            if (!entry.is_directory()) continue;
+            discover(entry.path().string()); // 仅登记 known_，丢弃返回指针
+        }
+    }
+    // known_ 现已稳定（discover 同名复用条目不再 push）——取稳定指针供加载使用
+    std::vector<PluginInfo*> pending;
+    for (auto& k : known_) pending.push_back(&k);
+
+    // 依赖先加载：外层插件 init 中 get_dependency 才能取到内层（嵌套链，ADR-0004）。
+    std::vector<std::string> loaded;
+    while (!pending.empty()) {
+        bool progress = false;
+        for (auto it = pending.begin(); it != pending.end();) {
+            PluginInfo* info = *it;
+            if (std::find(disabled.begin(), disabled.end(), info->name) != disabled.end()) {
+                mark_disabled(info); // 禁用清单内：登记为 disabled，不加载
+                fprintf(stderr, "[extension] 已跳过（禁用清单）: %s\n", info->name.c_str());
+                it = pending.erase(it);
+                progress = true;
+                continue;
+            }
+            // 依赖就绪：已加载，或完全未发现（缺失——由 assemble_nested 报告，不阻塞）
+            const auto dep_ready = [&](const std::string& d) {
+                if (std::find(loaded.begin(), loaded.end(), d) != loaded.end()) return true;
+                return find_known(d) == nullptr;
+            };
+            if (!std::all_of(info->deps.begin(), info->deps.end(), dep_ready)) { ++it; continue; }
+            if (load_plugin(info)) loaded.push_back(info->name);
+            it = pending.erase(it);
+            progress = true;
+        }
+        if (!progress) { // 依赖环 / 缺失依赖：剩余强制加载，错误由 init/assemble_nested 暴露
+            for (auto* info : pending)
+                if (load_plugin(info)) loaded.push_back(info->name);
+            break;
+        }
+    }
+
     assemble_nested();
     // 统计失败：known_ 中 status=failed 的数量
     for (const auto& k : known_) {
@@ -103,22 +164,6 @@ int PluginManager::load_all() {
         }
     }
     return failures;
-}
-
-void PluginManager::load_one_dir(const std::string& dir_path,
-                                 const std::vector<std::string>& disabled) {
-    if (!fs::is_directory(dir_path)) return;
-    for (const auto& entry : fs::directory_iterator(dir_path)) {
-        if (!entry.is_directory()) continue;
-        PluginInfo* info = discover(entry.path().string());
-        if (!info) continue; // 无 plugin.json / 解析失败（已打日志），不登记 known_
-        if (std::find(disabled.begin(), disabled.end(), info->name) != disabled.end()) {
-            mark_disabled(info); // 禁用清单内：登记为 disabled，不加载
-            fprintf(stderr, "[extension] 已跳过（禁用清单）: %s\n", info->name.c_str());
-            continue;
-        }
-        load_plugin(info);
-    }
 }
 
 PluginInfo* PluginManager::discover(const std::string& plugin_dir) {
@@ -135,26 +180,28 @@ PluginInfo* PluginManager::discover(const std::string& plugin_dir) {
     const json& m = *meta; // 用链式 operator[]（读缺键返回 null，不抛异常）
     const auto name = m["name"].as_string();
     if (!name) return nullptr;
+    const std::string name_s = std::string(*name);
 
     // 同名多目录（项目级+全局级均发现）：复用条目，dir/元数据以最后发现为准
     for (auto& k : known_) {
-        if (k.name == *name) {
+        if (k.name == name_s) {
+            std::vector<std::string> new_deps;
+            if (const json d = m["deps"]; d.is_array()) {
+                for (const auto& dd : d.as_array())
+                    if (auto s = json(dd).as_string()) new_deps.push_back(*s);
+            }
             k.dir = plugin_dir;
             k.description = m["description"].as_string().value_or("");
             k.version = m["version"].as_string().value_or("0");
             k.type_name = m["type"].as_string().value_or("");
-            k.deps.clear();
-            if (const json d = m["deps"]; d.is_array()) {
-                for (const auto& dd : d.as_array())
-                    if (auto s = json(dd).as_string()) k.deps.push_back(*s);
-            }
+            k.deps = std::move(new_deps);
             return &k;
         }
     }
 
     PluginInfo info;
     info.dir = plugin_dir;
-    info.name = *name;
+    info.name = name_s;
     info.description = m["description"].as_string().value_or("");
     info.version = m["version"].as_string().value_or("0");
     info.type_name = m["type"].as_string().value_or("");
@@ -232,10 +279,11 @@ bool PluginManager::load_plugin(PluginInfo* info) {
 }
 
 void PluginManager::assemble_nested() {
-    // 嵌套组装（ADR-0004）：插件声明的 deps 在 plugin.json/init 中已收集。
-    // 首版不做跨插件对象注入——依赖关系由 core 记录，真正的
-    // 包裹调用（vendor 调 protocol）在请求管线中按 deps 顺序解析。
-    // TODO(M1): 若某插件声明依赖但目标缺失，标记加载失败。
+    // 嵌套组装（ADR-0004）：插件声明的 deps 在 plugin.json/init 中已收集，
+    // 加载已按拓扑序（内层先）完成。包裹调用由插件自身经 get_dependency 取内层
+    // 接口表实现（壳调协议层）。此处仅校验：声明了依赖但目标未加载 → 报告。
+    // get_dependency 在外层 init 中已对缺失内层返回 PLUGIN_ERR 并 fail，
+    // 这里是兜底日志（针对 init 未自行检查的插件）。
     for (auto& p : plugins_) {
         for (const auto& d : p->deps) {
             if (!find(d)) {

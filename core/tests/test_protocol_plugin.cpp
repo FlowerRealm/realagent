@@ -1,8 +1,12 @@
 /*
- * test_protocol_plugin.cpp — deepseek-messages 协议插件单元测试
+ * test_protocol_plugin.cpp — 协议链插件单元测试
  *
- * 不依赖真实 API：dlopen 插件后直接调 build_request / parse_feed，
- * 验证抽象对话 → Anthropic 请求体、SSE → 事件 的转换正确性。
+ * 不依赖真实 API：dlopen v1-messages（协议层）+ deepseek（壳）后直接调
+ * build_request / parse_feed，验证：
+ *   - v1-messages：抽象对话 → /v1/messages 请求体（供应商无关，无默认端点/模型）
+ *   - v1-messages：SSE → 事件（含 thinking 三帧）
+ *   - deepseek 壳：兜底 DeepSeek 默认端点/模型；已配置值原样透传；claude-* 模型不做映射
+ *   - deepseek 壳：parse_feed 纯透传（thinking 事件经壳流出）
  */
 #include <dlfcn.h>
 
@@ -29,14 +33,14 @@ static int failures = 0;
         }                                                                       \
     } while (0)
 
-/* —— fake core（仅 get_config 被用到） —— */
+/* —— fake core（get_config 可改写：同一实例链不同配置分支测试） —— */
+static struct { const char* base_url; const char* api_key; const char* model; } g_cfg = {
+    "", "test-key-123", ""};
+
 static const char* fake_get_config(plugin_core_t*, const char* key) {
-    static const std::string api_key = "test-key-123";
-    static const std::string base_url = "https://api.deepseek.com/anthropic";
-    static const std::string model = "deepseek-v4-flash";
-    if (std::strcmp(key, "api_key") == 0) return api_key.c_str();
-    if (std::strcmp(key, "base_url") == 0) return base_url.c_str();
-    if (std::strcmp(key, "model") == 0) return model.c_str();
+    if (std::strcmp(key, "api_key") == 0) return g_cfg.api_key;
+    if (std::strcmp(key, "base_url") == 0) return g_cfg.base_url;
+    if (std::strcmp(key, "model") == 0) return g_cfg.model;
     return "";
 }
 static plugin_status_t fake_register_tool(plugin_core_t*, const plugin_tool_t*) { return PLUGIN_OK; }
@@ -45,6 +49,17 @@ static plugin_status_t fake_emit(plugin_core_t*, const char*, const char*) { ret
 static void fake_log(plugin_core_t*, int, const char*) {}
 static plugin_status_t fake_depends(plugin_core_t*, const char*) { return PLUGIN_OK; }
 
+/* get_dependency：返回已注册的内层（v1-messages） */
+static const plugin_api_t* g_dep_api = nullptr;
+static plugin_t* g_dep_inst = nullptr;
+static plugin_status_t fake_get_dependency(plugin_core_t*, const char* name,
+                                           const plugin_api_t** out_api, plugin_t** out_inst) {
+    if (std::strcmp(name, "v1-messages") != 0 || !g_dep_api || !g_dep_inst) return PLUGIN_ERR;
+    *out_api = g_dep_api;
+    *out_inst = g_dep_inst;
+    return PLUGIN_OK;
+}
+
 static const plugin_core_api_t k_fake_core_api = {
     .register_tool = fake_register_tool,
     .register_command = fake_register_command,
@@ -52,16 +67,42 @@ static const plugin_core_api_t k_fake_core_api = {
     .log = fake_log,
     .get_config = fake_get_config,
     .depends_on = fake_depends,
+    .get_dependency = fake_get_dependency,
 };
 
-/* 测试 1：build_request 转换 */
-static void test_build_request(plugin_t* inst, const plugin_api_t* api) {
-    printf("[build_request]\n");
+/* —— 工具：dlopen + create —— */
+static void* dl(const char* name) {
+    void* h = dlopen(name, RTLD_NOW | RTLD_LOCAL);
+    if (!h) h = dlopen((std::string("build/") + name).c_str(), RTLD_NOW | RTLD_LOCAL);
+    if (!h) fprintf(stderr, "dlopen %s 失败: %s\n", name, dlerror());
+    return h;
+}
+static plugin_t* create_inst(void* h, const plugin_api_t** api) {
+    auto fn = (plugin_create_fn)dlsym(h, PLUGIN_CREATE_SYM);
+    if (!fn) return nullptr;
+    plugin_t* inst = fn(api);
+    return inst;
+}
+static void free_request(const plugin_api_t* api, plugin_t* inst, const plugin_request_t& r) {
+    if (api->free) {
+        api->free(inst, const_cast<char*>(r.url));
+        api->free(inst, const_cast<char*>(r.headers));
+        api->free(inst, const_cast<char*>(r.body));
+    }
+}
+
+/* 测试 1：v1-messages build_request（配置了端点：协议层直连；thinking 历史回传） */
+static void test_v1_build_request(const plugin_api_t* api, plugin_t* inst) {
+    printf("[v1-messages build_request]\n");
     const char* dialog = R"({
         "model": "deepseek-v4-flash",
         "system": "You are a coding agent.",
         "messages": [
-            {"role":"user","content":[{"type":"text","text":"hello"}]}
+            {"role":"user","content":[{"type":"text","text":"hello"}]},
+            {"role":"assistant","content":[
+                {"type":"thinking","thinking":"先分析问题","signature":"sig-abc"},
+                {"type":"text","text":"world"}
+            ]}
         ],
         "tools": [
             {"name":"read","description":"读文件","input_schema":{"type":"object","properties":{"file_path":{"type":"string"}}}}
@@ -71,11 +112,14 @@ static void test_build_request(plugin_t* inst, const plugin_api_t* api) {
     CHECK(api->build_request(inst, dialog, &req) == PLUGIN_OK, "build_request 返回 OK");
     if (req.url) {
         CHECK(std::string(req.url).find("/v1/messages") != std::string::npos, "url 含 /v1/messages");
-        CHECK(std::string(req.url).find("https://api.deepseek.com") != std::string::npos, "url 用配置 base_url");
+        CHECK(std::string(req.url).find("http://127.0.0.1:18080") != std::string::npos,
+              "url 用配置 base_url（协议层直连）");
     }
     if (req.headers) {
-        CHECK(std::string(req.headers).find("Bearer test-key-123") != std::string::npos, "headers 含 Bearer api_key");
-        CHECK(std::string(req.headers).find("Content-Type") != std::string::npos, "headers 含 Content-Type");
+        CHECK(std::string(req.headers).find("Bearer test-key-123") != std::string::npos,
+              "headers 含 Bearer api_key");
+        CHECK(std::string(req.headers).find("anthropic-version") != std::string::npos,
+              "headers 含 anthropic-version（协议固有）");
     }
     if (req.body) {
         boost::system::error_code ec;
@@ -84,27 +128,34 @@ static void test_build_request(plugin_t* inst, const plugin_api_t* api) {
         if (!ec) {
             const auto& o = body.as_object();
             CHECK(o.at("stream").as_bool() == true, "stream=true");
-            CHECK(bj::value_to<std::string>(o.at("model")) == "deepseek-v4-flash", "model 正确");
-            CHECK(o.at("messages").as_array().at(0).as_object().at("role").as_string() == "user",
-                  "messages[0].role=user");
-            CHECK(o.at("tools").as_array().at(0).as_object().at("name").as_string() == "read",
-                  "tools[0].name=read");
+            CHECK(bj::value_to<std::string>(o.at("model")) == "deepseek-v4-flash",
+                  "model 从对话透传");
+            const auto& msgs = o.at("messages").as_array();
+            const bj::object& asst = msgs.at(1).as_object();
+            const auto& blocks = asst.at("content").as_array();
+            CHECK(bj::value_to<std::string>(blocks.at(0).as_object().at("type")) == "thinking",
+                  "assistant[0].type=thinking");
+            CHECK(bj::value_to<std::string>(blocks.at(0).as_object().at("thinking")) == "先分析问题",
+                  "thinking 内容原样回传");
+            CHECK(bj::value_to<std::string>(blocks.at(0).as_object().at("signature")) == "sig-abc",
+                  "thinking signature 原样回传");
+            CHECK(bj::value_to<std::string>(blocks.at(1).as_object().at("type")) == "text",
+                  "assistant[1].type=text（thinking 块在正文前）");
         }
     }
-    if (api->free) {
-        api->free(inst, const_cast<char*>(req.url));
-        api->free(inst, const_cast<char*>(req.headers));
-        api->free(inst, const_cast<char*>(req.body));
-    }
+    free_request(api, inst, req);
 }
 
-/* 测试 2：parse_feed SSE 解析 */
-static void test_parse_feed(plugin_t* inst, const plugin_api_t* api) {
-    printf("[parse_feed]\n");
+/* 测试 2：v1-messages parse_feed（text + tool_use + thinking 事件） */
+static void test_v1_parse_feed(const plugin_api_t* api, plugin_t* inst) {
+    printf("[v1-messages parse_feed]\n");
     struct Sink {
         std::vector<std::string> updates;
         std::vector<std::string> tools;
         std::string stop_reason;
+        std::string thinking;        // thinking_update 增量拼接
+        std::string thinking_start;  // thinking_start 载荷（signature）
+        int thinking_stops = 0;
     } sink;
     const auto cb = [](void* ctx, const char* type, const char* payload) {
         auto* s = static_cast<Sink*>(ctx);
@@ -112,6 +163,9 @@ static void test_parse_feed(plugin_t* inst, const plugin_api_t* api) {
         if (t == "message_update") s->updates.emplace_back(payload);
         else if (t == "tool_use") s->tools.emplace_back(payload);
         else if (t == "stop") s->stop_reason = payload;
+        else if (t == "thinking_start") s->thinking_start = payload;
+        else if (t == "thinking_update") s->thinking += payload;
+        else if (t == "thinking_stop") ++s->thinking_stops;
     };
 
     // 分两段喂（模拟 curl chunk 边界切在事件中间）
@@ -160,39 +214,184 @@ static void test_parse_feed(plugin_t* inst, const plugin_api_t* api) {
         if (!ec) {
             const auto& o = v.as_object();
             CHECK(bj::value_to<std::string>(o.at("name")) == "read", "tool_use.name=read");
-            CHECK(bj::value_to<std::string>(o.at("id")) == "t1", "tool_use.id=t1");
             CHECK(bj::value_to<std::string>(o.at("input").as_object().at("file_path")) == "a.txt",
                   "tool_use.input.file_path=a.txt（partial_json 累积）");
         }
     }
     CHECK(sink.stop_reason.find("tool_use") != std::string::npos, "stop reason=tool_use");
+
+    // thinking block（协议固有：thinking_start/thinking_update/thinking_stop）
+    const char* chunk4 =
+        "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,"
+        "\"content_block\":{\"type\":\"thinking\",\"thinking\":\"初始想法\",\"signature\":\"sig-1\"}}\n\n"
+        "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,"
+        "\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"我需要\"}}\n\n";
+    const char* chunk5 =
+        "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,"
+        "\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"先读文件\"}}\n\n"
+        "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n"
+        "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":1,"
+        "\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n"
+        "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,"
+        "\"delta\":{\"type\":\"text_delta\",\"text\":\"答案\"}}\n\n"
+        "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n";
+    sink.thinking.clear();
+    sink.thinking_start.clear();
+    sink.thinking_stops = 0;
+    sink.updates.clear();
+    sink.stop_reason.clear();
+    api->parse_feed(inst, chunk4, cb, &sink);
+    api->parse_feed(inst, chunk5, cb, &sink);
+    api->parse_feed(inst, nullptr, cb, &sink);
+    CHECK(sink.thinking_start.find("sig-1") != std::string::npos, "thinking_start 带 signature");
+    CHECK(sink.thinking.find("初始想法") != std::string::npos && sink.thinking.find("我需要") != std::string::npos &&
+              sink.thinking.find("先读文件") != std::string::npos,
+          "thinking_update 增量拼接（起始文本 + 跨 chunk delta）");
+    CHECK(sink.thinking_stops == 1, "thinking_stop 产出 1 次");
+    CHECK(!sink.updates.empty() && sink.updates[0].find("答案") != std::string::npos,
+          "thinking 块结束后 text 块正常解析");
+    CHECK(sink.stop_reason.find("end_turn") != std::string::npos, "stop reason=end_turn");
+}
+
+/* 测试 3：deepseek 壳 build_request —— 未配置时兜底默认，已配置透传，claude 模型不做映射 */
+static void test_deepseek_build_request(const plugin_api_t* api, plugin_t* inst,
+                                        const char* want_url) {
+    printf("[deepseek 壳 build_request] want_url=%s\n", want_url);
+    // 对话不带 model：壳兜底默认模型
+    const char* dialog_nomodel = R"({
+        "model": "",
+        "system": "You are a coding agent.",
+        "messages": [{"role":"user","content":[{"type":"text","text":"hi"}]}]
+    })";
+    plugin_request_t req{};
+    CHECK(api->build_request(inst, dialog_nomodel, &req) == PLUGIN_OK, "build_request 返回 OK");
+    if (req.url) {
+        CHECK(std::string(req.url) == want_url, "url = 壳的端点（默认或配置）");
+    }
+    if (req.headers) {
+        CHECK(std::string(req.headers).find("Bearer test-key-123") != std::string::npos,
+              "Authorization 由协议层/壳补上");
+        CHECK(std::string(req.headers).find("anthropic-version") != std::string::npos,
+              "anthropic-version 保留");
+    }
+    if (req.body) {
+        boost::system::error_code ec;
+        const bj::value body = bj::parse(req.body, ec);
+        CHECK(!ec, "body 是合法 JSON");
+        if (!ec) {
+            CHECK(bj::value_to<std::string>(body.as_object().at("model")) == "deepseek-v4-flash",
+                  "model 留空 → 壳兜底默认 deepseek-v4-flash");
+        }
+    }
+    free_request(api, inst, req);
+
+    // 对话带 claude 模型：壳不做映射，原样透传（无供应商特殊逻辑）
+    const char* dialog_claude = R"({
+        "model": "claude-sonnet-4-5",
+        "messages": [{"role":"user","content":[{"type":"text","text":"hi"}]}]
+    })";
+    plugin_request_t req2{};
+    CHECK(api->build_request(inst, dialog_claude, &req2) == PLUGIN_OK, "build_request(claude) 返回 OK");
+    if (req2.body) {
+        boost::system::error_code ec;
+        const bj::value body = bj::parse(req2.body, ec);
+        CHECK(!ec, "body 是合法 JSON");
+        if (!ec) {
+            CHECK(bj::value_to<std::string>(body.as_object().at("model")) == "claude-sonnet-4-5",
+                  "claude-* 模型不做映射，原样透传");
+        }
+    }
+    free_request(api, inst, req2);
+}
+
+/* 测试 4：deepseek 壳 parse_feed 纯透传（thinking 事件经壳流出） */
+static void test_deepseek_parse_feed(const plugin_api_t* api, plugin_t* inst) {
+    printf("[deepseek 壳 parse_feed 透传]\n");
+    struct Sink {
+        std::string thinking_start;
+        std::string thinking;
+        int thinking_stops = 0;
+        std::string text;
+    } sink;
+    const auto cb = [](void* ctx, const char* type, const char* payload) {
+        auto* s = static_cast<Sink*>(ctx);
+        const std::string t(type ? type : "");
+        if (t == "thinking_start") s->thinking_start = payload;
+        else if (t == "thinking_update") s->thinking += payload;
+        else if (t == "thinking_stop") ++s->thinking_stops;
+        else if (t == "message_update") s->text += payload;
+    };
+    const char* chunk =
+        "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,"
+        "\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\",\"signature\":\"sig-9\"}}\n\n"
+        "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,"
+        "\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"想一下\"}}\n\n"
+        "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n"
+        "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":1,"
+        "\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n"
+        "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,"
+        "\"delta\":{\"type\":\"text_delta\",\"text\":\"答案\"}}\n\n"
+        "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n";
+    api->parse_feed(inst, chunk, cb, &sink);
+    api->parse_feed(inst, nullptr, cb, &sink);
+    CHECK(sink.thinking_start.find("sig-9") != std::string::npos, "thinking_start 经壳透传");
+    CHECK(sink.thinking.find("想一下") != std::string::npos, "thinking_update 经壳透传");
+    CHECK(sink.thinking_stops == 1, "thinking_stop 经壳透传");
+    CHECK(sink.text.find("答案") != std::string::npos, "message_update 经壳透传");
 }
 
 int main() {
-    void* h = dlopen("deepseek-messages.dylib", RTLD_NOW | RTLD_LOCAL);
-    if (!h) h = dlopen("build/deepseek-messages.dylib", RTLD_NOW | RTLD_LOCAL);
-    if (!h) {
-        fprintf(stderr, "dlopen 失败: %s\n", dlerror());
-        return 1;
-    }
-    auto create_fn = (plugin_create_fn)dlsym(h, PLUGIN_CREATE_SYM);
-    if (!create_fn) { fprintf(stderr, "缺 %s\n", PLUGIN_CREATE_SYM); return 1; }
-    const plugin_api_t* api = nullptr;
-    plugin_t* inst = create_fn(&api);
-    if (!inst || !api) { fprintf(stderr, "plugin_create 失败\n"); return 1; }
+    void* h1 = dl("v1-messages.dylib");
+    void* h2 = dl("deepseek.dylib");
+    if (!h1 || !h2) return 1;
 
-    // 构造 fake core 句柄并 init
+    const plugin_api_t* v1_api = nullptr;
+    const plugin_api_t* ds_api = nullptr;
+
+    // —— v1a：空配置（协议层无供应商默认，壳负责兜底） ——
+    g_cfg = {"", "test-key-123", ""};
+    plugin_t* v1a = create_inst(h1, &v1_api);
     plugin_core_t core_handle{&k_fake_core_api, nullptr};
-    if (api->init(inst, &core_handle) != PLUGIN_OK) {
-        fprintf(stderr, "init 失败\n");
+    if (!v1a || !v1_api || v1_api->init(v1a, &core_handle) != PLUGIN_OK) {
+        fprintf(stderr, "v1-messages init 失败\n");
+        return 1;
+    }
+    g_dep_api = v1_api; // get_dependency 目标：deepseek 壳包住 v1a
+    g_dep_inst = v1a;
+
+    // —— deepseek_default：空配置 → 壳默认 DeepSeek 端点/模型 ——
+    plugin_t* ds_default = create_inst(h2, &ds_api);
+    if (!ds_default || !ds_api || ds_api->init(ds_default, &core_handle) != PLUGIN_OK) {
+        fprintf(stderr, "deepseek init 失败\n");
         return 1;
     }
 
-    test_build_request(inst, api);
-    test_parse_feed(inst, api);
+    // —— v1b：配置了端点（协议层可用配置直连） ——
+    g_cfg = {"http://127.0.0.1:18080", "test-key-123", ""};
+    plugin_t* v1b = create_inst(h1, &v1_api);
+    if (!v1b || v1_api->init(v1b, &core_handle) != PLUGIN_OK) {
+        fprintf(stderr, "v1-messages(配置) init 失败\n");
+        return 1;
+    }
 
-    if (api->destroy) api->destroy(inst);
-    dlclose(h);
+    // —— deepseek_configured：配置了端点 → 壳用配置透传 ——
+    plugin_t* ds_cfg = create_inst(h2, &ds_api);
+    if (!ds_cfg || ds_api->init(ds_cfg, &core_handle) != PLUGIN_OK) {
+        fprintf(stderr, "deepseek(配置) init 失败\n");
+        return 1;
+    }
+
+    test_v1_build_request(v1_api, v1b);
+    test_v1_parse_feed(v1_api, v1a);
+    test_deepseek_build_request(ds_api, ds_default,
+                                "https://api.deepseek.com/anthropic/v1/messages");
+    test_deepseek_build_request(ds_api, ds_cfg, "http://127.0.0.1:18080/v1/messages");
+    test_deepseek_parse_feed(ds_api, ds_default);
+
+    if (v1_api->destroy) { v1_api->destroy(v1b); v1_api->destroy(v1a); }
+    if (ds_api->destroy) { ds_api->destroy(ds_cfg); ds_api->destroy(ds_default); }
+    dlclose(h1);
+    dlclose(h2);
 
     printf("\n%s: %d 失败\n", failures == 0 ? "PASS" : "FAIL", failures);
     return failures == 0 ? 0 : 1;

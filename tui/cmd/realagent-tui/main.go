@@ -23,6 +23,7 @@ var (
 	userStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("43")).Bold(true)
 	assistantStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
 	toolStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Italic(true)
+	thinkingStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("245")).Italic(true)
 	errorStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
 	dimStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
 	approvalStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("205")).Bold(true)
@@ -33,8 +34,9 @@ var (
 // ==================== 消息模型 ====================
 
 type message struct {
-	role string // "user" / "assistant" / "tool" / "error" / "info"
-	text string
+	role     string // "user" / "assistant" / "tool" / "error" / "info"
+	text     string
+	thinking string // 模型思考过程（DeepSeek v4 reasoning，渲染为 dim 斜体块）
 }
 
 // ==================== 事件订阅（推送流 → tea.Msg） ====================
@@ -339,6 +341,21 @@ func (m *model) handleEvent(ev client.Event) {
 			m.streaming = &message{role: "assistant"}
 		}
 		m.streaming.text += d.Delta
+	case "thinking_start":
+		if m.streaming == nil {
+			m.streaming = &message{role: "assistant"}
+		}
+	case "thinking_update":
+		var d struct {
+			Delta string `json:"delta"`
+		}
+		jsonUnmarshal(ev.Payload, &d)
+		if m.streaming == nil {
+			m.streaming = &message{role: "assistant"}
+		}
+		m.streaming.thinking += d.Delta
+	case "thinking_stop":
+		// 思考块结束：thinking 已累积在 streaming.thinking，无需处理
 	case "tool_execution_start":
 		var d struct {
 			Name string `json:"name"`
@@ -373,7 +390,7 @@ func (m *model) handleEvent(ev client.Event) {
 	case "turn_end":
 		m.finalize("", "assistant") // 定稿当前 streaming
 	case "message_end":
-		if m.streaming != nil && m.streaming.text != "" {
+		if m.streaming != nil && (m.streaming.text != "" || m.streaming.thinking != "") {
 			m.finalize("", "assistant")
 		}
 	}
@@ -386,7 +403,7 @@ func (m *model) finalize(text string, role string) {
 			m.streaming.text = text
 			m.streaming.role = role
 		}
-		if m.streaming.text != "" || m.streaming.role == "error" {
+		if m.streaming.text != "" || m.streaming.thinking != "" || m.streaming.role == "error" {
 			m.messages = append(m.messages, *m.streaming)
 		}
 		m.streaming = nil
@@ -422,31 +439,11 @@ func (m model) View() string {
 	var lines []string
 	// 定稿消息
 	for _, msg := range m.messages {
-		style := dimStyle
-		prefix := ""
-		switch msg.role {
-		case "user":
-			style = userStyle
-			prefix = "> "
-		case "assistant":
-			style = assistantStyle
-		case "error":
-			style = errorStyle
-			prefix = "! "
-		case "tool":
-			style = toolStyle
-		case "info":
-			prefix = ""
-		}
-		for _, line := range strings.Split(msg.text, "\n") {
-			lines = append(lines, style.Render(prefix+line))
-		}
+		lines = append(lines, renderMessage(msg)...)
 	}
-	// streaming 部分
-	if m.streaming != nil && m.streaming.text != "" {
-		for _, line := range strings.Split(m.streaming.text, "\n") {
-			lines = append(lines, assistantStyle.Render(line))
-		}
+	// streaming 部分（思考块 + 正文，role=assistant）
+	if m.streaming != nil && (m.streaming.text != "" || m.streaming.thinking != "") {
+		lines = append(lines, renderMessage(*m.streaming)...)
 	}
 	if len(lines) > avail {
 		lines = lines[len(lines)-avail:]
@@ -464,6 +461,37 @@ func (m model) View() string {
 	}
 	b.WriteString(userStyle.Render("> ") + m.input)
 	return b.String()
+}
+
+// msgStyle 返回消息角色的样式与前缀
+func msgStyle(role string) (lipgloss.Style, string) {
+	switch role {
+	case "user":
+		return userStyle, "> "
+	case "assistant":
+		return assistantStyle, ""
+	case "error":
+		return errorStyle, "! "
+	case "tool":
+		return toolStyle, ""
+	}
+	return dimStyle, "" // info / 未知
+}
+
+// renderMessage 把一条消息渲染为样式行：思考块（dim 头 + 斜体内容）在前，正文在后
+func renderMessage(msg message) []string {
+	var out []string
+	if msg.thinking != "" {
+		out = append(out, dimStyle.Render("💭 思考过程"))
+		for _, line := range strings.Split(msg.thinking, "\n") {
+			out = append(out, thinkingStyle.Render(line))
+		}
+	}
+	style, prefix := msgStyle(msg.role)
+	for _, line := range strings.Split(msg.text, "\n") {
+		out = append(out, style.Render(prefix+line))
+	}
+	return out
 }
 
 // renderMenu 渲染斜杠命令菜单（输入行上方）：▸ 高亮当前项，描述按宽度截断

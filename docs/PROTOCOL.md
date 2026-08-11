@@ -51,6 +51,7 @@ data: <json>
 |---|---|---|
 | `message_update` | delta 文本 | LLM 流式增量 |
 | `message_start/end` | 消息结构 | 消息生命周期 |
+| `thinking_start/update/stop` | signature / delta / 空 | 模型思考过程（DeepSeek v4 reasoning），流式增量与 message_update 同语义 |
 | `tool_output` | stdout 行 | bash 实时输出 |
 | `tool_execution_start/end` | 工具信息 | 工具生命周期 |
 | `turn_start/end` | 轮次信息 | Turn 生命周期 |

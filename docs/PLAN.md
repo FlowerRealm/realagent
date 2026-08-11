@@ -101,19 +101,21 @@ M6 TUI              → M7 集成与测试
 ## M4：Provider 插件
 
 **交付物**
-- deepseek-messages 插件：/v1/messages 构造 + SSE 解析（成对）
+- v1-messages 插件（协议层）：`/v1/messages` 构造 + SSE 解析（成对，供应商中立，无默认端点/模型）
+- deepseek 壳插件（供应商壳）：`deps: v1-messages`，包住协议层，兜底 DeepSeek 默认（嵌套链，ADR-0004）
 - libcurl 出站流式请求（HTTP/1.1，出站 Provider 通信）
-- 请求管线（core 收集 → 协议插件构造 → 发出 → 解析 → 事件流）
+- 请求管线（core 收集 → 协议链入口构造 → 发出 → 解析 → 事件流）
 
 **技术要点**
-- 端点默认 `https://api.deepseek.com/anthropic`，模型默认 `deepseek-v4-flash`（或 `deepseek-v4-pro`）。
+- 协议/供应商拆分：`/v1/messages` 是协议（多家公司共用），协议层不识别供应商；供应商默认值下沉到壳。
+- 端点默认 `https://api.deepseek.com/anthropic`，模型默认 `deepseek-v4-flash`——均为壳兜底，协议层无默认。
 - 可配置：api_key（env `ANTHROPIC_API_KEY`）、base_url（env `DEEPSEEK_BASE_URL`）、model（env `DEEPSEEK_MODEL`）。base_url 与 api_key 同级重要（代理/网关用户必须能自定义端点）。
-- DeepSeek 兼容端点细节（已查证）：tools/tool_use/tool_result 全支持；tool_choice 四模式全支持；stream 全支持；`cache_control` 被忽略（首版无需 vendor 层）；thinking 的 budget_tokens 忽略；claude-haiku/sonnet 名映射到 deepseek-v4-flash。
-- vendor 嵌套层首版不单独实现，保留为架构接口（ADR-0004）。
+- DeepSeek 兼容端点细节（已查证）：tools/tool_use/tool_result 全支持；tool_choice 四模式全支持；stream 全支持；`cache_control` 被忽略；thinking 的 budget_tokens 忽略；thinking 块带 signature（回传历史用）。
+- 壳不做模型映射：`claude-*` 原样透传（供应商特殊逻辑一律不进壳）。
 
 **风险**
 - [x] **R10: DeepSeek /v1/messages 与 Anthropic 标准差异**——**已解除（2026-08-09）**：工具调用 + 流式完整支持（见上）。
-- [ ] R11: 流式解析增量 → 事件流 message_update 的对接
+- [x] R11: 流式解析增量 → 事件流 message_update 的对接——**已完成（2026-08-10）**：thinking 三帧 + message_update + tool_use 全打通，经壳透传。
 
 ## M5：QUIC 通信
 
@@ -163,14 +165,14 @@ M6 TUI              → M7 集成与测试
 | R1 | Clang C++26 协程支持度 | ✅ 已解除（C++20 协程核心足够） |
 | R2 | msquic 集成 | ✅ 已废弃（换 ngtcp2+nghttp3） |
 | R3 | 插件事件订阅接口 | ✅ 已定（单入口 on_event 分发） |
-| R4 | 嵌套组装时机 | ⬜ 待定（M1） |
+| R4 | 嵌套组装时机 | ✅ 已实施（2026-08-10）：拓扑序加载 + get_dependency 依赖注入 |
 | R5 | edit +x-0 的 LLM 描述 | ✅ 已定（创建语义进描述） |
 | R6 | bash 流式输出 | ✅ 已定（tool_output 帧走推送流） |
 | R7 | 事件流实现形态 | ✅ 已定（while(1) + fan-out） |
 | R8 | 中止传播模型 | ⬜ 待定（M3） |
 | R9 | JSONL 会话 schema | ✅ 已定（类型区分 + call_id） |
 | R10 | DeepSeek 协议差异 | ✅ 已解除（工具调用 + 流式全支持） |
-| R11 | 流式解析 → message_update 对接 | ⬜ 待定（M4） |
+| R11 | 流式解析 → message_update 对接 | ✅ 已完成（2026-08-10）：thinking 三帧 + message_update + tool_use 经壳透传 |
 | R12 | HTTP/3 应用层 | ✅ 已解决（ngtcp2+nghttp3） |
 | R13 | 推送可靠性机制 | ✅ 已定（全可靠流） |
 | R14 | quic-go 支持度 | ✅ 已解除 |

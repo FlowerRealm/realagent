@@ -2,6 +2,7 @@
 
 #include <curl/curl.h>
 
+#include <algorithm>
 #include <cstdio>
 
 namespace realagent {
@@ -18,13 +19,27 @@ void Agent::broadcast(const std::string& type, const json& payload) {
     if (ctx_.emit_fn) ctx_.emit_fn(type, payload.dump());
 }
 
-/* 找到协议插件（首版 deepseek-messages） */
+/* 找到协议链入口：最外层协议插件（未被其他协议插件依赖者）。
+ * 嵌套链（ADR-0004）：deepseek 壳声明 deps: v1-messages → deepseek 是入口，
+ * agent 只调最外层，链内包裹由插件自身经 get_dependency 完成。 */
 static Plugin* find_protocol_plugin(CoreContext& ctx) {
-    for (auto* p : ctx.all_plugins)
-        if (p && p->api && p->api->type == PLUGIN_TYPE_PROTOCOL && p->api->build_request &&
-            p->api->parse_feed)
-            return p;
-    return nullptr;
+    Plugin* fallback = nullptr;
+    for (auto* p : ctx.all_plugins) {
+        if (!p || !p->api || p->api->type != PLUGIN_TYPE_PROTOCOL ||
+            !p->api->build_request || !p->api->parse_feed)
+            continue;
+        if (!fallback) fallback = p;
+        bool depended = false;
+        for (auto* q : ctx.all_plugins) {
+            if (!q || q == p || !q->api || q->api->type != PLUGIN_TYPE_PROTOCOL) continue;
+            if (std::find(q->deps.begin(), q->deps.end(), p->name) != q->deps.end()) {
+                depended = true;
+                break;
+            }
+        }
+        if (!depended) return p; // 无插件依赖它 = 链的入口
+    }
+    return fallback; // 无嵌套：退化为第一个协议插件
 }
 
 /* parse_feed 事件接收器（协议插件 → agent）——前向声明 */
@@ -60,6 +75,17 @@ static void feed_sink(void* sink_ctx, const char* type, const char* payload) {
         out->text += ev["delta"].as_string().value_or("");
         // 实时广播增量（推送流 → TUI 打字效果）
         if (s->ctx->emit_fn) s->ctx->emit_fn("message_update", payload);
+    } else if (t == "thinking_start") {
+        out->thinking_signature = ev["signature"].as_string().value_or("");
+        // 实时广播（推送流 → TUI 思考块生命周期：开始）
+        if (s->ctx->emit_fn) s->ctx->emit_fn("thinking_start", payload);
+    } else if (t == "thinking_update") {
+        out->thinking += ev["delta"].as_string().value_or("");
+        // 实时广播增量（推送流 → TUI 思考块打字效果）
+        if (s->ctx->emit_fn) s->ctx->emit_fn("thinking_update", payload);
+    } else if (t == "thinking_stop") {
+        // 思考块结束：thinking 已累积；广播收尾帧
+        if (s->ctx->emit_fn) s->ctx->emit_fn("thinking_stop", payload);
     } else if (t == "tool_use") {
         LlmOutcome::ToolUse tu;
         tu.id = ev["id"].as_string().value_or("");
@@ -69,6 +95,17 @@ static void feed_sink(void* sink_ctx, const char* type, const char* payload) {
     } else if (t == "stop") {
         out->stop_reason = ev["reason"].as_string().value_or("stop");
     }
+}
+
+/* 把 thinking 块追加进 assistant content（Anthropic 格式：thinking + signature）。
+ * 思考块恒在正文/tool_use 块之前（协议约定顺序）。 */
+static void append_thinking(json& content, const LlmOutcome& out) {
+    if (out.thinking.empty()) return;
+    json b;
+    b["type"] = "thinking";
+    b["thinking"] = out.thinking;
+    if (!out.thinking_signature.empty()) b["signature"] = out.thinking_signature;
+    content.push_back(b);
 }
 
 bool Agent::llm_call(const json& dialog, LlmOutcome& out) {
@@ -127,7 +164,8 @@ bool Agent::llm_call(const json& dialog, LlmOutcome& out) {
 
 json Agent::build_dialog() const {
     json dialog;
-    dialog["model"] = ctx_.config->get("model", "deepseek-v4-flash");
+    // model 不设供应商默认值——外层 provider 壳插件负责兜底
+    dialog["model"] = ctx_.config->get("model");
     dialog["system"] = "You are a helpful coding agent.";
     // 工具定义（注册表 → schema）
     json tools = json::array();
@@ -168,10 +206,11 @@ void Agent::run(const std::string& user_input) {
         }
 
         if (!out.tool_uses.empty()) {
-            // assistant 消息（tool_use blocks）入会话
+            // assistant 消息（thinking + tool_use blocks）入会话
             json am;
             am["role"] = "assistant";
             am["content"] = json::array();
+            append_thinking(am["content"], out);
             for (const auto& tu : out.tool_uses) {
                 json b;
                 b["type"] = "tool_use";
@@ -208,6 +247,7 @@ void Agent::run(const std::string& user_input) {
         json am;
         am["role"] = "assistant";
         am["content"] = json::array();
+        append_thinking(am["content"], out);
         json b;
         b["type"] = "text";
         b["text"] = out.text;

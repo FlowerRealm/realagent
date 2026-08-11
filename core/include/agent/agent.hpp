@@ -21,6 +21,8 @@ namespace realagent {
 /* 协议插件的解析结果（一次 LLM 调用的产出） */
 struct LlmOutcome {
     std::string text;                    // 累积文本（非 tool_use 时）
+    std::string thinking;                // 思考内容（DeepSeek v4 reasoning，流式累积）
+    std::string thinking_signature;      // thinking 块签名（Anthropic 格式，回传历史用）
     struct ToolUse {
         std::string id;
         std::string name;

@@ -50,23 +50,35 @@ _Avoid_: `plugin`（本项目统一用 Extension 命名）
 
 ## Provider（模型提供商）
 
-LLM 后端的统一抽象。**适配本身走插件机制**（ADR-0004）：core 收集对话信息 → 协议层插件构造请求 → 供应商插件精修 → core 发出。core 不内置任何具体协议知识。
+LLM 后端的统一抽象。**适配本身走插件机制**（ADR-0004）：core 收集对话信息 → 协议层插件构造请求 → 供应商壳兜底默认 → core 发出。core 不内置任何具体协议知识，也不认任何供应商身份。
 
 _Avoid_: `backend`、`LLM client`（指 core 内置模块时）
 
+## v1-messages（协议层）
+
+`/v1/messages` 是一种协议，不是某家公司的私有物——Anthropic、DeepSeek、OpenRouter 等多家公司都实现同一端点。协议层插件只懂协议固有内容（请求结构 + SSE 解析 + thinking 块），不识别任何供应商、不设端点/模型默认值。
+
+_Avoid_: `anthropic api`（Anthropic 是一家公司，协议本身供应商中立）
+
+## Provider 壳（供应商适配）
+
+在协议层之上包裹的薄壳插件：声明 `deps` 包住协议层，core 据此解析协议链入口；运行时兜底该供应商的默认配置（端点/模型/凭证），不做协议改写、不做模型映射。同一协议层下可叠加多个供应商壳（DeepSeek、OpenRouter…），core 按依赖链自动选入口。
+
+供应商壳与协议层是**嵌套链**关系（装饰器模式）：壳 init 中经 `get_dependency` 取内层接口表，build_request 调内层构造初步请求再补默认，parse_feed 纯透传。
+
+_Avoid_: `vendor shim`、`provider plugin`（壳是供应商身份 + 兜底，不是协议层）
+
 ## Protocol Plugin（协议层插件）
 
-负责把对话信息按特定协议构造为请求体、并解析该协议响应的插件（**成对**：构造 + 解析）。现阶段仅 Anthropic `/v1/messages`。
+负责把对话信息按特定协议构造为请求体、并解析该协议响应的插件（**成对**：构造 + 解析）。现阶段 `/v1/messages`（多家公司共用，详见 [[v1-messages]]）。协议层供应商中立，默认配置下沉到 [[Provider 壳]]。
 
 _Avoid_: `provider plugin`（协议层 ≠ 供应商层，见下）
 
 ## Provider Adapter（供应商适配）
 
-在协议层之上精修请求的插件（缓存字段、端点特化等）。同一协议下可有多个供应商适配。
+在协议层之上包裹的薄壳插件（见 [[Provider 壳]]）：声明前置依赖包住协议层，core 据此解析协议链入口；兜底该供应商的默认配置（端点/模型/凭证），不做协议改写、不做模型映射。复用同一协议层，新增供应商只写新壳。
 
-供应商适配与协议层插件是**嵌套链**关系（装饰器模式）：供应商插件包裹协议层插件，先调内层构造初步请求，再精修。非平行两层。
-
-_Avoid_: `vendor shim`
+供应商壳与协议层插件是**嵌套链**关系（装饰器模式）：壳经 `get_dependency` 取协议层接口表，build_request 调协议层初步构造再补默认，parse_feed 纯透传。core 不内置任何供应商默认值。
 
 ## Plugin Nesting（插件嵌套）
 
@@ -106,6 +118,12 @@ _Avoid_: `conversation`（除非与 Session 区分出明确差异）
 
 _Avoid_: `branch`（Git 语义混淆）
 
+## Thinking（思考）
+
+assistant 消息中的一种 content block 类型（`{"type":"thinking","thinking":...,"signature":...}`），承载模型的推理过程（DeepSeek v4 reasoning）。抽象对话里原样保留，协议插件负责与 Anthropic `thinking` 块互转；core 流式转发 `thinking_update` 事件，TUI 渲染为 dim 斜体块。signature 用于回传历史时校验，缺失时省略。
+
+_Avoid_: `reasoning_content`（DeepSeek 原生 API 字段名，Anthropic 兼容端点映射为 thinking 块）
+
 ---
 
 ## 已拍板（暂存，随决策更新）
@@ -135,7 +153,7 @@ _Avoid_: `branch`（Git 语义混淆）
 - 配置机制：core 统一收集（env 优先 > `.realagent/settings.json` > 默认值），插件初始化时由 core 注入其配置节（api_key / base_url / model 等），插件不自行解析配置。
 - 协议插件可配项：base_url（默认 `https://api.deepseek.com/anthropic`）、api_key（env `ANTHROPIC_API_KEY`）、model（默认 `deepseek-v4-flash`）。base_url 与 api_key 同级可配——代理/网关用户必须能自定义端点。
 - 斜杠命令：插件可注册（通用能力，不限 type）。首版只留接口不实现；`/quit` core 内置，`/new` `/resume` 由 session-manager 插件提供。
-- 首版插件清单：见 `docs/plugins.md`（4 个插件：deepseek-messages / core-tools / perm-allow-all / session-manager）。
+- 首版插件清单：见 `docs/plugins.md`（6 个插件：v1-messages + deepseek 壳协议链 / core-tools / perm-allow-all / perm-ask / session-manager）。
 - 通信协议：见 `docs/PROTOCOL.md`（可靠流请求-响应 + 推送流，全可靠 + 0-RTT）。
 - 架构：core 为常驻服务，客户端（TUI/未来 gui）通过 **QUIC/HTTP3** 连接（ADR-0006）。REST 语义（POST /message、POST /approval-response 等）；推送流为 HTTP/3 长生命周期单向流（SSE 语义），**全可靠**（增量与事件无差别，QUIC 可靠流原生保证，无自建确认机制）。0-RTT 快握手。支持公网部署。
 - QUIC 库：core 用 **ngtcp2 + nghttp3**（标准 QUIC + HTTP/3 C 组合，2026-08-09 替换 msquic——msquic 纯传输层无 H3 语义）；TUI 用 quic-go。
@@ -171,8 +189,10 @@ realagent/                  # 主仓库（core + tui + docs）
 
 realagent-plugins/          # 独立 git 仓库（插件单开）
 ├── sdk/                    #   引用 core 仓库的 SDK 头（submodule 或拷贝）
-├── deepseek-messages/      #   type = protocol
+├── v1-messages/           #   type = protocol（协议层：/v1/messages 构造 + 解析，供应商中立）
+├── deepseek/               #   type = protocol（供应商壳：包住 v1-messages，兜底 DeepSeek 默认）
 ├── core-tools/             #   type = tool（read/edit/bash）
 ├── perm-allow-all/         #   type = permission
+├── perm-ask/               #   type = permission（审批链路测试：裁决 ask）
 └── session-manager/        #   type = session
 ```

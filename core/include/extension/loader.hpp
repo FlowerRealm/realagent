@@ -45,6 +45,8 @@ struct CoreContext {
     std::vector<Plugin*> all_plugins;
     /* 事件出口：把事件推给客户端（TUI/gui 推送流）。M5 接入，首版可为空。 */
     std::function<void(const std::string& type, const std::string& payload)> emit_fn;
+    /* 按名查已加载插件（loader 注入：插件 api 函数经此实现 get_dependency 依赖注入） */
+    std::function<Plugin*(const std::string& name)> find_plugin;
 };
 
 /* 加载的插件实例 */
@@ -109,7 +111,6 @@ private:
     /* 加载主体（load_all 与 enable 共用）：从已发现条目载入。
      * 成功 → plugins_ 追加 + known_ 状态 loaded；失败 → known_ failed + 日志，返回 false */
     bool load_plugin(PluginInfo* info);
-    void load_one_dir(const std::string& dir_path, const std::vector<std::string>& disabled);
     void assemble_nested();
     /* 注销插件注册的 tool/command（owner 匹配） */
     void unregister_entries(const Plugin* p);

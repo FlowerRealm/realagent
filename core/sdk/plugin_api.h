@@ -66,6 +66,7 @@ enum {
 
 typedef struct plugin_core   plugin_core_t;   /* core 实例（core 分配，插件只持有） */
 typedef struct plugin_plugin plugin_t;        /* 插件实例（插件分配） */
+typedef struct plugin_api    plugin_api_t;    /* 插件接口表（前向声明：core API 引用它） */
 
 /* ==================== 事件 ==================== */
 
@@ -131,6 +132,11 @@ typedef struct {
     const char* (*get_config)(plugin_core_t*, const char* key);
     /* 声明前置插件依赖（嵌套组装，ADR-0004）：name 为被包裹插件的插件名 */
     plugin_status_t (*depends_on)(plugin_core_t*, const char* plugin_name);
+    /* 获取前置依赖插件的接口表 + 实例（嵌套组装，ADR-0004）：
+     * 外层插件 init 中调用，之后直接调内层 api（build_request / parse_feed / free）。
+     * 内层须已加载（core 按依赖序加载保证）；失败返回 PLUGIN_ERR。 */
+    plugin_status_t (*get_dependency)(plugin_core_t*, const char* plugin_name,
+                                      const plugin_api_t** out_api, plugin_t** out_instance);
 } plugin_core_api_t;
 
 struct plugin_core {
@@ -140,7 +146,7 @@ struct plugin_core {
 
 /* ==================== 插件导出的接口表 ==================== */
 
-typedef struct {
+typedef struct plugin_api {
     int abi_version;  /* 必须 == PLUGIN_ABI_VERSION，core 加载时强校验 */
     plugin_type_t type;
     const char* name; /* 插件名，须与 plugin.json 一致 */
