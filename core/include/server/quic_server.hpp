@@ -34,6 +34,8 @@ struct QuicCallbacks {
     std::function<std::string(const std::string& body)> on_message;
     /* 收到审批裁决（POST /approval-response）→ 交给审批协调器 */
     std::function<void(const std::string& id, bool allow)> on_approval_response;
+    /* 斜杠命令列表（GET /commands）→ JSON 数组 [{name,description},...]。core 是唯一真相源。 */
+    std::function<std::string()> on_commands;
     /* 每轮事件循环调用（main 把事件队列 flush 到推送流，ADR-0002 线程模型） */
     std::function<void()> on_tick;
     /* 新推送流注册（M6 接入：agent 事件推送给客户端） */

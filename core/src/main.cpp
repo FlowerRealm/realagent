@@ -91,6 +91,25 @@ int main(int argc, char** argv) {
     QuicServer server(scfg);
 
     QuicCallbacks cbs;
+    // 斜杠命令列表（GET /commands，TUI 菜单数据源）。
+    // 与下方 /message 的斜杠命令分支共用同一内置命令集——新增命令两处同步（v1 义务，
+    // 插件化后置：插件命令经 loader 的 register_command 注册表，届时此处改为合并 ctx.commands）。
+    cbs.on_commands = []() {
+        json arr = json::array();
+        {
+            json cmd;
+            cmd["name"] = "new";
+            cmd["description"] = "新建会话，清空当前对话";
+            arr.push_back(std::move(cmd));
+        }
+        {
+            json cmd;
+            cmd["name"] = "resume";
+            cmd["description"] = "查看当前会话消息数";
+            arr.push_back(std::move(cmd));
+        }
+        return arr.dump();
+    };
     cbs.on_message = [&](const std::string& body) {
         // POST /message：body 为 {"message":"..."}。agent 在独立线程运行
         // （ADR-0002 线程模型）：不阻塞事件循环，审批等待期间仍能收裁决。

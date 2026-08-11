@@ -257,6 +257,23 @@ void QuicServer::run() {
                             };
                             quiche_h3_send_response(c.h3, c.conn, stream_id,
                                                     ev_headers, 2, false);
+                        } else if (c.request_method == "GET" && c.request_path == "/commands") {
+                            // 斜杠命令列表（TUI 菜单数据源）。core 持有唯一真相，TUI 只渲染。
+                            std::string resp_body;
+                            if (impl_->cbs.on_commands)
+                                resp_body = impl_->cbs.on_commands();
+                            else
+                                resp_body = "[]";
+                            quiche_h3_header resp_headers[] = {
+                                {(uint8_t*)":status", 7, (uint8_t*)"200", 3},
+                                {(uint8_t*)"content-type", 12, (uint8_t*)"application/json", 16},
+                                {(uint8_t*)"server", 6, (uint8_t*)"realagent", 9},
+                            };
+                            quiche_h3_send_response(c.h3, c.conn, c.request_stream_id,
+                                                    resp_headers, 3, false);
+                            quiche_h3_send_body(c.h3, c.conn, c.request_stream_id,
+                                                (const uint8_t*)resp_body.data(),
+                                                resp_body.size(), true);
                         } else if (c.request_method == "POST" && c.request_path == "/message") {
                             std::string resp_body;
                             if (impl_->cbs.on_message)

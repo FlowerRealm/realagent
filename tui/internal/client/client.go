@@ -24,9 +24,18 @@ type Client struct {
 
 // Reply 是请求-响应端点的通用响应
 type Reply struct {
-	Status string `json:"status"`
-	Reply  string `json:"reply,omitempty"`
-	Error  string `json:"error,omitempty"`
+	Status   string `json:"status"`
+	Reply    string `json:"reply,omitempty"`
+	Error    string `json:"error,omitempty"`
+	Ok       bool   `json:"ok,omitempty"`
+	Command  string `json:"command,omitempty"`
+	Messages int    `json:"messages,omitempty"`
+}
+
+// Command 是一条可用的斜杠命令（GET /commands，core 是唯一真相源）
+type Command struct {
+	Name        string `json:"name"`        // 不带 '/'
+	Description string `json:"description"` // 菜单展示用
 }
 
 // New 创建客户端。addr 形如 "127.0.0.1:12345"。
@@ -80,6 +89,24 @@ func (c *Client) RespondApproval(id string, allow bool) error {
 		return fmt.Errorf("审批回传被拒: %s", r.Error)
 	}
 	return nil
+}
+
+// FetchCommands 拉取可用斜杠命令列表（GET /commands）。失败返回错误（TUI 降级为无菜单）。
+func (c *Client) FetchCommands() ([]Command, error) {
+	resp, err := c.hc.Get(c.url + "/commands")
+	if err != nil {
+		return nil, fmt.Errorf("获取命令列表失败: %w", err)
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("读取命令列表失败: %w", err)
+	}
+	var cmds []Command
+	if err := json.Unmarshal(data, &cmds); err != nil {
+		return nil, fmt.Errorf("解析命令列表失败: %s", string(data))
+	}
+	return cmds, nil
 }
 
 // Close 关闭传输层

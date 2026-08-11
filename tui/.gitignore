@@ -1,2 +1,4 @@
-realagent-tui
-quic-test
+# 忽略本目录下误生成的二进制（go build 输出到 cwd 时的产物）。
+# 必须锚定根：否则会吞掉同名的源码目录 cmd/realagent-tui/、cmd/quic-test/。
+/realagent-tui
+/quic-test

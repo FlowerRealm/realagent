@@ -26,6 +26,7 @@ TUI ◀──(2) 长生命周期单向流────────────  c
 |---|---|
 | `POST /message` | 提交用户消息 → 启动 agent turn |
 | `POST /command` | 执行命令（/new /resume 等） |
+| `GET /commands` | 斜杠命令列表 `[{name, description}]`（TUI 菜单数据源，core 是唯一真相） |
 | `POST /approval-response` | 审批裁决回传（TUI → core） |
 | `GET /sessions` / `POST /session` | 会话列表 / 新建-恢复 |
 
