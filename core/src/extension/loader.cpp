@@ -84,6 +84,9 @@ const plugin_core_api_t k_core_api = {
     .get_dependency = api_get_dependency,
 };
 
+/* plugin_type_t 的名字，下标即枚举值（0 位空着）。枚举是真相，字符串只是它的名字。 */
+constexpr std::string_view kTypeNames[] = {"", "protocol", "tool", "permission", "session"};
+
 /* 标记 known_ 条目加载失败：打日志 + 记录原因（保留原有日志行为） */
 void mark_failed(PluginInfo* info, const std::string& reason) {
     fprintf(stderr, "[extension] %s: %s\n", info->name.c_str(), reason.c_str());
@@ -121,9 +124,12 @@ int PluginManager::load_all() {
             discover(entry.path().string()); // 仅登记 known_，丢弃返回指针
         }
     }
-    // known_ 现已稳定（discover 同名复用条目不再 push）——取稳定指针供加载使用
+    // known_ 现已稳定（discover 同名复用条目不再 push）——取稳定指针供加载使用。
+    // 发现阶段已判失败（plugin.json 元数据不全）的不进 pending：否则 load_plugin
+    // 会拿"找不到插件库"覆盖掉真正的失败原因。
     std::vector<PluginInfo*> pending;
-    for (auto& k : known_) pending.push_back(&k);
+    for (auto& k : known_)
+        if (k.status != "failed") pending.push_back(&k);
 
     // 依赖先加载：外层插件 init 中 get_dependency 才能取到内层（嵌套链，ADR-0004）。
     std::vector<std::string> loaded;
@@ -177,40 +183,33 @@ PluginInfo* PluginManager::discover(const std::string& plugin_dir) {
         fprintf(stderr, "[extension] 解析 plugin.json 失败: %s\n", plugin_dir.c_str());
         return nullptr;
     }
-    const json& m = *meta; // 用链式 operator[]（读缺键返回 null，不抛异常）
-    const auto name = m["name"].as_string();
-    if (!name) return nullptr;
-    const std::string name_s = std::string(*name);
+    // 严格解构：缺键即失败，不补空串
+    const auto man = strict_from<PluginManifest>(*meta, meta_path.string());
 
-    // 同名多目录（项目级+全局级均发现）：复用条目，dir/元数据以最后发现为准
-    for (auto& k : known_) {
-        if (k.name == name_s) {
-            std::vector<std::string> new_deps;
-            if (const json d = m["deps"]; d.is_array()) {
-                for (const auto& dd : d.as_array())
-                    if (auto s = json(dd).as_string()) new_deps.push_back(*s);
-            }
-            k.dir = plugin_dir;
-            k.description = m["description"].as_string().value_or("");
-            k.version = m["version"].as_string().value_or("0");
-            k.type_name = m["type"].as_string().value_or("");
-            k.deps = std::move(new_deps);
-            return &k;
-        }
+    // 登记条目：同名多目录（项目级+全局级均发现）复用同一条，元数据以最后发现为准。
+    // 名字本身可能就是缺的那个键——退回目录名当键，保证这条失败在 /plugins 里看得见。
+    const std::string key =
+        man ? man->name
+            : (*meta)["name"].as_string().value_or(fs::path(plugin_dir).filename().string());
+    PluginInfo* info = find_known(key);
+    if (info == nullptr) {
+        known_.push_back(PluginInfo{});
+        info = &known_.back();
     }
+    info->name = key;
+    info->dir = plugin_dir;
 
-    PluginInfo info;
-    info.dir = plugin_dir;
-    info.name = name_s;
-    info.description = m["description"].as_string().value_or("");
-    info.version = m["version"].as_string().value_or("0");
-    info.type_name = m["type"].as_string().value_or("");
-    if (const json d = m["deps"]; d.is_array()) {
-        for (const auto& dd : d.as_array())
-            if (auto s = json(dd).as_string()) info.deps.push_back(*s);
+    if (!man) {
+        mark_failed(info, man.error());
+        return nullptr; // 元数据都不全，加载无从谈起
     }
-    known_.push_back(std::move(info));
-    return &known_.back();
+    info->description = man->description;
+    info->version = man->version;
+    info->type = man->type;
+    info->deps = man->deps;
+    info->status.clear(); // 另一目录曾判失败：本次发现合法元数据，清掉旧结论
+    info->error.clear();
+    return info;
 }
 
 bool PluginManager::load_plugin(PluginInfo* info) {
@@ -220,7 +219,7 @@ bool PluginManager::load_plugin(PluginInfo* info) {
     p->name = info->name;
     p->description = info->description;
     p->version = info->version;
-    p->type_name = info->type_name;
+    p->type_name = info->type;
     p->deps = info->deps;
 
     // dlopen 插件库（.dylib 优先，次 .so）
@@ -256,6 +255,16 @@ bool PluginManager::load_plugin(PluginInfo* info) {
         snprintf(buf, sizeof buf, "ABI 版本不符 (插件 %d, core %d)，请重编插件",
                  p->api->abi_version, PLUGIN_ABI_VERSION);
         mark_failed(info, buf);
+        dlclose(p->dl_handle);
+        p->dl_handle = nullptr;
+        return false;
+    }
+    // 声明 ⇄ 实现：plugin.json 的 type 只用来给人看，调度全看 api->type。两者不符时
+    // GET /plugins 会撒谎，而它是排查任何插件问题的起点。越界枚举取空串，同样不相等。
+    const std::string_view impl = (unsigned)p->api->type < std::size(kTypeNames)
+                                      ? kTypeNames[p->api->type] : std::string_view{};
+    if (info->type != impl) {
+        mark_failed(info, "plugin.json 声明 type=" + info->type + "，实现是 " + std::string(impl));
         dlclose(p->dl_handle);
         p->dl_handle = nullptr;
         return false;

@@ -48,25 +48,9 @@ static int run_tool_test(CoreContext& ctx) {
     return 0;
 }
 
-/* GET /plugins 响应：PluginInfo → JSON（字段名与契约逐字一致，type 映射 type_name） */
-static json plugins_payload(const std::vector<PluginInfo>& list) {
-    json arr = json::array();
-    for (const auto& p : list) {
-        json e;
-        e["name"] = p.name;
-        e["version"] = p.version;
-        e["type"] = p.type_name;
-        e["description"] = p.description;
-        e["dir"] = p.dir;
-        e["status"] = p.status;
-        e["error"] = p.error;
-        json deps = json::array();
-        for (const auto& d : p.deps) deps.push_back(d);
-        e["deps"] = std::move(deps);
-        arr.push_back(std::move(e));
-    }
-    return arr;
-}
+/* GET /plugins 响应：PluginInfo → JSON。字段名与顺序由 BOOST_DESCRIBE_STRUCT
+ * 的字段表生成，即结构体声明本身——契约与结构体不可能再走散。 */
+static json plugins_payload(const std::vector<PluginInfo>& list) { return to_json(list); }
 
 int main(int argc, char** argv) {
     // 配置是刚需：缺键/配置文件坏了就地退出，不带残缺配置往下跑

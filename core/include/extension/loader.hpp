@@ -66,17 +66,34 @@ struct Plugin {
     CoreContext* core_ctx = nullptr; // 指向所属 CoreContext
 };
 
-/* 插件状态快照（GET /plugins 数据源；status: loaded / disabled / failed） */
+/* plugin.json 的形状（入站）。与 PluginInfo 分开：dir/status/error 是 core 运行时
+ * 填的，不在 plugin.json 里——混在一起会把它们误报成"缺键"。
+ * 严格解构（strict_from）：缺任一键即该插件加载失败。plugin.json 漏个 type
+ * 以前会静默变空串，插件从此在链路里神秘失踪且无处可查。 */
+struct PluginManifest {
+    std::string name;
+    std::string description;
+    std::string version;
+    std::string type; // protocol / tool / permission / session
+    int abi_version = 0;
+    std::vector<std::string> deps;
+};
+BOOST_DESCRIBE_STRUCT(PluginManifest, (), (name, description, version, type, abi_version, deps))
+
+/* 插件状态快照（GET /plugins 数据源；status: loaded / disabled / failed）。
+ * 字段名与顺序即 PROTOCOL.md 的响应契约——describe 直接出站，不手写搬运。 */
 struct PluginInfo {
     std::string name;
     std::string version;
-    std::string type_name;
+    std::string type;
     std::string description;
     std::string dir;
     std::string status; // loaded / disabled / failed
     std::string error;  // 加载失败原因（status=failed 时填充）
     std::vector<std::string> deps;
 };
+BOOST_DESCRIBE_STRUCT(PluginInfo, (),
+                      (name, version, type, description, dir, status, error, deps))
 
 class PluginManager {
 public:
