@@ -317,6 +317,9 @@ void QuicServer::run() {
                                 resp_body = "{\"error\":\"no plugins handler\"}";
                             }
                             send_json(c, resp_body);
+                        } else if (c.request_method == "POST" && c.request_path == "/interrupt") {
+                            if (impl_->cbs.on_interrupt) impl_->cbs.on_interrupt();
+                            send_json(c, "{\"status\":\"ok\"}");
                         } else if (c.request_method == "POST" && c.request_path == "/message") {
                             std::string resp_body;
                             if (impl_->cbs.on_message)

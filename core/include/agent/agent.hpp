@@ -9,6 +9,7 @@
  */
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -63,6 +64,9 @@ public:
     /* 一次用户输入 → 完整 loop（阻塞至 LLM 完成或工具链结束） */
     void run(const std::string& user_input);
 
+    /* 中断当前 run（任意线程安全；curl/工具/turn 间均检查） */
+    void interrupt();
+
     /* 会话消息（抽象格式，供持久化/构建 dialog） */
     json& messages() { return messages_; }
 
@@ -79,8 +83,9 @@ private:
 
     CoreContext& ctx_;
     Executor& exe_;
-    json messages_; // 抽象对话历史
-    Usage run_usage_; // 本次 run 已完成 turn 的 token 累计（run/reset 清零）
+    json messages_;
+    Usage run_usage_;
+    std::atomic<bool> abort_{false};
 };
 
 } // namespace realagent

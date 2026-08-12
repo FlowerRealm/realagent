@@ -131,16 +131,15 @@ func (a activity) render(width int) string {
 	head := spin + " " + a.verb + "…"
 	elapsed := elapsedText(a.elapsed())
 
-	// 候选尾巴，从最全到最简；挑第一个装得下的
 	tails := []string{
-		fmt.Sprintf(" (%s · %s · ctrl+c 退出)", elapsed, a.tokens.text()),
+		fmt.Sprintf(" (%s · %s · esc 中断)", elapsed, a.tokens.text()),
 		fmt.Sprintf(" (%s · %s)", elapsed, a.tokens.text()),
-		fmt.Sprintf(" (%s · ctrl+c 退出)", elapsed),
+		fmt.Sprintf(" (%s · esc 中断)", elapsed),
 		fmt.Sprintf(" (%s)", elapsed),
 		"",
 	}
 	if a.tokens.empty() {
-		tails = tails[2:] // 没有 token 数据，带 token 的候选整段作废
+		tails = tails[2:]
 	}
 	tail := tails[len(tails)-1]
 	for _, t := range tails {

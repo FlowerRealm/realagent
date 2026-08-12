@@ -187,7 +187,7 @@ func TestStatusRenderTokens(t *testing.T) {
 	a.tick(tickMsg{seq: a.seq, t: base.Add(5 * time.Second)})
 
 	full := a.render(80)
-	if !strings.Contains(full, "↑12.3k ↓842") || !strings.Contains(full, "ctrl+c 退出") {
+	if !strings.Contains(full, "↑12.3k ↓842") || !strings.Contains(full, "esc 中断") {
 		t.Errorf("宽终端应显示完整尾巴，实际 %q", full)
 	}
 	// 降级阶梯：先丢提示，再丢 token，最后只剩读秒

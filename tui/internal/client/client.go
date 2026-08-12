@@ -82,6 +82,17 @@ func (c *Client) Send(message string) (Reply, error) {
 	return r, nil
 }
 
+// Interrupt 请求中断当前 agent run（POST /interrupt）
+func (c *Client) Interrupt() error {
+	resp, err := c.hc.Post(c.url+"/interrupt", "application/json", bytes.NewReader([]byte("{}")))
+	if err != nil {
+		return fmt.Errorf("中断请求失败: %w", err)
+	}
+	defer resp.Body.Close()
+	io.ReadAll(resp.Body)
+	return nil
+}
+
 // RespondApproval 回传审批裁决（POST /approval-response，PROTOCOL.md）
 func (c *Client) RespondApproval(id string, allow bool) error {
 	body, _ := json.Marshal(map[string]any{"id": id, "allow": allow})

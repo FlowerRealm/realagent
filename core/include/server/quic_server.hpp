@@ -42,6 +42,8 @@ struct QuicCallbacks {
     std::function<std::string(const std::string& name)> on_plugin_enable;
     /* 禁用插件（POST /plugins/disable，体 {"name"}）→ 响应 JSON 字符串 */
     std::function<std::string(const std::string& name)> on_plugin_disable;
+    /* 中断当前 agent run（POST /interrupt，TUI Esc 触发） */
+    std::function<void()> on_interrupt;
     /* 每轮事件循环调用（main 把事件队列 flush 到推送流，ADR-0002 线程模型） */
     std::function<void()> on_tick;
     /* 新推送流注册（M6 接入：agent 事件推送给客户端） */

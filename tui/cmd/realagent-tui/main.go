@@ -109,7 +109,7 @@ func initialModel(c *client.Client) model {
 	return model{
 		client: c,
 		messages: []message{
-			{role: "info", text: "连接 core (QUIC/HTTP3) — 输入消息，Enter 发送，Ctrl+C 退出"},
+			{role: "info", text: "连接 core (QUIC/HTTP3) — Enter 发送，Esc 中断，Ctrl+C 退出"},
 		},
 	}
 }
@@ -124,6 +124,17 @@ func sendCmd(c *client.Client, input string) tea.Cmd {
 	return func() tea.Msg {
 		r, err := c.Send(input)
 		return sendMsg{reply: r, err: err}
+	}
+}
+
+// interruptMsg 携带 POST /interrupt 的结果
+type interruptMsg struct {
+	err error
+}
+
+func interruptCmd(c *client.Client) tea.Cmd {
+	return func() tea.Msg {
+		return interruptMsg{err: c.Interrupt()}
 	}
 }
 
@@ -203,6 +214,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case interruptMsg:
+		if v.err != nil {
+			m.messages = append(m.messages, message{role: "error", text: "中断请求失败: " + v.err.Error()})
+		}
+		return m, nil
+
 	case approvalResp:
 		if v.err != nil {
 			m.messages = append(m.messages, message{role: "error", text: "审批回传失败: " + v.err.Error()})
@@ -231,7 +248,11 @@ func (m *model) handleKey(v tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 	case "esc":
 		if m.menuOpen() {
-			m.input = "" // 关闭斜杠菜单（菜单由输入派生，清空即关闭）
+			m.input = ""
+		} else if m.approval != nil {
+			return m.decideApproval(false)
+		} else if m.busy.active {
+			return m, interruptCmd(m.client)
 		}
 		return m, nil
 	case "tab", "up", "down":
@@ -411,8 +432,13 @@ func (m *model) handleEvent(ev client.Event) tea.Cmd {
 		jsonUnmarshal(ev.Payload, &d)
 		m.approval = &pendingApproval{id: d.ID, tool: d.Tool, params: string(d.Params)}
 		return m.busy.begin("等待你的审批", time.Now())
+	case "interrupted":
+		m.finalize("", "assistant")
+		m.messages = append(m.messages, message{role: "info", text: "已中断"})
+		m.busy.stop()
+		m.approval = nil
 	case "turn_end":
-		m.finalize("", "assistant") // 定稿当前 streaming
+		m.finalize("", "assistant")
 		// 带 tool_uses 的 turn_end 只是本轮结束（下一轮继续跑，读秒不断）；
 		// stop_reason / error 才是真正收工。
 		var d struct {

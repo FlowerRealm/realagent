@@ -213,6 +213,10 @@ int main(int argc, char** argv) {
         }).detach();
         return std::string("{\"status\":\"processing\"}");
     };
+    cbs.on_interrupt = [&agent, &approval]() {
+        agent.interrupt();
+        approval.cancel_all();
+    };
     cbs.on_approval_response = [&approval](const std::string& id, bool allow) {
         approval.respond(id, allow);
     };

@@ -14,6 +14,11 @@ Agent::Agent(CoreContext& ctx, Executor& exe) : ctx_(ctx), exe_(exe) {
 void Agent::reset() {
     messages_ = json::array();
     run_usage_ = Usage{};
+    abort_.store(false);
+}
+
+void Agent::interrupt() {
+    abort_.store(true);
 }
 
 void Agent::broadcast(const std::string& type, const json& payload) {
@@ -51,12 +56,19 @@ static void feed_sink(void* sink_ctx, const char* type, const char* payload);
 struct CurlSink {
     Plugin* proto;
     LlmOutcome* out;
-    CoreContext* ctx;   // 实时广播 message_update 到推送流（流式打字）
-    const Usage* base;  // 本次 run 已完成 turn 的 token 累计（广播时叠加当前 turn）
+    CoreContext* ctx;
+    const Usage* base;
+    const std::atomic<bool>* abort;
 };
+
+static int curl_progress_cb(void* clientp, curl_off_t, curl_off_t, curl_off_t, curl_off_t) {
+    auto* abort = static_cast<const std::atomic<bool>*>(clientp);
+    return (abort && abort->load()) ? 1 : 0;
+}
 
 static size_t curl_write_cb(char* ptr, size_t size, size_t nmemb, void* userdata) {
     auto* s = static_cast<CurlSink*>(userdata);
+    if (s->abort && s->abort->load()) return 0;
     const size_t n = size * nmemb;
     char* chunk = static_cast<char*>(malloc(n + 1));
     if (!chunk) return 0;
@@ -142,12 +154,15 @@ bool Agent::llm_call(const json& dialog, LlmOutcome& out) {
     // libcurl 流式 POST
     CURL* curl = curl_easy_init();
     if (!curl) return false;
-    CurlSink sink{proto, &out, &ctx_, &run_usage_};
+    CurlSink sink{proto, &out, &ctx_, &run_usage_, &abort_};
     curl_easy_setopt(curl, CURLOPT_URL, req.url);
     curl_easy_setopt(curl, CURLOPT_POST, 1L);
     curl_easy_setopt(curl, CURLOPT_POSTFIELDS, req.body);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_write_cb);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &sink);
+    curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
+    curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, curl_progress_cb);
+    curl_easy_setopt(curl, CURLOPT_XFERINFODATA, &abort_);
     // 请求头：解析协议插件返回的 headers JSON → curl_slist
     struct curl_slist* hdrs = nullptr;
     if (req.headers) {
@@ -203,8 +218,8 @@ json Agent::build_dialog() const {
 }
 
 void Agent::run(const std::string& user_input) {
-    run_usage_ = Usage{}; // token 计数按"一次用户输入"归零（读秒同口径）
-    // 用户消息入会话
+    abort_.store(false);
+    run_usage_ = Usage{};
     json um;
     um["role"] = "user";
     um["content"] = json::array();
@@ -215,17 +230,37 @@ void Agent::run(const std::string& user_input) {
     messages_.push_back(um);
     broadcast("message_start", json{{"role", "user"}});
 
-    for (int turn = 0; turn < 50; ++turn) { // 上限防死循环
+    for (int turn = 0; turn < 50; ++turn) {
+        if (abort_.load()) {
+            broadcast("interrupted", json{});
+            break;
+        }
         broadcast("turn_start", json{});
         LlmOutcome out;
         if (!llm_call(build_dialog(), out)) {
-            broadcast("turn_end", json{{"error", "llm_call failed"}});
+            if (abort_.load()) {
+                if (!out.text.empty() || !out.thinking.empty()) {
+                    json am;
+                    am["role"] = "assistant";
+                    am["content"] = json::array();
+                    append_thinking(am["content"], out);
+                    if (!out.text.empty()) {
+                        json b;
+                        b["type"] = "text";
+                        b["text"] = out.text;
+                        am["content"].push_back(b);
+                    }
+                    messages_.push_back(am);
+                }
+                broadcast("interrupted", json{});
+            } else {
+                broadcast("turn_end", json{{"error", "llm_call failed"}});
+            }
             break;
         }
-        run_usage_ += out.usage; // 本轮结账：之后的广播以此为基数
+        run_usage_ += out.usage;
 
         if (!out.tool_uses.empty()) {
-            // assistant 消息（thinking + tool_use blocks）入会话
             json am;
             am["role"] = "assistant";
             am["content"] = json::array();
@@ -240,13 +275,13 @@ void Agent::run(const std::string& user_input) {
             }
             messages_.push_back(am);
 
-            // 顺序执行工具（单 agent 严格顺序，ADR-0002）
+            size_t executed = 0;
             for (const auto& tu : out.tool_uses) {
+                if (abort_.load()) break;
                 broadcast("tool_execution_start", json{{"name", tu.name}, {"id", tu.id}});
                 const auto r = exe_.execute(tu.name, tu.input);
                 broadcast("tool_execution_end",
                           json{{"name", tu.name}, {"id", tu.id}, {"status", r.status}});
-                // tool_result 入会话
                 json tr;
                 tr["role"] = "user";
                 tr["content"] = json::array();
@@ -257,12 +292,28 @@ void Agent::run(const std::string& user_input) {
                 if (r.status != 0) tb["is_error"] = true;
                 tr["content"].push_back(tb);
                 messages_.push_back(tr);
+                ++executed;
+            }
+            if (abort_.load()) {
+                for (size_t i = executed; i < out.tool_uses.size(); ++i) {
+                    json tr;
+                    tr["role"] = "user";
+                    tr["content"] = json::array();
+                    json tb;
+                    tb["type"] = "tool_result";
+                    tb["tool_use_id"] = out.tool_uses[i].id;
+                    tb["content"] = "interrupted by user";
+                    tb["is_error"] = true;
+                    tr["content"].push_back(tb);
+                    messages_.push_back(tr);
+                }
+                broadcast("interrupted", json{});
+                break;
             }
             broadcast("turn_end", json{{"tool_uses", (int)out.tool_uses.size()}});
-            continue; // 工具结果回传 → 下一 Turn
+            continue;
         }
 
-        // 无工具调用：assistant 文本入会话，结束
         json am;
         am["role"] = "assistant";
         am["content"] = json::array();
