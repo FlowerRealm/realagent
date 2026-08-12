@@ -44,10 +44,11 @@ static const char* config_env_name(std::string_view key) {
     if (key == "api_key") return "ANTHROPIC_API_KEY";
     if (key == "base_url") return "DEEPSEEK_BASE_URL";
     if (key == "model") return "DEEPSEEK_MODEL";
+    if (key == "small_model") return "DEEPSEEK_SMALL_MODEL";
     return nullptr;
 }
 
-// 解析键的内置默认
+// 解析键的内置默认（small_model 无内置默认：未配置回落主模型，见 Config::model）
 static std::string config_builtin(std::string_view key) {
     if (key == "base_url") return "https://api.deepseek.com/anthropic";
     if (key == "model") return "deepseek-v4-flash";
@@ -89,6 +90,10 @@ Config Config::load() {
         cfg.settings_["model"] = v;
         cfg.env_keys_.push_back("model");
     }
+    if (const auto v = getenv_or("DEEPSEEK_SMALL_MODEL"); !v.empty()) {
+        cfg.settings_["small_model"] = v;
+        cfg.env_keys_.push_back("small_model");
+    }
 
     return cfg;
 }
@@ -108,6 +113,14 @@ std::string Config::get(std::string_view key, std::string_view default_value) co
 bool Config::has(std::string_view key) const {
     std::lock_guard<std::mutex> lk(*mutex_);
     return settings_.contains(key);
+}
+
+std::string Config::model(ModelTier tier) const {
+    // 小模型未配置 = 回落主模型（不设独立默认，配置里少一档也照跑）
+    if (tier == ModelTier::Small) {
+        if (auto m = get("small_model"); !m.empty()) return m;
+    }
+    return get("model");
 }
 
 void Config::set(std::string_view key, const json& v) {

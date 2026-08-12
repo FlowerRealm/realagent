@@ -54,6 +54,12 @@ LLM 后端的统一抽象。**适配本身走插件机制**（ADR-0004）：core
 
 _Avoid_: `backend`、`LLM client`（指 core 内置模块时）
 
+## Model Tier（模型档位）
+
+一次 LLM 调用用哪一档模型：**主模型**（`model`，对话主链路）或**小模型**（`small_model`，标题/摘要一类杂活）。档位只是模型名的选择，两档共用同一 base_url / api_key ——不是独立的供应商配置。core 侧 `Config::model(ModelTier)` 解析档位，结果照旧经 `dialog["model"]` 透传给协议链，[[Provider 壳]]与协议层对档位无感。小模型未配置时回落主模型（回落即默认值）。
+
+_Avoid_: `fast model`、`模型 profile`（档位不带端点凭证，不构成完整 profile）
+
 ## v1-messages（协议层）
 
 `/v1/messages` 是一种协议，不是某家公司的私有物——Anthropic、DeepSeek、OpenRouter 等多家公司都实现同一端点。协议层插件只懂协议固有内容（请求结构 + SSE 解析 + thinking 块），不识别任何供应商、不设端点/模型默认值。
@@ -165,6 +171,7 @@ _Avoid_: `finalize`（原指把 streaming 消息收进列表，行模型下已�
 - 插件元数据：独立 JSON 文件（`plugin.json`），含名称/描述/版本/ABI 版本/前置依赖。
 - 配置机制：core 统一收集（env 优先 > `.realagent/settings.json` > 默认值），插件初始化时由 core 注入其配置节（api_key / base_url / model 等），插件不自行解析配置。
 - 协议插件可配项：base_url（默认 `https://api.deepseek.com/anthropic`）、api_key（env `ANTHROPIC_API_KEY`）、model（默认 `deepseek-v4-flash`）。base_url 与 api_key 同级可配——代理/网关用户必须能自定义端点。
+- 模型档位（[[Model Tier]]）：`model` 主模型 + `small_model` 小模型两档，共用 base_url / api_key。档位只换模型名，不换端点凭证——跨供应商小模型不做（真需要时再让 dialog 携带端点 override）。small_model 无独立默认，未配置回落主模型；env 为 `DEEPSEEK_SMALL_MODEL`。core 侧 `Config::model(ModelTier)` 是唯一知道键名的地方，协议插件/SDK/ABI 无感。
 - 斜杠命令：插件可注册（通用能力，不限 type）。首版只留接口不实现；`/quit` core 内置，`/new` `/resume` 由 session-manager 插件提供。
 - 首版插件清单：见 `docs/plugins.md`（6 个插件：v1-messages + deepseek 壳协议链 / core-tools / perm-allow-all / perm-ask / session-manager）。
 - 通信协议：见 `docs/PROTOCOL.md`（可靠流请求-响应 + 推送流，全可靠 + 0-RTT）。

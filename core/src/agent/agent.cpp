@@ -194,10 +194,10 @@ bool Agent::llm_call(const json& dialog, LlmOutcome& out) {
     return true;
 }
 
-json Agent::build_dialog() const {
+json Agent::build_dialog(ModelTier tier) const {
     json dialog;
     // model 不设供应商默认值——外层 provider 壳插件负责兜底
-    dialog["model"] = ctx_.config->get("model");
+    dialog["model"] = ctx_.config->model(tier);
     dialog["system"] = "You are a helpful coding agent.";
     // 工具定义（注册表 → schema）
     json tools = json::array();
@@ -237,7 +237,8 @@ void Agent::run(const std::string& user_input) {
         }
         broadcast("turn_start", json{});
         LlmOutcome out;
-        if (!llm_call(build_dialog(), out)) {
+        // 对话主链路走主模型；小模型档留给后续杂活调用点（标题/摘要）
+        if (!llm_call(build_dialog(ModelTier::Main), out)) {
             if (abort_.load()) {
                 if (!out.text.empty() || !out.thinking.empty()) {
                     json am;

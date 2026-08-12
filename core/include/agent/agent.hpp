@@ -74,8 +74,8 @@ public:
     void reset();
 
 private:
-    /* 构建抽象对话（system/messages/tools） */
-    json build_dialog() const;
+    /* 构建抽象对话（system/messages/tools），tier 决定 dialog["model"] 取哪一档 */
+    json build_dialog(ModelTier tier) const;
     /* 一次 LLM 调用：协议插件构造 → libcurl → parse_feed → LlmOutcome */
     bool llm_call(const json& dialog, LlmOutcome& out);
     /* 广播事件（走 CoreContext::emit_fn + 插件 on_event） */
