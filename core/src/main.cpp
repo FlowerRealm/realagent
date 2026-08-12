@@ -5,7 +5,7 @@
  *   realagent-core test-tools → 工具执行链路验证（read/edit/bash + 权限）
  * M5+ 常驻模式（默认）：
  *   realagent-core → 加载插件 + 启动 QUIC/HTTP3 服务（PROTOCOL.md 端点）
- *   POST /message → 启动 agent loop（DeepSeek）
+ *   POST /message → 启动 agent loop
  */
 #include <cstdio>
 #include <string>
@@ -69,7 +69,13 @@ static json plugins_payload(const std::vector<PluginInfo>& list) {
 }
 
 int main(int argc, char** argv) {
-    auto cfg = Config::load(); // 非 const：CoreContext::config 需写路径（插件禁用清单 persist）
+    // 配置是刚需：缺键/配置文件坏了就地退出，不带残缺配置往下跑
+    auto loaded = Config::load();
+    if (!loaded) {
+        fprintf(stderr, "[config] %s\n", loaded.error().c_str());
+        return 1;
+    }
+    auto cfg = std::move(*loaded); // 非 const：CoreContext::config 需写路径（插件禁用清单 persist）
     CoreContext ctx;
     ctx.config = &cfg;
 

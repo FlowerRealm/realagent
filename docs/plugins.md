@@ -47,14 +47,16 @@ DeepSeek 供应商壳：包住 `v1-messages`。壳只做两件事——
 
 **嵌套链职责**（ADR-0004）：core 按依赖序加载（`v1-messages` 先），`deepseek` init 中 `get_dependency("v1-messages", ...)` 取内层接口表，`build_request` 调内层构造初步请求→壳兜底默认→产出最终请求；`parse_feed` 调内层。新增第二个供应商（如 OpenRouter）时另写一个壳声明 `deps: ["v1-messages"]`，复用同一协议层，core 据依赖自动选入口。
 
-**可配置项**（core 统一注入，env > settings.json > 壳默认）：
+**可配置项**（core 统一注入，唯一来源 `settings.json`，全部必配）：
 
-| 配置 | env 变量 | 默认 |
-|---|---|---|
-| api_key | `ANTHROPIC_API_KEY` | — |
-| base_url | `DEEPSEEK_BASE_URL` | `https://api.deepseek.com/anthropic` |
-| model | `DEEPSEEK_MODEL` | `deepseek-v4-flash` |
+| 配置 | 说明 |
+|---|---|
+| api_key | 凭证，无默认 |
+| base_url | 端点，无默认 |
+| model | 主模型名，无默认 |
+| small_model | 小模型名，无默认（不回落主模型） |
 
+> 缺任一项 core 启动即失败并点名——core 不猜端点、不猜模型，也不读 env。
 > **base_url 与 api_key 同级重要**：代理/网关用户（OpenRouter / one-api / 内网中转）必须能自定义端点。
 
 **DeepSeek 兼容端点已查证细节**（2026-08-09，官方文档）：

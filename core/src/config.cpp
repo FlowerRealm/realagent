@@ -1,14 +1,51 @@
 #include "config.hpp"
 
-#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
-#include <optional>
 
 namespace realagent {
 namespace fs = std::filesystem;
+
+namespace {
+
+// 会话落盘路径：core 自己的实现细节，不是配置项
+constexpr std::string_view kSessionDir = ".realagent/sessions";
+
+// 必需键：缺一个就不启动。core 不猜端点、不猜模型
+constexpr std::string_view kRequired[] = {"api_key", "base_url", "model", "small_model"};
+
+fs::path settings_path(const fs::path& dir) { return dir / ".realagent" / "settings.json"; }
+
+// 项目根（无则退回 cwd）——配置写入与项目级读取共用同一落点
+fs::path project_dir() {
+    const std::string root = find_project_root(fs::current_path().string());
+    return root.empty() ? fs::current_path() : fs::path(root);
+}
+
+// 合入一份 settings.json：文件不存在 = 跳过；存在但读不了/解析不了 = 硬错
+std::expected<void, std::string> merge_file(json& into, const fs::path& path) {
+    if (!fs::exists(path)) return {};
+    std::ifstream f(path);
+    if (!f) return std::unexpected(path.string() + " 打不开");
+    std::string text((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    const auto j = json::parse(text);
+    if (!j) return std::unexpected(path.string() + " 不是合法 JSON");
+    for (const auto& k : j->keys()) into[k] = (*j)[k];
+    return {};
+}
+
+std::string join(const std::vector<std::string_view>& items, const char* sep) {
+    std::string out;
+    for (const auto& s : items) {
+        if (!out.empty()) out += sep;
+        out += s;
+    }
+    return out;
+}
+
+} // namespace
 
 std::string getenv_or(std::string_view name, std::string_view fallback) {
     if (const char* v = std::getenv(std::string(name).c_str()); v != nullptr)
@@ -31,83 +68,40 @@ std::string find_project_root(std::string_view start_dir) {
     return "";
 }
 
-// 从文件读取 json；文件不存在/解析失败返回 nullopt
-static std::optional<json> load_json_file(const fs::path& path) {
-    std::ifstream f(path);
-    if (!f) return std::nullopt;
-    std::string text((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
-    return json::parse(text);
+std::vector<std::string_view> Config::required_keys() {
+    return {std::begin(kRequired), std::end(kRequired)};
 }
 
-// 解析键 → env 变量名（get 时实时读取，保证 env 恒为最高优先级）
-static const char* config_env_name(std::string_view key) {
-    if (key == "api_key") return "ANTHROPIC_API_KEY";
-    if (key == "base_url") return "DEEPSEEK_BASE_URL";
-    if (key == "model") return "DEEPSEEK_MODEL";
-    if (key == "small_model") return "DEEPSEEK_SMALL_MODEL";
-    return nullptr;
-}
-
-// 解析键的内置默认（small_model 无内置默认：未配置回落主模型，见 Config::model）
-static std::string config_builtin(std::string_view key) {
-    if (key == "base_url") return "https://api.deepseek.com/anthropic";
-    if (key == "model") return "deepseek-v4-flash";
-    return "";
-}
-
-Config Config::load() {
+std::expected<Config, std::string> Config::load() {
     Config cfg;
-    const std::string home = getenv_or("HOME", ".");
-
-    // 1) 默认值
     cfg.settings_ = json{};
-    cfg.settings_["base_url"] = "https://api.deepseek.com/anthropic";
-    cfg.settings_["model"] = "deepseek-v4-flash";
-    cfg.settings_["session_dir"] = ".realagent/sessions";
 
-    // 2) settings.json 覆盖（全局先，项目级后——项目覆盖全局）
-    if (auto j = load_json_file(fs::path(home) / ".realagent" / "settings.json")) {
-        for (const auto& k : j->keys()) cfg.settings_[k] = (*j)[k];
-    }
-    const std::string root = find_project_root(fs::current_path().string());
-    if (!root.empty()) {
-        if (auto j = load_json_file(fs::path(root) / ".realagent" / "settings.json")) {
-            for (const auto& k : j->keys()) cfg.settings_[k] = (*j)[k];
-        }
+    // 全局打底，项目级覆盖
+    const fs::path global = settings_path(getenv_or("HOME", "."));
+    if (auto r = merge_file(cfg.settings_, global); !r) return std::unexpected(r.error());
+    const fs::path project = settings_path(project_dir());
+    if (project != global) {
+        if (auto r = merge_file(cfg.settings_, project); !r) return std::unexpected(r.error());
     }
 
-    // 3) env 覆盖（env > settings.json），记录注入键 → persist() 不写盘
-    //    约定：ANTHROPIC_API_KEY / DEEPSEEK_BASE_URL / DEEPSEEK_MODEL
-    if (const auto v = getenv_or("ANTHROPIC_API_KEY"); !v.empty()) {
-        cfg.settings_["api_key"] = v;
-        cfg.env_keys_.push_back("api_key");
+    // 必需键一次报全：别让用户补一个跑一次
+    // （走 const 引用取值：非 const operator[] 会给缺失键插 null，污染配置树）
+    const json& tree = cfg.settings_;
+    std::vector<std::string_view> missing;
+    for (const auto& k : kRequired) {
+        if (tree[k].as_string().value_or("").empty()) missing.push_back(k);
     }
-    if (const auto v = getenv_or("DEEPSEEK_BASE_URL"); !v.empty()) {
-        cfg.settings_["base_url"] = v;
-        cfg.env_keys_.push_back("base_url");
+    if (!missing.empty()) {
+        return std::unexpected("配置缺必需键 [" + join(missing, ", ") + "]，补进 " +
+                               project.string() + "（必需：" +
+                               join(required_keys(), " / ") + "）");
     }
-    if (const auto v = getenv_or("DEEPSEEK_MODEL"); !v.empty()) {
-        cfg.settings_["model"] = v;
-        cfg.env_keys_.push_back("model");
-    }
-    if (const auto v = getenv_or("DEEPSEEK_SMALL_MODEL"); !v.empty()) {
-        cfg.settings_["small_model"] = v;
-        cfg.env_keys_.push_back("small_model");
-    }
-
     return cfg;
 }
 
-std::string Config::get(std::string_view key, std::string_view default_value) const {
+std::string Config::get(std::string_view key) const {
     std::lock_guard<std::mutex> lk(*mutex_);
-    // 解析键：env > 平铺字段 > 内置默认
-    if (const char* env = config_env_name(key)) {
-        if (const auto v = getenv_or(env); !v.empty()) return v;
-        if (const auto s = settings_[key].as_string()) return *s;
-        return config_builtin(key);
-    }
-    if (const auto s = settings_[key].as_string()) return *s;
-    return std::string(default_value);
+    return settings_[key].as_string().value_or("");
 }
 
 bool Config::has(std::string_view key) const {
@@ -116,11 +110,7 @@ bool Config::has(std::string_view key) const {
 }
 
 std::string Config::model(ModelTier tier) const {
-    // 小模型未配置 = 回落主模型（不设独立默认，配置里少一档也照跑）
-    if (tier == ModelTier::Small) {
-        if (auto m = get("small_model"); !m.empty()) return m;
-    }
-    return get("model");
+    return get(tier == ModelTier::Small ? "small_model" : "model");
 }
 
 void Config::set(std::string_view key, const json& v) {
@@ -129,35 +119,24 @@ void Config::set(std::string_view key, const json& v) {
 }
 
 bool Config::persist_locked() {
-    // 项目级 .realagent/settings.json（无项目根时退回 cwd）
-    std::string root = find_project_root(fs::current_path().string());
-    if (root.empty()) root = fs::current_path().string();
-    const fs::path dir = fs::path(root) / ".realagent";
+    const fs::path target = settings_path(project_dir());
 
     std::error_code ec;
-    fs::create_directories(dir, ec);
+    fs::create_directories(target.parent_path(), ec);
     if (ec) {
         fprintf(stderr, "[config] persist: 创建目录失败 %s\n", ec.message().c_str());
         return false;
     }
 
-    // 以当前合并树为准整体写出；env 注入键不入盘（避免烘焙 ANTHROPIC_API_KEY 等）
-    json out;
-    for (const auto& k : settings_.keys()) {
-        if (std::find(env_keys_.begin(), env_keys_.end(), k) != env_keys_.end()) continue;
-        out[k] = settings_[k];
-    }
-
-    // tmp + rename 原子写
-    const fs::path target = dir / "settings.json";
-    const fs::path tmp = dir / "settings.json.tmp";
+    // tmp + rename 原子写（以当前配置树为准整体写出）
+    const fs::path tmp = target.string() + ".tmp";
     {
         std::ofstream f(tmp);
         if (!f) {
             fprintf(stderr, "[config] persist: 无法写 %s\n", tmp.c_str());
             return false;
         }
-        f << out.dump() << "\n";
+        f << settings_.dump() << "\n";
     }
     fs::rename(tmp, target, ec);
     if (ec) {
@@ -173,8 +152,6 @@ bool Config::persist() {
     return persist_locked();
 }
 
-// —— 既有 API（原语义不变，仅加锁） ——
-
 std::vector<std::string> Config::extension_dirs() const {
     std::vector<std::string> dirs;
     const std::string home = getenv_or("HOME", ".");
@@ -184,7 +161,7 @@ std::vector<std::string> Config::extension_dirs() const {
     return dirs;
 }
 
-std::string Config::session_dir() const { return get("session_dir", ".realagent/sessions"); }
+std::string Config::session_dir() const { return std::string(kSessionDir); }
 
 json Config::to_json() const {
     std::lock_guard<std::mutex> lk(*mutex_);

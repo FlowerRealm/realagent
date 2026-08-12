@@ -33,7 +33,7 @@ M6 TUI              → M7 集成与测试
 
 **已定实现约定**
 - 测试框架：C++ 用 Catch2（单头集成），Go 用内置 testing
-- DeepSeek API key：环境变量 `ANTHROPIC_API_KEY`，`.realagent/settings.json` 可覆盖
+- API key：`.realagent/settings.json` 的 `api_key`（唯一来源，不读 env、无默认）
 
 **技术要点**
 - JSON 封装参考 `~/revlm/backend/include/util/json.hpp`：boost::json 子类，默认 `{}`、链式 `operator[]`（读缺键返回 null 不抛异常、写自动构造对象/数组）、宽容 parse（全文失败后截取首尾 `{}` 重试——为 LLM 输出带额外文本设计）、optional 提取器（as_string/as_int64 返回 optional 不抛异常）。
@@ -108,8 +108,8 @@ M6 TUI              → M7 集成与测试
 
 **技术要点**
 - 协议/供应商拆分：`/v1/messages` 是协议（多家公司共用），协议层不识别供应商；供应商默认值下沉到壳。
-- 端点默认 `https://api.deepseek.com/anthropic`，模型默认 `deepseek-v4-flash`——均为壳兜底，协议层无默认。
-- 可配置：api_key（env `ANTHROPIC_API_KEY`）、base_url（env `DEEPSEEK_BASE_URL`）、model（env `DEEPSEEK_MODEL`）。base_url 与 api_key 同级重要（代理/网关用户必须能自定义端点）。
+- 端点与模型名无默认：core 侧必配（缺则启动失败），协议层与壳都不该再兜底。
+- 可配置：api_key / base_url / model / small_model，全部经 `.realagent/settings.json`，不读 env。base_url 与 api_key 同级重要（代理/网关用户必须能自定义端点）。
 - DeepSeek 兼容端点细节（已查证）：tools/tool_use/tool_result 全支持；tool_choice 四模式全支持；stream 全支持；`cache_control` 被忽略；thinking 的 budget_tokens 忽略；thinking 块带 signature（回传历史用）。
 - 壳不做模型映射：`claude-*` 原样透传（供应商特殊逻辑一律不进壳）。
 

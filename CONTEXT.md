@@ -56,7 +56,7 @@ _Avoid_: `backend`、`LLM client`（指 core 内置模块时）
 
 ## Model Tier（模型档位）
 
-一次 LLM 调用用哪一档模型：**主模型**（`model`，对话主链路）或**小模型**（`small_model`，标题/摘要一类杂活）。档位只是模型名的选择，两档共用同一 base_url / api_key ——不是独立的供应商配置。core 侧 `Config::model(ModelTier)` 解析档位，结果照旧经 `dialog["model"]` 透传给协议链，[[Provider 壳]]与协议层对档位无感。小模型未配置时回落主模型（回落即默认值）。
+一次 LLM 调用用哪一档模型：**主模型**（`model`，对话主链路）或**小模型**（`small_model`，标题/摘要一类杂活）。档位只是模型名的选择，两档共用同一 base_url / api_key ——不是独立的供应商配置。core 侧 `Config::model(ModelTier)` 解析档位，结果照旧经 `dialog["model"]` 透传给协议链，[[Provider 壳]]与协议层对档位无感。两档均为必需配置——不配就起不来，没有回落。
 
 _Avoid_: `fast model`、`模型 profile`（档位不带端点凭证，不构成完整 profile）
 
@@ -169,9 +169,10 @@ _Avoid_: `finalize`（原指把 streaming 消息收进列表，行模型下已�
 - 审批链路：core 永远是发起方。首版插件直接通过；未来插件 ask 时 core 向用户交互界面（TUI/gui）发询问，界面回传裁决。gui 与 TUI 是平等的 HTTP 客户端，接口按多客户端设计。
 - 插件 type：protocol / tool / permission / session 四类（ADR-0001）。
 - 插件元数据：独立 JSON 文件（`plugin.json`），含名称/描述/版本/ABI 版本/前置依赖。
-- 配置机制：core 统一收集（env 优先 > `.realagent/settings.json` > 默认值），插件初始化时由 core 注入其配置节（api_key / base_url / model 等），插件不自行解析配置。
-- 协议插件可配项：base_url（默认 `https://api.deepseek.com/anthropic`）、api_key（env `ANTHROPIC_API_KEY`）、model（默认 `deepseek-v4-flash`）。base_url 与 api_key 同级可配——代理/网关用户必须能自定义端点。
-- 模型档位（[[Model Tier]]）：`model` 主模型 + `small_model` 小模型两档，共用 base_url / api_key。档位只换模型名，不换端点凭证——跨供应商小模型不做（真需要时再让 dialog 携带端点 override）。small_model 无独立默认，未配置回落主模型；env 为 `DEEPSEEK_SMALL_MODEL`。core 侧 `Config::model(ModelTier)` 是唯一知道键名的地方，协议插件/SDK/ABI 无感。
+- 配置机制：唯一来源是 `settings.json`（全局 `~/.realagent/` 打底，项目级 `.realagent/` 覆盖）。**无 env 覆盖、无内置默认、无回落**：必需键（api_key / base_url / model / small_model）缺一个 core 就退出并点名缺哪个；配置文件存在但解析失败同样是硬错。core 不认任何供应商身份，端点与模型名一律由用户配置。插件初始化时由 core 注入配置节，插件不自行解析配置。
+- 协议插件可配项：api_key / base_url / model / small_model，全部必配。base_url 与 api_key 同级——代理/网关用户（OpenRouter / one-api / 内网中转）必须能自定义端点。
+- 模型档位（[[Model Tier]]）：`model` 主模型 + `small_model` 小模型两档，共用 base_url / api_key。档位只换模型名，不换端点凭证——跨供应商小模型不做（真需要时再让 dialog 携带端点 override）。两档都必配，不存在小模型回落主模型这种隐式默认。core 侧 `Config::model(ModelTier)` 是唯一知道键名的地方，协议插件/SDK/ABI 无感。
+- 会话目录不是配置项：`.realagent/sessions` 是 core 自己的落盘路径，写死在 core 里，settings.json 写它不生效。
 - 斜杠命令：插件可注册（通用能力，不限 type）。首版只留接口不实现；`/quit` core 内置，`/new` `/resume` 由 session-manager 插件提供。
 - 首版插件清单：见 `docs/plugins.md`（6 个插件：v1-messages + deepseek 壳协议链 / core-tools / perm-allow-all / perm-ask / session-manager）。
 - 通信协议：见 `docs/PROTOCOL.md`（可靠流请求-响应 + 推送流，全可靠 + 0-RTT）。
