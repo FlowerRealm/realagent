@@ -19,6 +19,23 @@ func testModel() model {
 	return model{commands: testCmds}
 }
 
+// typed 造一个输入了 s 的模型（光标在末尾）
+func typed(s string) model {
+	m := testModel()
+	m.ed.set(s)
+	return m
+}
+
+// pend 返回未提交的行文本。测试里 width=0，freeze 不动手，
+// 所有行都留在 m.pend——正好当成「本次会话的全部输出」来断言。
+func pendTexts(m model) []string {
+	var out []string
+	for _, l := range m.pend {
+		out = append(out, l.text)
+	}
+	return out
+}
+
 func key(k tea.KeyType) tea.KeyMsg { return tea.KeyMsg{Type: k} }
 
 func keyRunes(s string) tea.KeyMsg {
@@ -37,9 +54,7 @@ func TestMenuOpen(t *testing.T) {
 		{"/new 1", true}, // menuOpen 只看前缀；含空格由 menuMatches 关闭
 	}
 	for _, c := range cases {
-		m := testModel()
-		m.input = c.input
-		if got := m.menuOpen(); got != c.want {
+		if got := typed(c.input).menuOpen(); got != c.want {
 			t.Errorf("menuOpen(%q) = %v, want %v", c.input, got, c.want)
 		}
 	}
@@ -58,14 +73,13 @@ func TestMenuMatches(t *testing.T) {
 		{"/xyz", nil},
 		{"/new x", nil}, // 参数模式关闭菜单
 		{"/new ", nil},
+		{"/new\n", nil}, // 多行输入同样不是菜单
 	}
 	for _, c := range cases {
-		m := testModel()
-		m.input = c.input
-		got := m.menuMatches()
+		got := typed(c.input).menuMatches()
 		if c.want == nil {
 			if len(got) != 0 {
-				t.Errorf("menuMatches(%q) = %v, want none", c.input, got)
+				t.Errorf("menuMatches(%q) = %v, want none", c.input, names(got))
 			}
 			continue
 		}
@@ -91,9 +105,9 @@ func names(cmds []client.Command) []string {
 
 func TestMenuMatchesEmptyList(t *testing.T) {
 	m := model{} // 未拉到命令列表（core 未启动/失败）
-	m.input = "/"
+	m.ed.set("/")
 	if got := m.menuMatches(); len(got) != 0 {
-		t.Errorf("空命令列表应无菜单，got %v", got)
+		t.Errorf("空命令列表应无菜单，got %v", names(got))
 	}
 }
 
@@ -113,93 +127,99 @@ func TestMenuIndexClamp(t *testing.T) {
 }
 
 func TestEnterExecutesHighlighted(t *testing.T) {
-	m := testModel()
-	m.input = "/re" // 命中 resume，高亮它
-	nm, cmd := m.handleKey(key(tea.KeyEnter))
-	m = *nm.(*model)
+	m, cmd := typed("/re").handleKey(key(tea.KeyEnter)) // 命中 resume，高亮它
 	if cmd == nil {
 		t.Fatal("enter 应返回发送命令")
 	}
-	if m.input != "" {
-		t.Errorf("发送后输入应清空，got %q", m.input)
+	if v := m.ed.value(); v != "" {
+		t.Errorf("发送后输入应清空，got %q", v)
 	}
-	if len(m.messages) != 1 || m.messages[0].text != "/resume" {
-		t.Errorf("应发送 /resume，got %+v", m.messages)
+	if got := pendTexts(m); len(got) != 1 || got[0] != "/resume" {
+		t.Errorf("应发送 /resume，got %v", got)
 	}
 }
 
 func TestEnterNormalMessage(t *testing.T) {
-	m := testModel()
-	m.input = "hello world"
-	nm, cmd := m.handleKey(key(tea.KeyEnter))
-	m = *nm.(*model)
+	m, cmd := typed("hello world").handleKey(key(tea.KeyEnter))
 	if cmd == nil {
 		t.Fatal("enter 应返回发送命令")
 	}
-	if len(m.messages) != 1 || m.messages[0].text != "hello world" {
-		t.Errorf("普通输入应原样发送，got %+v", m.messages)
+	if got := pendTexts(m); len(got) != 1 || got[0] != "hello world" {
+		t.Errorf("普通输入应原样发送，got %v", got)
+	}
+}
+
+// 多行输入整条提交，行流里按 \n 拆成多行（每行独立折行/着色）
+func TestEnterMultiline(t *testing.T) {
+	m, _ := typed("第一行\n第二行").handleKey(key(tea.KeyEnter))
+	got := pendTexts(m)
+	if len(got) != 2 || got[0] != "第一行" || got[1] != "第二行" {
+		t.Errorf("多行输入应拆成 2 行，got %v", got)
 	}
 }
 
 func TestTabCompletes(t *testing.T) {
-	m := testModel()
-	m.input = "/"
-	nm, _ := m.handleKey(key(tea.KeyTab))
-	m = *nm.(*model)
-	if m.input != "/new" {
-		t.Errorf("Tab 应补全为 /new，got %q", m.input)
+	m, _ := typed("/").handleKey(key(tea.KeyTab))
+	if v := m.ed.value(); v != "/new" {
+		t.Errorf("Tab 应补全为 /new，got %q", v)
 	}
 }
 
 func TestUpDownWrap(t *testing.T) {
-	m := testModel()
-	m.input = "/"
+	m := typed("/")
 	// down: 0 → 1，再 down 回绕到 0
-	nm, _ := m.handleKey(key(tea.KeyDown))
-	m = *nm.(*model)
+	m, _ = m.handleKey(key(tea.KeyDown))
 	if m.menuSel != 1 {
 		t.Errorf("down 应移到 1，got %d", m.menuSel)
 	}
-	nm, _ = m.handleKey(key(tea.KeyDown))
-	m = *nm.(*model)
+	m, _ = m.handleKey(key(tea.KeyDown))
 	if m.menuSel != 0 {
 		t.Errorf("down 应回绕到 0，got %d", m.menuSel)
 	}
 	// up 回绕：0 → 末项
-	nm, _ = m.handleKey(key(tea.KeyUp))
-	m = *nm.(*model)
+	m, _ = m.handleKey(key(tea.KeyUp))
 	if m.menuSel != 1 {
 		t.Errorf("up 应回绕到末项 1，got %d", m.menuSel)
 	}
 }
 
-func TestEscClosesMenu(t *testing.T) {
-	m := testModel()
-	m.input = "/re"
-	nm, _ := m.handleKey(key(tea.KeyEsc))
-	m = *nm.(*model)
-	if m.input != "" {
-		t.Errorf("菜单态 esc 应清空输入，got %q", m.input)
+// esc 只收菜单，不没收用户敲的字；再编辑则菜单复原
+func TestEscHidesMenuKeepsInput(t *testing.T) {
+	m, _ := typed("/re").handleKey(key(tea.KeyEsc))
+	if v := m.ed.value(); v != "/re" {
+		t.Errorf("esc 不应清空输入，got %q", v)
 	}
-
-	// 非菜单态 esc 不破坏输入
-	m2 := testModel()
-	m2.input = "hello"
-	nm, _ = m2.handleKey(key(tea.KeyEsc))
-	m2 = *nm.(*model)
-	if m2.input != "hello" {
-		t.Errorf("非菜单态 esc 不应动输入，got %q", m2.input)
+	if len(m.menuMatches()) != 0 {
+		t.Error("esc 后菜单应收起")
+	}
+	m, _ = m.handleKey(keyRunes("s"))
+	if len(m.menuMatches()) == 0 {
+		t.Error("继续输入应让菜单复原")
 	}
 }
 
 func TestSpaceClosesMenu(t *testing.T) {
-	m := testModel()
-	m.input = "/ne"
-	m.handleKey(keyRunes("w"))
-	// 直接验证过滤逻辑：含空格即无菜单
-	m.input = "/new "
+	m, _ := typed("/new").handleKey(key(tea.KeySpace))
+	if v := m.ed.value(); v != "/new " {
+		t.Fatalf("空格应进入输入，got %q", v)
+	}
 	if got := m.menuMatches(); len(got) != 0 {
-		t.Errorf("含空格应关闭菜单，got %v", got)
+		t.Errorf("含空格应关闭菜单，got %v", names(got))
+	}
+}
+
+// 菜单条目多于窗口时按高亮开窗，且行数不超上限
+func TestMenuWindow(t *testing.T) {
+	var many []client.Command
+	for i := range 20 {
+		many = append(many, client.Command{Name: string(rune('a' + i))})
+	}
+	rows := renderMenu(many, 15, 40)
+	if len(rows) != menuMaxRows {
+		t.Fatalf("菜单行数 = %d, want %d", len(rows), menuMaxRows)
+	}
+	if !strings.Contains(strings.Join(rows, "\n"), "▸") {
+		t.Error("开窗后应仍能看到高亮项")
 	}
 }
 
@@ -221,30 +241,41 @@ func TestDescribeCommand(t *testing.T) {
 	}
 }
 
-// sendMsg 兜底：斜杠命令结果（ok:true）应渲染为 info 消息而非悬挂空 streaming
+// sendMsg 兜底：斜杠命令结果（ok:true）应渲染为 info 行
 func TestCommandResultRendered(t *testing.T) {
 	m := testModel()
-	m.streaming = &message{role: "assistant"}
+	m.awaiting = true
 	nm, _ := m.Update(sendMsg{reply: client.Reply{Ok: true, Command: "new"}})
 	m = nm.(model)
-	if len(m.messages) != 1 {
-		t.Fatalf("命令结果应产生 1 条消息，got %d", len(m.messages))
+	if len(m.pend) != 1 {
+		t.Fatalf("命令结果应产生 1 行，got %d", len(m.pend))
 	}
-	msg := m.messages[0]
-	if msg.role != "info" || !strings.Contains(msg.text, "新建会话") {
-		t.Errorf("命令结果应为 info 渲染，got %+v", msg)
+	if m.pend[0].role != "info" || !strings.Contains(m.pend[0].text, "新建会话") {
+		t.Errorf("命令结果应为 info 渲染，got %+v", m.pend[0])
 	}
-	if m.streaming != nil {
-		t.Error("命令结果定稿后 streaming 应清空")
+	if m.awaiting {
+		t.Error("命令结果落地后不应再等 POST 兜底")
 	}
 }
 
 func TestCommandErrorRendered(t *testing.T) {
 	m := testModel()
-	m.streaming = &message{role: "assistant"}
+	m.awaiting = true
 	nm, _ := m.Update(sendMsg{reply: client.Reply{Error: "unknown command"}})
 	m = nm.(model)
-	if len(m.messages) != 1 || m.messages[0].role != "error" {
-		t.Fatalf("命令错误应渲染为 error，got %+v", m.messages)
+	if len(m.pend) != 1 || m.pend[0].role != "error" {
+		t.Fatalf("命令错误应渲染为 error，got %+v", m.pend)
+	}
+}
+
+// 事件流已经吐出内容后，POST 的兜底结果不得再插一脚
+func TestSendFallbackIgnoredAfterStream(t *testing.T) {
+	m := testModel()
+	m.awaiting = true
+	m.handleEvent(client.Event{Type: "message_update", Payload: `{"delta":"已经在答了"}`})
+	nm, _ := m.Update(sendMsg{reply: client.Reply{Ok: true, Command: "new"}})
+	m = nm.(model)
+	if got := pendTexts(m); len(got) != 1 || got[0] != "已经在答了" {
+		t.Errorf("兜底不应覆盖流式内容，got %v", got)
 	}
 }

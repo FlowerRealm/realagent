@@ -30,16 +30,31 @@ func TestRenderPluginsEmpty(t *testing.T) {
 	}
 }
 
-// /plugins 失败（ok:false + error）应渲染为 error 消息
+// /plugins 失败（ok:false + error）应渲染为 error 行
 func TestPluginsErrorRendered(t *testing.T) {
 	m := testModel()
-	m.streaming = &message{role: "assistant"}
+	m.awaiting = true
 	nm, _ := m.Update(sendMsg{reply: client.Reply{Ok: false, Command: "plugins", Error: "plugin enable failed: x"}})
 	m = nm.(model)
-	if len(m.messages) != 1 || m.messages[0].role != "error" {
-		t.Fatalf("plugins 失败应为 error 消息，got %+v", m.messages)
+	if len(m.pend) != 1 || m.pend[0].role != "error" {
+		t.Fatalf("plugins 失败应为 error 行，got %+v", m.pend)
 	}
-	if !strings.Contains(m.messages[0].text, "plugin enable failed") {
-		t.Errorf("error 应透传 core 错误，got %q", m.messages[0].text)
+	if !strings.Contains(m.pend[0].text, "plugin enable failed") {
+		t.Errorf("error 应透传 core 错误，got %q", m.pend[0].text)
+	}
+}
+
+// 多插件列表拆成多行进行流（一行一个插件，各自独立折行）
+func TestPluginsListSplitsLines(t *testing.T) {
+	m := testModel()
+	m.awaiting = true
+	data, _ := json.Marshal([]client.PluginInfo{
+		{Name: "a", Status: "loaded"},
+		{Name: "b", Status: "loaded"},
+	})
+	nm, _ := m.Update(sendMsg{reply: client.Reply{Ok: true, Command: "plugins", Data: data}})
+	m = nm.(model)
+	if len(m.pend) != 2 {
+		t.Fatalf("两个插件应占 2 行，got %v", pendTexts(m))
 	}
 }

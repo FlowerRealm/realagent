@@ -124,6 +124,18 @@ assistant 消息中的一种 content block 类型（`{"type":"thinking","thinkin
 
 _Avoid_: `reasoning_content`（DeepSeek 原生 API 字段名，Anthropic 兼容端点映射为 thinking 块）
 
+## 活动区（Live Region）
+
+TUI 底部由 Bubble Tea 每帧重绘的区域：未定型行 + 审批框 + 斜杠菜单 + 读秒状态行 + 输入框。其上方是**终端原生 scrollback**——已定型的行由 TUI 打进去后不再归 TUI 管（[[ADR-0008]]）。活动区绝不能高过终端。
+
+_Avoid_: `视口`、`viewport`（本项目不自建滚动缓冲）
+
+## 定型（Freeze）
+
+一行渲染内容不再变化、可以打进 scrollback 的状态。判据只有一条：**追加式文本的贪心折行前缀稳定**，故除最后一个折行外全部定型（[[ADR-0008]]）。
+
+_Avoid_: `finalize`（原指把 streaming 消息收进列表，行模型下已无此概念）
+
 ---
 
 ## 已拍板（暂存，随决策更新）
@@ -139,6 +151,7 @@ _Avoid_: `reasoning_content`（DeepSeek 原生 API 字段名，Anthropic 兼容�
 - 日志：spdlog（第三方依赖）。
 - core 第三方依赖：libcurl + spdlog 两个（FTXUI 属 TUI 层）。
 - TUI：Go + Bubble Tea（ADR-0007）。参考 claude code / codex 客户端外观，无状态栏。
+- TUI 渲染：历史归终端管，不进 altscreen（ADR-0008）——定型的行打进终端原生 scrollback，Bubble Tea 只重绘底部活动区。
 - 配置约定：项目级 `.realagent/`（settings.json + extensions/）+ AGENTS.md；全局 `~/.realagent/`。
 - 上下文压缩：第一版不做。靠最大上下文模型硬撑，会话满则开新会话；后期可加 auto-compact。
 - Steering：第一版只支持中止（abort），不支持中途插话。插话（steering queue）后期基于异步引擎再加。
