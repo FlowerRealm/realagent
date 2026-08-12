@@ -59,6 +59,7 @@ struct CurlSink {
     CoreContext* ctx;
     const Usage* base;
     const std::atomic<bool>* abort;
+    bool parse_failed = false; // 协议插件报了 PLUGIN_ERR：与用户中断区分开
 };
 
 static int curl_progress_cb(void* clientp, curl_off_t, curl_off_t, curl_off_t, curl_off_t) {
@@ -74,8 +75,14 @@ static size_t curl_write_cb(char* ptr, size_t size, size_t nmemb, void* userdata
     if (!chunk) return 0;
     memcpy(chunk, ptr, n);
     chunk[n] = '\0';
-    s->proto->api->parse_feed(s->proto->instance, chunk, feed_sink, s);
+    const plugin_status_t rc = s->proto->api->parse_feed(s->proto->instance, chunk, feed_sink, s);
     free(chunk);
+    // 协议插件解析失败：立刻中止传输。继续读下去只会攒出一个"成功但空"的回答，
+    // 那比报错更糟——用户看不出发生了什么。（返回 < n 即令 curl 报 CURLE_WRITE_ERROR）
+    if (rc != PLUGIN_OK) {
+        s->parse_failed = true;
+        return 0;
+    }
     return n;
 }
 
@@ -108,19 +115,14 @@ static void feed_sink(void* sink_ctx, const char* type, const char* payload) {
         out->tool_uses.push_back(std::move(tu));
     } else if (t == "usage") {
         // 插件给的是本次调用的绝对值（后到覆盖先到），累加只在 Agent 跨 turn 做一次。
+        // 四字段齐不齐是协议插件的契约（PROTOCOL.md），core 不替它把关——插件吐坏帧
+        // 是插件的 bug，core 加一层校验既挡不住也修不了，只会把锅接过来。
         out->usage.input = ev["input"].as_int64().value_or(0);
         out->usage.output = ev["output"].as_int64().value_or(0);
         out->usage.cache_read = ev["cache_read"].as_int64().value_or(0);
         out->usage.cache_write = ev["cache_write"].as_int64().value_or(0);
         // 推送流里的 usage 帧一律是"本次 run 累计"：已完成 turn + 当前 turn
-        if (s->ctx->emit_fn) {
-            const Usage total = *s->base + out->usage;
-            s->ctx->emit_fn("usage", json{{"input", total.input},
-                                          {"output", total.output},
-                                          {"cache_read", total.cache_read},
-                                          {"cache_write", total.cache_write}}
-                                         .dump());
-        }
+        if (s->ctx->emit_fn) s->ctx->emit_fn("usage", to_json(*s->base + out->usage).dump());
     } else if (t == "stop") {
         out->stop_reason = ev["reason"].as_string().value_or("stop");
     }
@@ -178,7 +180,8 @@ bool Agent::llm_call(const json& dialog, LlmOutcome& out) {
 
     CURLcode rc = curl_easy_perform(curl);
     // 通知插件流结束（flush）——sink_ctx 必须与 curl 回调一致（feed_sink 按 CurlSink* 解引用）
-    proto->api->parse_feed(proto->instance, nullptr, feed_sink, &sink);
+    if (proto->api->parse_feed(proto->instance, nullptr, feed_sink, &sink) != PLUGIN_OK)
+        sink.parse_failed = true;
     curl_easy_cleanup(curl);
     if (hdrs) curl_slist_free_all(hdrs);
     // 释放协议插件分配的请求内存（api->free = delete[]）
@@ -187,8 +190,15 @@ bool Agent::llm_call(const json& dialog, LlmOutcome& out) {
         proto->api->free(proto->instance, const_cast<char*>(req.headers));
         proto->api->free(proto->instance, const_cast<char*>(req.body));
     }
+    // 解析失败优先报：curl 的 CURLE_WRITE_ERROR 只是我们主动中止的副作用，不是真因
+    if (sink.parse_failed) {
+        out.error = "协议插件解析响应失败（见 core 日志）";
+        fprintf(stderr, "[agent] %s\n", out.error.c_str());
+        return false;
+    }
     if (rc != CURLE_OK) {
-        fprintf(stderr, "[agent] curl 失败: %s\n", curl_easy_strerror(rc));
+        out.error = std::string("curl 失败: ") + curl_easy_strerror(rc);
+        fprintf(stderr, "[agent] %s\n", out.error.c_str());
         return false;
     }
     return true;
@@ -255,7 +265,8 @@ void Agent::run(const std::string& user_input) {
                 }
                 broadcast("interrupted", json{});
             } else {
-                broadcast("turn_end", json{{"error", "llm_call failed"}});
+                broadcast("turn_end",
+                          json{{"error", out.error.empty() ? "llm_call failed" : out.error}});
             }
             break;
         }

@@ -41,6 +41,8 @@ struct Usage {
     }
     bool empty() const { return input == 0 && output == 0 && cache_read == 0 && cache_write == 0; }
 };
+/* 描述表供出站用（to_json）：字段名与 PROTOCOL.md 的 usage 帧逐字一致 */
+BOOST_DESCRIBE_STRUCT(Usage, (), (input, output, cache_read, cache_write))
 
 /* 协议插件的解析结果（一次 LLM 调用的产出） */
 struct LlmOutcome {
@@ -54,6 +56,7 @@ struct LlmOutcome {
     };
     std::vector<ToolUse> tool_uses;
     std::string stop_reason;
+    std::string error;                   // 非空 = 本次调用失败的人话原因（广播给客户端）
     Usage usage;                         // 本次调用的 token 计数（绝对值，后到覆盖先到）
 };
 

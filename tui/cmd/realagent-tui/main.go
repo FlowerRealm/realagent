@@ -469,9 +469,15 @@ func (m *model) handleEvent(ev client.Event) tea.Cmd {
 		// 带 tool_uses 的 turn_end 只是本轮结束（下一轮继续跑，读秒不断）；
 		// stop_reason / error 才是真正收工。
 		var d struct {
-			ToolUses int `json:"tool_uses"`
+			ToolUses int    `json:"tool_uses"`
+			Error    string `json:"error"`
 		}
 		jsonUnmarshal(ev.Payload, &d)
+		// core 报的失败必须落到对话流里：只写 stderr 等于没人知道
+		// （core 的 stderr 在 make dev 下被重定向进 build/core.log）
+		if d.Error != "" {
+			m.emit("error", "✗ "+d.Error)
+		}
 		if d.ToolUses == 0 {
 			m.awaiting = false
 			m.busy.stop()
