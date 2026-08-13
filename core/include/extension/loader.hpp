@@ -2,7 +2,7 @@
  * loader.hpp — 插件加载器（extension 模块）
  *
  * 职责（ADR-0001）：
- *  - 扫描目录（项目级 .realagent/extensions + 全局 ~/.realagent/extensions）
+ *  - 扫描目录（全局 ~/.realagent/extensions，唯一来源）
  *  - 解析 plugin.json（名称/描述/版本/ABI/前置依赖/type）
  *  - dlopen + ABI 强校验（PLUGIN_ABI_VERSION）+ 创建实例 + init
  *  - 按前置依赖声明组装嵌套链（ADR-0004）

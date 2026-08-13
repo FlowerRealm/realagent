@@ -4,12 +4,12 @@
  * 直接编译 src/config.cpp，不起服务、不碰网络。验证：
  *   - 必需键缺失 → load 失败，错误信息点名缺哪个（不回退、不猜默认）
  *   - settings.json 坏了 → load 失败（不静默跳过）
- *   - 全局打底 + 项目级覆盖
+ *   - 唯一来源：全局 ~/.realagent/settings.json，不看 cwd
  *   - 模型档位：两档各取各的，共用 base_url
  *   - session_dir 是 core 常量：settings.json 写什么都不生效
  *   - persist：配置树整体落盘，重载一致
  *
- * 隔离：把 HOME 与 cwd 指到临时目录，避免读到用户真实 ~/.realagent/settings.json。
+ * 隔离：把 HOME 指到临时目录，避免读到用户真实 ~/.realagent/settings.json。
  */
 #include <unistd.h>
 
@@ -36,7 +36,7 @@ static int failures = 0;
         }                                                                       \
     } while (0)
 
-/* 临时项目根：带 .realagent/ 目录，令 find_project_root 停在此处 */
+/* 临时 HOME：全局配置唯一落点 */
 static fs::path make_sandbox(const char* tag) {
     const fs::path dir = fs::temp_directory_path() /
                          ("realagent-cfg-test-" + std::string(tag) + "-" +
@@ -46,8 +46,8 @@ static fs::path make_sandbox(const char* tag) {
     return dir;
 }
 
-static void write_settings(const fs::path& root, const std::string& body) {
-    std::ofstream f(root / ".realagent" / "settings.json");
+static void write_settings(const fs::path& home, const std::string& body) {
+    std::ofstream f(home / ".realagent" / "settings.json");
     f << body;
 }
 
@@ -57,14 +57,13 @@ static const char* k_full =
     R"("model":"m-main","small_model":"m-small"})";
 
 int main() {
-    const fs::path project = make_sandbox("proj");
-    const fs::path home = make_sandbox("home"); // 全局配置落这儿，与项目根分开
+    const fs::path home = make_sandbox("home");
     ::setenv("HOME", home.c_str(), 1);
-    fs::current_path(project);
+    fs::current_path(fs::temp_directory_path()); // cwd 不参与配置读取，随便在哪都一样
 
     printf("== 无配置：直接失败，不回落默认 ==\n");
     {
-        write_settings(project, "{}");
+        write_settings(home, "{}");
         const auto r = Config::load();
         CHECK(!r, "缺必需键 → load 失败");
         if (!r) {
@@ -73,13 +72,13 @@ int main() {
             CHECK(e.find("base_url") != std::string::npos, "错误点名 base_url");
             CHECK(e.find("model") != std::string::npos, "错误点名 model");
             CHECK(e.find("small_model") != std::string::npos, "错误点名 small_model");
-            CHECK(e.find(project.string()) != std::string::npos, "错误指出该往哪个文件补");
+            CHECK(e.find(home.string()) != std::string::npos, "错误指出该往哪个文件补");
         }
     }
 
     printf("== 缺一个键也不放行 ==\n");
     {
-        write_settings(project,
+        write_settings(home,
                        R"({"api_key":"sk-test","base_url":"https://example.test",)"
                        R"("model":"m-main"})");
         const auto r = Config::load();
@@ -89,7 +88,7 @@ int main() {
 
     printf("== 空串等于没配 ==\n");
     {
-        write_settings(project,
+        write_settings(home,
                        R"({"api_key":"","base_url":"https://example.test",)"
                        R"("model":"m-main","small_model":"m-small"})");
         const auto r = Config::load();
@@ -98,7 +97,7 @@ int main() {
 
     printf("== settings.json 坏了：硬错，不静默跳过 ==\n");
     {
-        write_settings(project, "{ not json");
+        write_settings(home, "{ not json");
         const auto r = Config::load();
         CHECK(!r, "解析失败 → load 失败");
         if (!r) CHECK(r.error().find("JSON") != std::string::npos, "错误说明是 JSON 问题");
@@ -106,7 +105,7 @@ int main() {
 
     printf("== 配齐：各键取值 + 两档模型 ==\n");
     {
-        write_settings(project, k_full);
+        write_settings(home, k_full);
         const auto r = Config::load();
         CHECK(r.has_value(), "配齐 → load 成功");
         if (r) {
@@ -118,23 +117,21 @@ int main() {
         }
     }
 
-    printf("== 项目级覆盖全局 ==\n");
+    printf("== cwd 不参与配置：换个目录结果不变 ==\n");
     {
-        write_settings(home, k_full);                              // 全局打底
-        write_settings(project, R"({"model":"proj-main"})");       // 项目只改主模型
+        write_settings(home, k_full);
+        const fs::path elsewhere = make_sandbox("elsewhere");
+        fs::current_path(elsewhere);
         const auto r = Config::load();
-        CHECK(r.has_value(), "全局补齐必需键 → load 成功");
-        if (r) {
-            CHECK(r->model(ModelTier::Main) == "proj-main", "项目级覆盖全局主模型");
-            CHECK(r->model(ModelTier::Small) == "m-small", "未覆盖项沿用全局");
-            CHECK(r->get("api_key") == "sk-test", "凭证沿用全局");
-        }
+        CHECK(r.has_value(), "cwd 换目录 → load 仍成功（只认 HOME）");
+        if (r) CHECK(r->model(ModelTier::Main) == "m-main", "配置内容与 cwd 无关");
+        fs::current_path(fs::temp_directory_path());
+        fs::remove_all(elsewhere);
     }
 
     printf("== session_dir 是常量，不可配置 ==\n");
     {
-        write_settings(home, "{}");
-        write_settings(project,
+        write_settings(home,
                        R"({"api_key":"sk-test","base_url":"https://example.test",)"
                        R"("model":"m-main","small_model":"m-small",)"
                        R"("session_dir":"/tmp/somewhere-else"})");
@@ -145,8 +142,7 @@ int main() {
 
     printf("== persist：整树落盘，重载一致 ==\n");
     {
-        write_settings(home, "{}");
-        write_settings(project, k_full);
+        write_settings(home, k_full);
         auto r = Config::load();
         CHECK(r.has_value(), "load 成功");
         if (r) {
@@ -162,7 +158,6 @@ int main() {
     }
 
     fs::current_path(fs::temp_directory_path());
-    fs::remove_all(project);
     fs::remove_all(home);
     if (failures == 0)
         printf("\n全部通过\n");

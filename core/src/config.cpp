@@ -18,11 +18,8 @@ constexpr std::string_view kRequired[] = {"api_key", "base_url", "model", "small
 
 fs::path settings_path(const fs::path& dir) { return dir / ".realagent" / "settings.json"; }
 
-// 项目根（无则退回 cwd）——配置写入与项目级读取共用同一落点
-fs::path project_dir() {
-    const std::string root = find_project_root(fs::current_path().string());
-    return root.empty() ? fs::current_path() : fs::path(root);
-}
+// 全局配置落点：~/.realagent/settings.json——唯一来源，不看 cwd
+fs::path global_dir() { return fs::path(getenv_or("HOME", ".")); }
 
 // 合入一份 settings.json：文件不存在 = 跳过；存在但读不了/解析不了 = 硬错
 std::expected<void, std::string> merge_file(json& into, const fs::path& path) {
@@ -53,21 +50,6 @@ std::string getenv_or(std::string_view name, std::string_view fallback) {
     return std::string(fallback);
 }
 
-std::string find_project_root(std::string_view start_dir) {
-    fs::path dir(start_dir.empty() ? fs::current_path() : fs::path(start_dir));
-    // 向上找 .realagent/ 或 .git
-    for (;;) {
-        if (fs::exists(dir / ".realagent") || fs::exists(dir / ".git"))
-            return dir.string();
-        const fs::path parent = dir.parent_path();
-        // 已到根：libc++ 下 path("/").parent_path() == "/"（has_parent_path 恒真），
-        // 必须显式判无进展，否则死循环。
-        if (parent.empty() || parent == dir) break;
-        dir = parent;
-    }
-    return "";
-}
-
 std::vector<std::string_view> Config::required_keys() {
     return {std::begin(kRequired), std::end(kRequired)};
 }
@@ -76,13 +58,9 @@ std::expected<Config, std::string> Config::load() {
     Config cfg;
     cfg.settings_ = json{};
 
-    // 全局打底，项目级覆盖
-    const fs::path global = settings_path(getenv_or("HOME", "."));
+    // 唯一来源：全局 ~/.realagent/settings.json。不看 cwd，不看项目
+    const fs::path global = settings_path(global_dir());
     if (auto r = merge_file(cfg.settings_, global); !r) return std::unexpected(r.error());
-    const fs::path project = settings_path(project_dir());
-    if (project != global) {
-        if (auto r = merge_file(cfg.settings_, project); !r) return std::unexpected(r.error());
-    }
 
     // 必需键一次报全：别让用户补一个跑一次
     // （走 const 引用取值：非 const operator[] 会给缺失键插 null，污染配置树）
@@ -93,7 +71,7 @@ std::expected<Config, std::string> Config::load() {
     }
     if (!missing.empty()) {
         return std::unexpected("配置缺必需键 [" + join(missing, ", ") + "]，补进 " +
-                               project.string() + "（必需：" +
+                               global.string() + "（必需：" +
                                join(required_keys(), " / ") + "）");
     }
     return cfg;
@@ -119,7 +97,7 @@ void Config::set(std::string_view key, const json& v) {
 }
 
 bool Config::persist_locked() {
-    const fs::path target = settings_path(project_dir());
+    const fs::path target = settings_path(global_dir());
 
     std::error_code ec;
     fs::create_directories(target.parent_path(), ec);
@@ -153,12 +131,7 @@ bool Config::persist() {
 }
 
 std::vector<std::string> Config::extension_dirs() const {
-    std::vector<std::string> dirs;
-    const std::string home = getenv_or("HOME", ".");
-    dirs.push_back(fs::path(home) / ".realagent" / "extensions");
-    const std::string root = find_project_root(fs::current_path().string());
-    if (!root.empty()) dirs.push_back(fs::path(root) / ".realagent" / "extensions");
-    return dirs;
+    return {(global_dir() / ".realagent" / "extensions").string()};
 }
 
 std::string Config::session_dir() const { return std::string(kSessionDir); }
