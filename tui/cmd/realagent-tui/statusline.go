@@ -171,6 +171,31 @@ func (sl statusline) applyStatuslineCmd(rest string) (statusline, string) {
 	}
 }
 
+// panel 把状态栏配置做成子面板（/statusline 无参数时打开）：
+// 每项确认后走的是和手打完全一样的 /statusline 子命令，本地生效不走网络。
+func (sl statusline) panel() *panel {
+	p := &panel{title: "状态栏配置（Enter 切换）"}
+	seg := func(name, arg string, on bool) panelItem {
+		verb := "enable"
+		if on {
+			verb = "disable"
+		}
+		state := "隐藏"
+		if on {
+			state = "显示"
+		}
+		return panelItem{label: name + "  " + state, mark: on, submit: "/statusline " + verb + " " + arg}
+	}
+	p.items = append(p.items,
+		seg("model", "model", sl.showModel),
+		seg("directory", "directory", sl.showDir),
+		seg("git", "git", sl.showGit),
+		panelItem{label: "icons  emoji", mark: sl.iconSet == "emoji", submit: "/statusline icons emoji"},
+		panelItem{label: "icons  nerd", mark: sl.iconSet == "nerd", submit: "/statusline icons nerd"},
+	)
+	return p
+}
+
 // describe 列出当前状态栏配置（/statusline 无参数时展示）
 func (sl statusline) describe() string {
 	seg := func(name string, on bool) string {

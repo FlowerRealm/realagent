@@ -22,18 +22,19 @@ import (
 // ==================== 样式 ====================
 
 var (
-	userStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("43")).Bold(true)
-	assistantStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
-	toolStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Italic(true)
-	thinkingStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("245")).Italic(true)
-	errorStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
-	dimStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
-	approvalStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("205")).Bold(true)
-	spinnerStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("205"))
-	statusStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
-	menuStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
-	menuSelStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("229")).Background(lipgloss.Color("238")).Bold(true)
-	cursorStyle    = lipgloss.NewStyle().Reverse(true)
+	userStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("43")).Bold(true)
+	assistantStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
+	toolStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Italic(true)
+	thinkingStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("245")).Italic(true)
+	errorStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
+	dimStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+	approvalStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("205")).Bold(true)
+	spinnerStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("205"))
+	statusStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
+	menuStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
+	menuSelStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("229")).Background(lipgloss.Color("238")).Bold(true)
+	panelTitleStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("205")).Bold(true)
+	cursorStyle     = lipgloss.NewStyle().Reverse(true)
 )
 
 // ==================== 行模型 ====================

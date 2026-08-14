@@ -6,7 +6,7 @@
 //
 // 渲染分两层（见 render.go）：已定型的行打进终端原生 scrollback（滚动/复制/
 // 搜索全用终端自带能力），Bubble Tea 只重绘底部活动区（未定型行 + 审批框 +
-// 斜杠菜单 + 读秒状态行 + 输入框）。
+// 子面板 + 斜杠菜单 + 读秒状态行 + 输入框）。
 package main
 
 import (
@@ -73,21 +73,23 @@ type pendingApproval struct {
 const menuMaxRows = 8
 
 type model struct {
-	client   *client.Client
-	pend     []line // 未提交进 scrollback 的行；m.open 时末行仍在增长
-	open     bool   // 末行是否还在流式增长
-	out      outbox // scrollback 提交队列（保序）
-	eventsCh <-chan client.Event
-	ed       editor // 输入行编辑器
-	width    int
-	height   int
-	approval *pendingApproval // 非 nil = 审批模态（忽略除 y/n 外按键）
-	commands []client.Command // 斜杠命令列表（GET /commands，启动时拉取）
-	menuSel  int              // 斜杠菜单高亮项（menuMatches 索引）
-	menuHid  bool             // esc 收起菜单（下次编辑输入即复原）
-	awaiting bool             // 已 POST /message 但推送流还没吐出任何内容
-	busy     activity         // 读秒状态行（status.go）：模型在干什么 + 已耗时
-	sl       statusline       // 状态栏（statusline.go）：model | directory | git
+	client    *client.Client
+	pend      []line // 未提交进 scrollback 的行；m.open 时末行仍在增长
+	open      bool   // 末行是否还在流式增长
+	out       outbox // scrollback 提交队列（保序）
+	eventsCh  <-chan client.Event
+	ed        editor // 输入行编辑器
+	width     int
+	height    int
+	approval  *pendingApproval // 非 nil = 审批模态（忽略除 y/n 外按键）
+	commands  []client.Command // 斜杠命令列表（GET /commands，启动时拉取）
+	menuSel   int              // 斜杠菜单高亮项（menuMatches 索引）
+	menuHid   bool             // esc 收起菜单（下次编辑输入即复原）
+	panel     *panel           // 非 nil = 子面板模态（panel.go）：↑/↓ 选择，Enter 确认，Esc 取消
+	panelWant string           // 期待用哪条命令的结果开面板（panelWantOf 算出，空 = 不开）
+	awaiting  bool             // 已 POST /message 但推送流还没吐出任何内容
+	busy      activity         // 读秒状态行（status.go）：模型在干什么 + 已耗时
+	sl        statusline       // 状态栏（statusline.go）：model | directory | git
 }
 
 func initialModel(c *client.Client) model {
@@ -200,6 +202,16 @@ func (m model) update(msg tea.Msg) (model, tea.Cmd) {
 			m.awaiting = false
 			m.busy.stop()
 		case v.reply.Ok:
+			m.awaiting = false
+			m.busy.stop() // 命令不启动 agent turn，收到结果即收工
+			// 无参的 /model /plugins 求的是「选一个」，不是「看一坨文本」：
+			// 同一份 data 载荷直接做成子面板（panel.go）。造不出面板才退回文本。
+			if m.panelWant == v.reply.Command {
+				if p := makePanel(v.reply.Command, v.reply.Data); p != nil {
+					m.panel = p
+					return m, nil
+				}
+			}
 			// 斜杠命令结果（core 返回 {"ok":true,"command":...}），渲染为 info 行。
 			// plugins 命令携带 data 载荷（[]PluginInfo），可直接展示。
 			text := describeCommand(v.reply.Command, v.reply.Messages)
@@ -210,8 +222,6 @@ func (m model) update(msg tea.Msg) (model, tea.Cmd) {
 				text = renderModels(v.reply.Data)
 			}
 			m.emit("info", text)
-			m.awaiting = false
-			m.busy.stop() // 命令不启动 agent turn，收到结果即收工
 		case v.reply.Reply != "":
 			m.emit("assistant", v.reply.Reply)
 			m.awaiting = false
@@ -237,6 +247,7 @@ func (m model) update(msg tea.Msg) (model, tea.Cmd) {
 // ==================== 按键 ====================
 
 // handleKey 处理按键。审批模态下只响应 y/n（a/d）与 ctrl+c，其余忽略。
+// 子面板模态下只响应 ↑/↓、Enter、Esc 与 ctrl+c。
 // 斜杠菜单（输入以 '/' 开头）时：↑/↓ 移动高亮、Tab 补全、Enter 执行、Esc 收起。
 func (m model) handleKey(v tea.KeyMsg) (model, tea.Cmd) {
 	if m.approval != nil {
@@ -249,6 +260,10 @@ func (m model) handleKey(v tea.KeyMsg) (model, tea.Cmd) {
 			return m.decideApproval(false)
 		}
 		return m, nil
+	}
+
+	if m.panel != nil {
+		return m.panelKey(v.String())
 	}
 
 	// 粘贴：整块原样插入（含换行），不当按键解释
@@ -275,7 +290,7 @@ func (m model) handleKey(v tea.KeyMsg) (model, tea.Cmd) {
 		if matches := m.menuMatches(); len(matches) > 0 {
 			m.ed.set("/" + matches[m.menuIndex(matches)].Name) // 菜单执行 = 补全 + 发送
 		}
-		return m.submitInput()
+		return m.submitInput(false)
 
 	case "alt+enter", "ctrl+j":
 		m.ed.insert("\n")
@@ -357,15 +372,9 @@ func (m model) menuNav(key string) (model, tea.Cmd) {
 	}
 	switch key {
 	case "up":
-		m.menuSel = m.menuIndex(matches) - 1
-		if m.menuSel < 0 {
-			m.menuSel = len(matches) - 1
-		}
+		m.menuSel = wrapIndex(m.menuIndex(matches)-1, len(matches))
 	case "down":
-		m.menuSel = m.menuIndex(matches) + 1
-		if m.menuSel >= len(matches) {
-			m.menuSel = 0
-		}
+		m.menuSel = wrapIndex(m.menuIndex(matches)+1, len(matches))
 	case "tab":
 		m.menuSel = m.menuIndex(matches)
 		m.ed.set("/" + matches[m.menuSel].Name) // 补全：输入框写为完整命令
@@ -373,22 +382,53 @@ func (m model) menuNav(key string) (model, tea.Cmd) {
 	return m, nil
 }
 
-// submitInput 发送当前输入（普通消息或斜杠命令），清空输入框
-func (m model) submitInput() (model, tea.Cmd) {
+// panelKey 处理子面板按键：↑/↓（Tab/Shift+Tab 同义）移动高亮，Enter 确认，Esc 取消。
+// 确认走的就是 submitInput——面板只是替用户把命令打全了，没有第二套提交路径。
+func (m model) panelKey(key string) (model, tea.Cmd) {
+	p := m.panel
+	switch key {
+	case "ctrl+c":
+		return m, tea.Quit
+	case "esc":
+		m.panel = nil
+		m.panelWant = ""
+	case "up", "shift+tab":
+		p.sel = wrapIndex(p.sel-1, len(p.items))
+	case "down", "tab":
+		p.sel = wrapIndex(p.sel+1, len(p.items))
+	case "enter":
+		item := p.items[p.sel]
+		m.panel = nil
+		m.ed.set(item.submit)
+		return m.submitInput(true)
+	}
+	return m, nil
+}
+
+// submitInput 发送当前输入（普通消息或斜杠命令），清空输入框。
+// fromPanel = 这条输入是子面板确认出来的（决定结果回来后面板要不要接着开，见 panelWantOf）。
+func (m model) submitInput(fromPanel bool) (model, tea.Cmd) {
 	input := strings.TrimSpace(m.ed.value())
 	if input == "" {
 		return m, nil
 	}
 	m.ed.clear()
 	m.menuSel = 0
+	m.panelWant = panelWantOf(input, fromPanel)
 	m.emit("user", input)
 
 	// /statusline 是纯客户端命令（statusline.go）：core 不认展示偏好，本地处理，不占用网络往返
-	if input == "/statusline" || strings.HasPrefix(input, "/statusline ") {
-		rest := strings.TrimSpace(strings.TrimPrefix(input, "/statusline"))
+	if cmd, rest := splitCommand(input); cmd == "/statusline" {
+		if rest == "" {
+			m.panel = m.sl.panel() // 无参 = 开面板选，面板本身就是配置一览
+			return m, nil
+		}
 		var msg string
 		m.sl, msg = m.sl.applyStatuslineCmd(rest)
 		m.emit("info", msg)
+		if m.panelWant == "statusline" {
+			m.panel = m.sl.panel() // 面板里改的，改完还留在面板里接着改
+		}
 		return m, nil
 	}
 
@@ -545,6 +585,9 @@ func (m model) View() string {
 	if m.approval != nil {
 		rows = append(rows, renderApproval(m.approval, width)...)
 	}
+	if m.panel != nil {
+		rows = append(rows, renderPanel(m.panel, width)...)
+	}
 	if matches := m.menuMatches(); len(matches) > 0 {
 		rows = append(rows, renderMenu(matches, m.menuIndex(matches), width)...)
 	}
@@ -566,21 +609,7 @@ func (m model) View() string {
 
 // renderMenu 渲染斜杠命令菜单（输入行上方）：▸ 高亮当前项，条目多时按高亮开窗
 func renderMenu(cmds []client.Command, sel, width int) []string {
-	lo := 0
-	if len(cmds) > menuMaxRows {
-		lo = sel - menuMaxRows/2
-		if lo < 0 {
-			lo = 0
-		}
-		if lo > len(cmds)-menuMaxRows {
-			lo = len(cmds) - menuMaxRows
-		}
-	}
-	hi := lo + menuMaxRows
-	if hi > len(cmds) {
-		hi = len(cmds)
-	}
-
+	lo, hi := window(len(cmds), sel, menuMaxRows)
 	var out []string
 	for i := lo; i < hi; i++ {
 		text := "/" + cmds[i].Name
