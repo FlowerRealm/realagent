@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.25)
+cmake_minimum_required(VERSION 3.30)
 
 # brew llvm clang 自带 SDK/头处理。禁用 CMake 的 macOS sysroot 注入，
 # 否则会把 Xcode SDK usr/include 加为 isystem，与 libc++ 冲突（sys/_types.h 找不到 size_t）。
