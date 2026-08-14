@@ -71,6 +71,20 @@ static json models_payload(const CoreContext& ctx) {
     return arr;
 }
 
+/* 状态栏载荷：配的模型名 + 注册表里查到的元数据。
+ * 查不到就只回名字——模型注册表是参考资料，不是白名单（ADR-0009）。
+ * GET /statusline 与推送流的 statusline 帧共用这一份，两边不可能说法不一。 */
+static json statusline_payload(const CoreContext& ctx) {
+    json out;
+    const std::string name = ctx.config->model(ModelTier::Main);
+    out["model"] = name;
+    if (const auto it = ctx.models.find(name); it != ctx.models.end()) {
+        out["owned_by"] = it->second.def.owned_by;
+        out["context"] = it->second.def.context;
+    }
+    return out;
+}
+
 int main(int argc, char** argv) {
     // 配置是刚需：缺键/配置文件坏了就地退出，不带残缺配置往下跑
     auto loaded = Config::load();
@@ -267,18 +281,8 @@ int main(int argc, char** argv) {
     // —— 插件管理端点（TUI /plugins 命令的数据源） ——
     // 写操作锁 agent_mtx（对齐 /new 线程纪律：与 agent 运行互斥，避免执行中改注册表）
     cbs.on_plugins = [&mgr]() { return plugins_payload(mgr.list()).dump(); };
-    // 状态栏数据（GET /statusline）：配的模型名 + 注册表里查到的元数据。
-    // 查不到就只回名字——模型注册表是参考资料，不是白名单（ADR-0009）
-    cbs.on_statusline = [&ctx]() {
-        json out;
-        const std::string name = ctx.config->model(ModelTier::Main);
-        out["model"] = name;
-        if (const auto it = ctx.models.find(name); it != ctx.models.end()) {
-            out["owned_by"] = it->second.def.owned_by;
-            out["context"] = it->second.def.context;
-        }
-        return out.dump();
-    };
+    // 状态栏数据（GET /statusline）：客户端启动时拉一次，之后由 statusline 帧推更新
+    cbs.on_statusline = [&ctx]() { return statusline_payload(ctx).dump(); };
     cbs.on_plugin_enable = [&mgr, &agent_mtx](const std::string& name) {
         std::lock_guard<std::mutex> lk(agent_mtx);
         if (mgr.enable(name)) return std::string("{\"ok\":true}");
@@ -293,8 +297,16 @@ int main(int argc, char** argv) {
         err["error"] = "plugin disable failed: " + name;
         return err.dump();
     };
-    // 事件循环每轮：把 agent 线程入队的事件 flush 到推送流
+    // 事件循环每轮：配置文件盯一眼，把 agent 线程入队的事件 flush 到推送流
+    //
+    // settings.json 变了就整树重读（编辑器手改、/model 切档写回的都算），
+    // 下一次 LLM 调用即用新模型，同时推一帧 statusline。配置改动最终都落在这个文件上，
+    // 所以文件就是唯一信号——core 不区分"谁改的"，客户端也不需要知道。
+    // 不为此单开线程：推帧必须在事件循环线程（ADR-0002），线程只能把活儿再传回来。
     cbs.on_tick = [&]() {
+        if (ctx.config->reload_if_changed())
+            server.push_event("statusline", statusline_payload(ctx).dump());
+
         std::deque<std::pair<std::string, std::string>> batch;
         {
             std::lock_guard<std::mutex> lk(ev_mtx);

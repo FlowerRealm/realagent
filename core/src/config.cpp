@@ -33,6 +33,14 @@ std::expected<void, std::string> merge_file(json& into, const fs::path& path) {
     return {};
 }
 
+// settings.json 的 mtime（取不到 = 0，与"文件不存在"同值）
+int64_t mtime_of(const fs::path& path) {
+    std::error_code ec;
+    const auto t = fs::last_write_time(path, ec);
+    if (ec) return 0;
+    return static_cast<int64_t>(t.time_since_epoch().count());
+}
+
 std::string join(const std::vector<std::string_view>& items, const char* sep) {
     std::string out;
     for (const auto& s : items) {
@@ -74,7 +82,26 @@ std::expected<Config, std::string> Config::load() {
                                global.string() + "（必需：" +
                                join(required_keys(), " / ") + "）");
     }
+    cfg.mtime_ = mtime_of(global);
     return cfg;
+}
+
+// 重载 = 再 load 一次，把配置树整个换掉。加载的本质就是复写，没有第二套读取/校验路径。
+bool Config::reload_if_changed() {
+    const int64_t mt = mtime_of(settings_path(global_dir()));
+
+    std::lock_guard<std::mutex> lk(*mutex_);
+    if (mt == 0 || mt == mtime_) return false; // 文件没了或没动过
+    mtime_ = mt;                               // 坏文件也记：别每轮重读同一个坏文件
+
+    // 坏 JSON / 缺必需键保留旧树：启动缺配置该退出，跑着的会话不该被一次手滑写崩
+    auto fresh = Config::load();
+    if (!fresh) {
+        fprintf(stderr, "[config] reload 忽略：%s\n", fresh.error().c_str());
+        return false;
+    }
+    settings_ = std::move(fresh->settings_);
+    return true;
 }
 
 std::string Config::get(std::string_view key) const {
@@ -122,6 +149,7 @@ bool Config::persist_locked() {
         fs::remove(tmp, ec);
         return false;
     }
+    mtime_ = 0; // 写完就作废：自己写的和别人写的一样，下一轮照常重读
     return true;
 }
 

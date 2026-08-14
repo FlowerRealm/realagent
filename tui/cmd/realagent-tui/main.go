@@ -483,6 +483,13 @@ func (m *model) handleEvent(ev client.Event) tea.Cmd {
 	case "thinking_stop":
 		m.closeLine()
 
+	case "statusline":
+		// core 那边配置变了（/model 切档、直接改 settings.json）就推一帧过来：
+		// 覆盖写，与启动时 GET /statusline 同一份载荷，TUI 不问是谁改的
+		var d client.Statusline
+		jsonUnmarshal(ev.Payload, &d)
+		m.sl.model = d.Model
+
 	case "status_update":
 		// core 给的是本次 run 累计的绝对值：覆盖写，TUI 不做任何算术。
 		// 帧是开放键集，这里只取认得的键，不认识的忽略（ADR-0009）

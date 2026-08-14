@@ -57,8 +57,21 @@ data: <json>
 | `tool_execution_start/end` | 工具信息 | 工具生命周期 |
 | `turn_start/end` | 轮次信息 | Turn 生命周期 |
 | `status_update` | 运行态数据 | 插件报的状态行数字（开放键集，见下） |
+| `statusline` | 状态栏数据 | 会话身份变了就推一帧（见下），与 `GET /statusline` 同一份载荷 |
 | `permission_request` | 审批问询 | 审批请求（可靠，卡点） |
 | `agent_start/end` | 运行信息 | Agent 生命周期 |
+
+### statusline 帧
+
+```json
+{"model": "deepseek-v4", "owned_by": "deepseek", "context": 131072}
+```
+
+`GET /statusline` 的载荷原样推送：客户端启动时 GET 一次拿初值，之后只等这个帧。
+
+- **变了才推**：core 每轮事件循环比对当前载荷，不同才发一帧，相同不发。
+- **两条改法一条路**：`/model <name>` 切档、用户直接编辑 `~/.realagent/settings.json`，客户端收到的是同一个帧，不需要知道是谁改的。
+- **配置文件热重载**：core 每轮事件循环看一眼 `settings.json` 的 mtime，变了就整树重读，下一次 LLM 调用即用新模型——改配置不必重启 core。坏 JSON / 缺必需键一律保留旧配置（跑着的会话不能被一次手滑写崩），只在 stderr 留一行。
 
 ### status_update 帧
 

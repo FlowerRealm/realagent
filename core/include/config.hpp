@@ -17,9 +17,12 @@
  * 线程安全：内部 mutex 保护配置树——agent 线程并发 get / 事件循环 set、persist 均安全。
  * persist() 原子写 ~/.realagent/settings.json（tmp+rename）。
  * 变更 API（set/persist）仅服务于运行时开关的持久化：插件启停、/model 切档。
+ * reload_if_changed() 让改过的 settings.json 就地生效——文件既然是唯一来源，
+ * 它变了就该算数，不需要重启 core。
  */
 #pragma once
 
+#include <cstdint>
 #include <expected>
 #include <memory>
 #include <mutex>
@@ -58,6 +61,11 @@ public:
     // 原子写 ~/.realagent/settings.json
     bool persist();
 
+    // settings.json 的 mtime 变了就整树重读，返回 true = 配置树已更新。
+    // 文件是唯一真相源，所以加载就是复写，不是合并；自己 persist() 写的与别人写的同等对待。
+    // 坏 JSON / 缺必需键一律保留旧树（跑着的会话不能被一次手滑写崩）。
+    bool reload_if_changed();
+
     // 插件发现目录（全局 ~/.realagent/extensions，唯一来源）
     std::vector<std::string> extension_dirs() const;
 
@@ -72,7 +80,8 @@ public:
     json to_json() const;
 
 private:
-    json settings_;  // 配置树（全局 ~/.realagent/settings.json）
+    json settings_;         // 配置树（全局 ~/.realagent/settings.json）
+    int64_t mtime_ = 0;     // 上次读到的 settings.json mtime（0 = 文件当时不存在）
     // mutex 不可拷贝/移动，用 shared_ptr 包装保持 Config 可拷贝（load() 按值返回）
     mutable std::shared_ptr<std::mutex> mutex_ = std::make_shared<std::mutex>();
 

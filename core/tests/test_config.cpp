@@ -8,16 +8,19 @@
  *   - 模型档位：两档各取各的，共用 base_url
  *   - session_dir 是 core 常量：settings.json 写什么都不生效
  *   - persist：配置树整体落盘，重载一致
+ *   - reload_if_changed：外部改文件就地生效；坏文件 / 缺键保留旧树；自己 persist 不算变更
  *
  * 隔离：把 HOME 指到临时目录，避免读到用户真实 ~/.realagent/settings.json。
  */
 #include <unistd.h>
 
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <thread>
 
 #include "config.hpp"
 
@@ -154,6 +157,50 @@ int main() {
                 CHECK(re->model(ModelTier::Small) == "m-small", "落盘后必需键仍在");
                 CHECK(re->has("plugins"), "运行时改动落盘");
             }
+        }
+    }
+
+    printf("== reload_if_changed：外部改文件就地生效 ==\n");
+    {
+        write_settings(home, k_full);
+        auto r = Config::load();
+        CHECK(r.has_value(), "load 成功");
+        if (r) {
+            CHECK(!r->reload_if_changed(), "文件没动 → 不重载");
+
+            // mtime 粒度：写之前先把时间戳推开，避免同一时刻两次写被当成没动
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            write_settings(home,
+                           R"({"api_key":"sk-test","base_url":"https://example.test/anthropic",)"
+                           R"("model":"m-new","small_model":"m-small"})");
+            CHECK(r->reload_if_changed(), "文件改了 → 重载");
+            CHECK(r->model(ModelTier::Main) == "m-new", "主模型换成新值");
+            CHECK(!r->reload_if_changed(), "同一份文件不重复重载");
+
+            // 手滑写坏文件：保留旧树，跑着的会话不受影响
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            write_settings(home, "{ not json");
+            CHECK(!r->reload_if_changed(), "坏 JSON → 不重载");
+            CHECK(r->model(ModelTier::Main) == "m-new", "坏文件不污染现有配置");
+
+            // 缺必需键同理：不接受半残配置
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            write_settings(home, R"({"api_key":"sk-test"})");
+            CHECK(!r->reload_if_changed(), "缺必需键 → 不重载");
+            CHECK(r->model(ModelTier::Main) == "m-new", "缺键不污染现有配置");
+
+            // 整树替换：文件里没有的键，重载后就没了（文件是唯一真相源）
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            r->set("plugins", realagent::json::parse(R"({"disabled":["perm-ask"]})").value());
+            write_settings(home, k_full);
+            CHECK(r->reload_if_changed(), "恢复合法文件 → 重载");
+            CHECK(!r->has("plugins"), "整树替换，不是合并");
+
+            // persist 与外部写同等对待：写完照样重载一次（读回自己写的，结果不变）
+            r->set("model", realagent::json("m-persisted"));
+            CHECK(r->persist(), "persist 成功");
+            CHECK(r->reload_if_changed(), "persist 后照常重载（不认谁写的）");
+            CHECK(r->model(ModelTier::Main) == "m-persisted", "读回来还是自己写的值");
         }
     }
 

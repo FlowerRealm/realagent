@@ -4,6 +4,8 @@ package main
 import (
 	"strings"
 	"testing"
+
+	"realagent/tui/internal/client"
 )
 
 func testStatusline() statusline {
@@ -60,6 +62,23 @@ func TestStatuslineRejectsUnknownArgs(t *testing.T) {
 		if msg == "" {
 			t.Errorf("applyStatuslineCmd(%q) 应给出提示", rest)
 		}
+	}
+}
+
+// core 推来的 statusline 帧覆盖模型名：/model 切档、外部改 settings.json 都走这一条路
+func TestStatuslineEventUpdatesModel(t *testing.T) {
+	m := testModel()
+	m.sl = testStatusline()
+	feedEvents(&m, client.Event{Type: "statusline",
+		Payload: `{"model":"deepseek-v4","owned_by":"deepseek","context":131072}`})
+	if m.sl.model != "deepseek-v4" {
+		t.Errorf("statusline 帧后 model = %q, want deepseek-v4", m.sl.model)
+	}
+	if !strings.Contains(m.sl.render(), "deepseek-v4") {
+		t.Errorf("状态栏应渲染新模型: %q", m.sl.render())
+	}
+	if len(m.pend) != 0 {
+		t.Errorf("statusline 帧不该往对话流里写东西，got %v", roleTexts(m))
 	}
 }
 
