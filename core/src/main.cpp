@@ -86,7 +86,8 @@ static json statusline_payload(const CoreContext& ctx) {
 }
 
 int main(int argc, char** argv) {
-    // 配置是刚需：缺键/配置文件坏了就地退出，不带残缺配置往下跑
+    // 配置缺项不是错（缺的取默认值，见 config_defaults.hpp），但文件坏了就地退出：
+    // 读不懂用户写了什么，就别带着半份配置往下跑
     auto loaded = Config::load();
     if (!loaded) {
         fprintf(stderr, "[config] %s\n", loaded.error().c_str());
@@ -214,8 +215,9 @@ int main(int argc, char** argv) {
                         out["error"] = "unknown model: " + name;
                         return out.dump();
                     }
-                    ctx.config->set("model", json(name));
-                    if (!ctx.config->persist()) {
+                    // 点对点写：只改文件里的 model 这一个键。statusline 帧不在这里推——
+                    // 事件循环发现载荷变了自己会推（见 on_tick），改配置的地方不必操心通知谁
+                    if (!ctx.config->persist("model", json(name))) {
                         out["ok"] = false;
                         out["error"] = "写入 settings.json 失败";
                         return out.dump();
@@ -297,15 +299,18 @@ int main(int argc, char** argv) {
         err["error"] = "plugin disable failed: " + name;
         return err.dump();
     };
-    // 事件循环每轮：配置文件盯一眼，把 agent 线程入队的事件 flush 到推送流
+    // 事件循环每轮：状态栏盯一眼，把 agent 线程入队的事件 flush 到推送流
     //
-    // settings.json 变了就整树重读（编辑器手改、/model 切档写回的都算），
-    // 下一次 LLM 调用即用新模型，同时推一帧 statusline。配置改动最终都落在这个文件上，
-    // 所以文件就是唯一信号——core 不区分"谁改的"，客户端也不需要知道。
+    // 状态栏载荷变了就推一帧。载荷本身就是信号——谁改的配置、怎么改的，这里不关心，
+    // 改配置的代码路径也就不需要记得通知谁（漏不掉，也不会为无关变更白推）。
     // 不为此单开线程：推帧必须在事件循环线程（ADR-0002），线程只能把活儿再传回来。
+    // 启动值取一次，避免首轮推一帧与客户端 GET /statusline 重复的内容。
+    std::string last_statusline = statusline_payload(ctx).dump();
     cbs.on_tick = [&]() {
-        if (ctx.config->reload_if_changed())
-            server.push_event("statusline", statusline_payload(ctx).dump());
+        if (std::string cur = statusline_payload(ctx).dump(); cur != last_statusline) {
+            last_statusline = std::move(cur);
+            server.push_event("statusline", last_statusline);
+        }
 
         std::deque<std::pair<std::string, std::string>> batch;
         {

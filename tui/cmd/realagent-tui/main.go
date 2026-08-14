@@ -484,7 +484,7 @@ func (m *model) handleEvent(ev client.Event) tea.Cmd {
 		m.closeLine()
 
 	case "statusline":
-		// core 那边配置变了（/model 切档、直接改 settings.json）就推一帧过来：
+		// core 那边状态栏载荷变了（/model 切档）就推一帧过来：
 		// 覆盖写，与启动时 GET /statusline 同一份载荷，TUI 不问是谁改的
 		var d client.Statusline
 		jsonUnmarshal(ev.Payload, &d)

@@ -33,7 +33,7 @@ M6 TUI              → M7 集成与测试
 
 **已定实现约定**
 - 测试框架：C++ 用 Catch2（单头集成），Go 用内置 testing
-- API key：`.realagent/settings.json` 的 `api_key`（唯一来源，不读 env、无默认）
+- API key：`.realagent/settings.json` 的 `api_key`（不读 env；core 默认树里是空串，缺省即不发 Authorization）
 
 **技术要点**
 - JSON 封装参考 `~/revlm/backend/include/util/json.hpp`：boost::json 子类，默认 `{}`、链式 `operator[]`（读缺键返回 null 不抛异常、写自动构造对象/数组）、宽容 parse（全文失败后截取首尾 `{}` 重试——为 LLM 输出带额外文本设计）、optional 提取器（as_string/as_int64 返回 optional 不抛异常）。
@@ -54,7 +54,7 @@ M6 TUI              → M7 集成与测试
 
 **技术要点**
 - 插件加载链是第一阶段的**交付关键路径**（core 零内置工具，一切能力来自插件）。
-- 插件配置由 core 统一注入（env > settings.json > 默认），插件初始化接口接收配置节。
+- 插件配置由 core 统一注入（代码默认树打底 < settings.json 覆盖，不读 env），插件初始化接口接收合并后的配置节。
 - 事件订阅：单入口 `on_event(handle, event*)`，插件内按 type 字符串分发。
 
 **风险**
@@ -108,8 +108,8 @@ M6 TUI              → M7 集成与测试
 
 **技术要点**
 - 协议/供应商拆分：`/v1/messages` 是协议（多家公司共用），协议层不识别供应商；供应商默认值下沉到壳。
-- 端点与模型名无默认：core 侧必配（缺则启动失败），协议层与壳都不该再兜底。
-- 可配置：api_key / base_url / model / small_model，全部经 `.realagent/settings.json`，不读 env。base_url 与 api_key 同级重要（代理/网关用户必须能自定义端点）。
+- 端点与模型名在 core 侧无默认（默认树里是空串），但**壳负责兜底**（ADR-0010）：core 不做必需键校验、不因缺配置退出。
+- 可配置：api_key / base_url / model / small_model，全部可缺省，经 `.realagent/settings.json` 覆盖代码默认树，不读 env。base_url 与 api_key 同级重要（代理/网关用户必须能自定义端点）。
 - DeepSeek 兼容端点细节（已查证）：tools/tool_use/tool_result 全支持；tool_choice 四模式全支持；stream 全支持；`cache_control` 被忽略；thinking 的 budget_tokens 忽略；thinking 块带 signature（回传历史用）。
 - 壳不做模型映射：`claude-*` 原样透传（供应商特殊逻辑一律不进壳）。
 

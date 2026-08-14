@@ -397,13 +397,12 @@ std::vector<std::string> PluginManager::read_disabled() const {
 }
 
 bool PluginManager::write_disabled(const std::vector<std::string>& list) {
-    // 写入合并树 plugins.disabled 并持久化（契约：Config::set + persist）
+    // 点对点写入 plugins 这一个键（Config::persist 只改文件里的它，其余原样保留）
     json plugins;
     json arr = json::array();
     for (const auto& n : list) arr.push_back(n);
     plugins["disabled"] = std::move(arr);
-    ctx_.config->set("plugins", plugins);
-    return ctx_.config->persist();
+    return ctx_.config->persist("plugins", plugins);
 }
 
 bool PluginManager::enable(const std::string& name) {

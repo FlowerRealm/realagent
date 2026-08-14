@@ -65,7 +65,7 @@ func TestStatuslineRejectsUnknownArgs(t *testing.T) {
 	}
 }
 
-// core 推来的 statusline 帧覆盖模型名：/model 切档、外部改 settings.json 都走这一条路
+// core 推来的 statusline 帧覆盖模型名：/model 切档走这一条路（手改 settings.json 需重启 core，ADR-0010）
 func TestStatuslineEventUpdatesModel(t *testing.T) {
 	m := testModel()
 	m.sl = testStatusline()

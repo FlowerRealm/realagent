@@ -166,7 +166,7 @@ _Avoid_: `cost 帧`（单值帧型是死路，加第二个值就得破坏客户�
 
 ## Statusline（状态栏）
 
-输入框**下方**的常驻栏：`🤖 model | 📁 dir | 🌿 git`。内容是**这次会话的身份信息**——哪个模型、哪个目录、哪个分支。目录与分支会话期内不变，启动拿一次；模型会被改（`/model` 切档、直接编辑 `settings.json`），改了由 core 推 [[statusline]] 帧覆盖写——客户端不轮询，也不关心是谁改的。展示偏好（显示哪几段、emoji 还是 nerd font）纯客户端状态，core 不认。
+输入框**下方**的常驻栏：`🤖 model | 📁 dir | 🌿 git`。内容是**这次会话的身份信息**——哪个模型、哪个目录、哪个分支。目录与分支会话期内不变，启动拿一次；模型会被 `/model` 切档改，改了由 core 推 [[statusline]] 帧覆盖写——客户端不轮询，也不关心是谁改的。推帧的触发是**主循环比对载荷**：事件循环每轮算一次 statusline 载荷，与上次推送的不同才推。因此改配置的代码路径不需要记得通知谁，与状态栏无关的配置变更（如 `plugins.disabled`）也不会白推一帧。展示偏好（显示哪几段、emoji 还是 nerd font）纯客户端状态，core 不认。
 
 _Avoid_: `状态行`（那是活动区里的另一条，见下）
 
@@ -224,10 +224,12 @@ _Avoid_: `finalize`（原指把 streaming 消息收进列表，行模型下已�
 - 插件 type：protocol / tool / permission / session 四类（ADR-0001）。
 - 插件元数据：独立 JSON 文件（`plugin.json`），含名称/描述/版本/ABI 版本/前置依赖。
 - 配置产物与打包产物分离：用户可改的一律在运行时目录（`~/.realagent/settings.json`、`~/.realagent/models.json`），插件目录只放打包产物（`plugin.json` + 动态库 + 出厂 `models.json`），重装即覆盖，不劝用户改。
-- 配置机制：凭证与偏好的唯一来源是 `settings.json`（全局 `~/.realagent/` 打底，项目级 `.realagent/` 覆盖）。**无 env 覆盖、无内置默认、无回落**：必需键（api_key / base_url / model / small_model）缺一个 core 就退出并点名缺哪个；配置文件存在但解析失败同样是硬错。core 不认任何供应商身份，端点与模型名一律由用户配置。插件初始化时由 core 注入配置节，插件不自行解析配置。
-- 配置热重载：core 每轮事件循环看一眼 `settings.json` 的 mtime，变了就整树重读（文件是唯一来源，所以整树替换不是合并），下一次 LLM 调用即用新模型——改配置不必重启。坏 JSON / 缺必需键保留旧配置只报 stderr：启动时缺配置该退出，跑着的会话不该被一次手滑写崩。载荷变了就推一帧 [[statusline]]，`/model` 切档与手改文件因此是同一条路。
-- 协议插件可配项：api_key / base_url / model / small_model，全部必配。base_url 与 api_key 同级——代理/网关用户（OpenRouter / one-api / 内网中转）必须能自定义端点。
-- 模型档位（[[Model Tier]]）：`model` 主模型 + `small_model` 小模型两档，共用 base_url / api_key。档位只换模型名，不换端点凭证——跨供应商小模型不做（真需要时再让 dialog 携带端点 override）。两档都必配，不存在小模型回落主模型这种隐式默认。core 侧 `Config::model(ModelTier)` 是唯一知道键名的地方，协议插件/SDK/ABI 无感。
+- 配置机制（ADR-0010）：分层两级——**代码里的默认树打底，`settings.json` 覆盖**。默认树（`config_defaults()`）是键清单的唯一来源，每个键带注释说明作用与取值形状；配置文件不再是唯一来源，只是覆盖层。**无 env 覆盖、无必需键**：配置缺失不是错误状态，只是取到默认值，core 不校验缺了什么。配置文件存在但解析失败仍是硬错（启动即退出）。core 的默认值一律不带供应商身份，值写空字符串——**不用假 URL 占位**：整条链路以 `empty()` 判断"未配"，非空占位值会让 [[Provider 壳]]的兜底失效。真实端点/模型名的默认值留在壳里（ADR-0004 不变）。插件初始化时由 core 注入合并后的配置，插件不自行解析配置。
+- 配置写回：`persist` **点对点**——读文件、只改目标键、原子写回，不 dump 内存树。默认值因此永不渗进用户的 `settings.json`，文件里只有用户自己配过的东西。文件不存在按空对象处理；坏 JSON 则不写并返回失败（宁可 `/model` 不生效，也不能拿内存树覆盖掉读不懂的用户数据）。
+- 配置合并粒度：**对象递归合并，数组与标量整个替换**。数组不合并是刻意的——`disabled: ["deepseek"]` 的语义是"就禁这一个"，不是"在默认基础上再加一个"。
+- 不做配置热重载（ADR-0010）：启动时读一次，之后 core 不再看 `settings.json`。手改配置需重启 core。取消的理由是运行时重读引出的问题没有干净解：core 是常驻服务、TUI 是独立进程，stderr 报错没人看得见；报错退出会断掉所有客户端且有误杀风险（部分编辑器与 shell 重定向"先清空再写"，事件循环有概率读到半截文件）。没有运行时重读，就没有运行时坏文件。
+- 协议插件可配项：api_key / base_url / model / small_model，**全部可缺省**（缺省即空串，由 [[Provider 壳]]兜底）。装了壳时只配 `api_key` 就能跑。base_url 与 api_key 同级——代理/网关用户（OpenRouter / one-api / 内网中转）必须能自定义端点。
+- 模型档位（[[Model Tier]]）：`model` 主模型 + `small_model` 小模型两档，共用 base_url / api_key。档位只换模型名，不换端点凭证——跨供应商小模型不做（真需要时再让 dialog 携带端点 override）。core 侧 `Config::model(ModelTier)` 是唯一知道键名的地方，协议插件/SDK/ABI 无感。**core 不做档位间回落**：`small_model` 没配就是空字符串，原样经 `dialog["model"]` 下传，填什么由 [[Provider 壳]]决定（壳只看见一个空模型名，分辨不出是哪一档——档位到 core 为止）。裸协议层无壳时空模型名由服务端报错，core 不代为判断。
 - 会话目录不是配置项：`.realagent/sessions` 是 core 自己的落盘路径，写死在 core 里，settings.json 写它不生效。
 - 斜杠命令：插件可注册（通用能力，不限 type）。首版只留接口不实现；`/quit` core 内置，`/new` `/resume` 由 session-manager 插件提供。`/model` core 内置（改的是配置，不是插件能力）：无参列 [[Model]] 注册表，带名切主模型并写回 settings.json；只认注册表里的模型——交互式选择就该从已知的里挑。
 - 首版插件清单：见 `docs/plugins.md`（6 个插件：v1-messages + deepseek 壳协议链 / core-tools / perm-allow-all / perm-ask / session-manager）。

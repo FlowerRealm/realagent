@@ -7,7 +7,7 @@
 
 - **形态**：C ABI 动态库（`.so`/`.dylib`），运行时目录扫描 + `dlopen` 加载。
 - **元数据**：插件目录下独立 `plugin.json`（名称/描述/版本/ABI 版本/前置依赖/type）。
-- **配置注入**：core 统一收集配置（env > `.realagent/settings.json` > 默认），插件初始化时注入，插件不自行解析。
+- **配置注入**：core 统一收集配置（代码默认树打底 < `settings.json` 覆盖，不读 env），插件初始化时注入合并结果，插件不自行解析。
 - **事件订阅**：单入口 `on_event(handle, event*)`，插件内按 type 字符串分发。
 - **版本校验**：单一接口版本号 PI_ABI_VERSION 强校验，不符则拒绝加载。
 - **自动发现目录**：项目级 `.realagent/extensions/` 与全局 `~/.realagent/extensions/`（对齐 CONTEXT.md 配置约定）。
@@ -35,7 +35,7 @@ core 只调协议链入口（最外层、未被其他协议插件依赖者），
 - 响应解析：SSE 流 → 结构化事件（message_update 文本增量 / thinking 三帧 / tool_use / 停止原因）经 C ABI 回传 core。
 - thinking 块：协议固有内容，原样回传历史（带 signature，缺失时省略）。
 
-**配置**：base_url / api_key / model 均**不设供应商默认值**——端点留空、模型留空、无 Authorization。由外层壳兜底，或直接用配置直连（协议层本身可独立运行）。
+**配置**：base_url / api_key / model 均**不设供应商默认值**——端点留空、模型留空、无 Authorization。由外层壳兜底，或直接用配置直连（协议层本身可独立运行）。裸用本插件且不配 `base_url` 时，拼出的是相对 URL，libcurl 会报 `URL using bad/illegal format`——这是"不装壳直连"这条路径的固有代价，core 不为它做启动校验（ADR-0010）。
 
 ### 1b. `deepseek`（外层壳，type = protocol，deps: v1-messages）
 
@@ -50,16 +50,17 @@ DeepSeek 供应商壳：包住 `v1-messages`。壳做三件事——
 
 **嵌套链职责**（ADR-0004）：core 按依赖序加载（`v1-messages` 先），`deepseek` init 中 `get_dependency("v1-messages", ...)` 取内层接口表，`build_request` 调内层构造初步请求→壳兜底默认→产出最终请求；`parse_feed` 调内层。新增第二个供应商（如 OpenRouter）时另写一个壳声明 `deps: ["v1-messages"]`，复用同一协议层，core 据依赖自动选入口。
 
-**可配置项**（core 统一注入，唯一来源 `settings.json`，全部必配）：
+**可配置项**（core 统一注入：代码默认树打底 < `settings.json` 覆盖，全部可缺省）：
 
-| 配置 | 说明 |
-|---|---|
-| api_key | 凭证，无默认 |
-| base_url | 端点，无默认 |
-| model | 主模型名，无默认 |
-| small_model | 小模型名，无默认（不回落主模型） |
+| 配置 | core 默认值 | 缺省时的实际行为 |
+|---|---|---|
+| api_key | `""` | 不发 Authorization 头，服务端 401 |
+| base_url | `""` | 壳 init 填 `https://api.deepseek.com/anthropic` |
+| model | `""` | 壳 `refine_body` 填 `deepseek-v4-flash` |
+| small_model | `""` | 空模型名下传，同样由壳 `refine_body` 填壳默认（core 不回落主模型） |
 
-> 缺任一项 core 启动即失败并点名——core 不猜端点、不猜模型，也不读 env。
+> core 的默认值一律是空串，**不带供应商身份、也不用假 URL 占位**：整条兜底链路（壳 `init` / `refine_body` / `refine_headers`）都以 `empty()` 判断"未配"，任何非空占位值都会让兜底失效。真实默认值只存在于壳里。
+> 装了本壳时，用户只需要配 `api_key` 就能跑起来。
 > **base_url 与 api_key 同级重要**：代理/网关用户（OpenRouter / one-api / 内网中转）必须能自定义端点。
 
 **DeepSeek 兼容端点已查证细节**（2026-08-09，官方文档）：
