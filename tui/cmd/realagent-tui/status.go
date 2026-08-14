@@ -6,7 +6,6 @@ package main
 
 import (
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/charmbracelet/bubbletea"
@@ -27,40 +26,24 @@ type activity struct {
 	now    time.Time // 最近一次 tick 时间（elapsed = now - start）
 	seq    int       // tick 代号：只有 seq 相同的 tick 续命，杜绝并发计时循环
 	frame  int       // spinner 帧序号
-	tokens tokens    // 本次 run 的 token 累计（core 的 usage 帧，绝对值覆盖写）
+	cost   cost      // 本次 run 的累计花费（core 的 status_update 帧，绝对值覆盖写）
 }
 
-// tokens 是 usage 帧的载荷（PROTOCOL.md：本次 run 累计、绝对值、模型上报的真实用量）。
-// 全零 = core 没给数据（旧 core 或端点不报 usage），渲染时整段隐藏，绝不显示 0。
-type tokens struct {
-	In         int64 `json:"input"`
-	Out        int64 `json:"output"`
-	CacheRead  int64 `json:"cache_read"`
-	CacheWrite int64 `json:"cache_write"`
+// cost 是 status_update 帧的载荷（PROTOCOL.md：本次 run 累计、绝对值）。
+// 钱由供应商壳插件算好报上来，core 与 TUI 都不碰单价（ADR-0009）。
+// 零 = 没数据（插件没模型表或端点不报用量），渲染时整段隐藏，绝不显示 $0。
+type cost struct {
+	USD float64 `json:"cost"`
 }
 
-func (t tokens) empty() bool {
-	return t.In == 0 && t.Out == 0 && t.CacheRead == 0 && t.CacheWrite == 0
-}
+func (c cost) empty() bool { return c.USD == 0 }
 
-// text 渲染为 "↑12.3k ↓842"；缓存命中并入上行（花的是同一份输入预算）。
-func (t tokens) text() string {
-	if t.empty() {
+// text 渲染为 "$0.0123"：四位小数，够看清一次对话花了多少
+func (c cost) text() string {
+	if c.empty() {
 		return ""
 	}
-	return "↑" + humanTokens(t.In+t.CacheRead+t.CacheWrite) + " ↓" + humanTokens(t.Out)
-}
-
-// humanTokens 折算量级：1000 以下原样，之后 k / M，保一位小数
-func humanTokens(n int64) string {
-	switch {
-	case n < 1000:
-		return fmt.Sprintf("%d", n)
-	case n < 1000000:
-		return strings.TrimSuffix(fmt.Sprintf("%.1f", float64(n)/1000), ".0") + "k"
-	default:
-		return strings.TrimSuffix(fmt.Sprintf("%.1f", float64(n)/1000000), ".0") + "M"
-	}
+	return fmt.Sprintf("$%.4f", c.USD)
 }
 
 // tickMsg 是状态行的定时刷新（seq 标识所属计时循环）
@@ -85,7 +68,7 @@ func (a *activity) begin(verb string, now time.Time) tea.Cmd {
 	a.start = now
 	a.now = now
 	a.frame = 0
-	a.tokens = tokens{} // 新一次 run，计数跟读秒同一个重置点
+	a.cost = cost{} // 新一次 run，花费跟读秒同一个重置点
 	a.seq++
 	return tickCmd(a.seq)
 }
@@ -122,7 +105,7 @@ func elapsedText(d time.Duration) string {
 }
 
 // render 渲染状态行；空闲返回 ""（调用方按空串跳过，无需判空逻辑）。
-// 窄终端按"提示 → token → 括号全丢"逐级降级，保证 spinner 与动作词永远可见。
+// 窄终端按"提示 → 花费 → 括号全丢"逐级降级，保证 spinner 与动作词永远可见。
 func (a activity) render(width int) string {
 	if !a.active {
 		return ""
@@ -132,13 +115,13 @@ func (a activity) render(width int) string {
 	elapsed := elapsedText(a.elapsed())
 
 	tails := []string{
-		fmt.Sprintf(" (%s · %s · esc 中断)", elapsed, a.tokens.text()),
-		fmt.Sprintf(" (%s · %s)", elapsed, a.tokens.text()),
+		fmt.Sprintf(" (%s · %s · esc 中断)", elapsed, a.cost.text()),
+		fmt.Sprintf(" (%s · %s)", elapsed, a.cost.text()),
 		fmt.Sprintf(" (%s · esc 中断)", elapsed),
 		fmt.Sprintf(" (%s)", elapsed),
 		"",
 	}
-	if a.tokens.empty() {
+	if a.cost.empty() {
 		tails = tails[2:]
 	}
 	tail := tails[len(tails)-1]

@@ -295,11 +295,11 @@ void QuicServer::run() {
                             else
                                 resp_body = "[]";
                             send_json(c, resp_body);
-                        } else if (c.request_method == "GET" && c.request_path == "/status") {
-                            // 运行态信息（TUI statusline 数据源，见 PROTOCOL.md）
+                        } else if (c.request_method == "GET" && c.request_path == "/statusline") {
+                            // 状态栏数据（TUI 输入框下方那条，见 PROTOCOL.md）
                             std::string resp_body;
-                            if (impl_->cbs.on_status)
-                                resp_body = impl_->cbs.on_status();
+                            if (impl_->cbs.on_statusline)
+                                resp_body = impl_->cbs.on_statusline();
                             else
                                 resp_body = "{}";
                             send_json(c, resp_body);

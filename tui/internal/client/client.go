@@ -178,16 +178,29 @@ func (c *Client) FetchPlugins() ([]PluginInfo, error) {
 	return list, nil
 }
 
-// Status 是运行态信息（GET /status，statusline 数据源）
-type Status struct {
-	Model string `json:"model"`
+// ModelInfo 是一条模型记录（/model 命令的 data 载荷）。
+// 无单价——计价全在插件侧，core 与 TUI 都看不到（ADR-0009）。
+type ModelInfo struct {
+	Name    string `json:"name"`
+	OwnedBy string `json:"owned_by"`
+	Context int64  `json:"context"`
+	Current bool   `json:"current"`
 }
 
-// FetchStatus 拉取运行态信息（GET /status）。失败返回错误（TUI 降级为隐藏该段）。
-func (c *Client) FetchStatus() (Status, error) {
-	var s Status
-	if err := c.getJSON("/status", &s); err != nil {
-		return Status{}, err
+// Statusline 是状态栏数据（GET /statusline）：会话身份信息。
+// OwnedBy/Context 来自 core 的模型注册表（插件声明），配了表外的模型时为空——
+// 那不是错误，模型表是参考资料不是白名单（ADR-0009）。
+type Statusline struct {
+	Model   string `json:"model"`
+	OwnedBy string `json:"owned_by"`
+	Context int64  `json:"context"`
+}
+
+// FetchStatusline 拉取状态栏数据（GET /statusline）。失败返回错误（TUI 降级为隐藏该段）。
+func (c *Client) FetchStatusline() (Statusline, error) {
+	var s Statusline
+	if err := c.getJSON("/statusline", &s); err != nil {
+		return Statusline{}, err
 	}
 	return s, nil
 }

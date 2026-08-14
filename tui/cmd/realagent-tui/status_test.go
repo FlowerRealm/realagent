@@ -120,86 +120,68 @@ func TestStatusRenderInView(t *testing.T) {
 	}
 }
 
-func TestHumanTokens(t *testing.T) {
-	cases := []struct {
-		n    int64
-		want string
-	}{
-		{0, "0"},
-		{842, "842"},
-		{1000, "1k"},
-		{12345, "12.3k"},
-		{999999, "1000k"},
-		{1500000, "1.5M"},
-	}
-	for _, c := range cases {
-		if got := humanTokens(c.n); got != c.want {
-			t.Errorf("humanTokens(%d) = %q, want %q", c.n, got, c.want)
-		}
-	}
-}
-
-// usage 帧是本次 run 累计的绝对值：覆盖写，TUI 不累加。
-func TestUsageOverwrites(t *testing.T) {
+// status_update 帧是本次 run 累计的绝对值：覆盖写，TUI 不累加。
+func TestCostOverwrites(t *testing.T) {
 	m := testModel()
 	feedEvents(&m,
 		client.Event{Type: "turn_start", Payload: `{}`},
-		client.Event{Type: "usage", Payload: `{"input":1200,"output":1,"cache_read":300,"cache_write":0}`},
+		client.Event{Type: "status_update", Payload: `{"cost":0.0031}`},
 	)
-	if m.busy.tokens.In != 1200 || m.busy.tokens.CacheRead != 300 {
-		t.Fatalf("usage = %+v, want input=1200 cache_read=300", m.busy.tokens)
+	if m.busy.cost.USD != 0.0031 {
+		t.Fatalf("cost = %+v, want 0.0031", m.busy.cost)
 	}
-	feedEvents(&m, client.Event{Type: "usage", Payload: `{"input":1200,"output":842,"cache_read":300,"cache_write":0}`})
-	if m.busy.tokens.In != 1200 {
-		t.Errorf("input = %d, want 1200（覆盖写，不累加）", m.busy.tokens.In)
+	feedEvents(&m, client.Event{Type: "status_update", Payload: `{"cost":0.0123}`})
+	if m.busy.cost.USD != 0.0123 {
+		t.Errorf("cost = %v, want 0.0123（覆盖写，不累加）", m.busy.cost.USD)
 	}
-	if m.busy.tokens.Out != 842 {
-		t.Errorf("output = %d, want 842", m.busy.tokens.Out)
+	if got := m.busy.cost.text(); got != "$0.0123" {
+		t.Errorf("cost.text() = %q, want $0.0123", got)
 	}
-	// ↑ 合并 input + cache（同一份输入预算），↓ 为 output
-	if got := m.busy.tokens.text(); got != "↑1.5k ↓842" {
-		t.Errorf("tokens.text() = %q, want ↑1.5k ↓842", got)
+	// 开放键集：不认识的键忽略，认识的照收（core 除 cost 外一律原样转发）
+	feedEvents(&m, client.Event{Type: "status_update", Payload: `{"cost":0.02,"context_used":48213}`})
+	if m.busy.cost.USD != 0.02 {
+		t.Errorf("cost = %v, want 0.02（未知键不影响解析）", m.busy.cost.USD)
 	}
 }
 
-// 新一轮 run 从零开始：读秒与计数同一个重置点。
-func TestUsageResetOnNewRun(t *testing.T) {
+// 新一轮 run 从零开始：读秒与花费同一个重置点。
+func TestCostResetOnNewRun(t *testing.T) {
 	m := testModel()
 	feedEvents(&m,
 		client.Event{Type: "turn_start", Payload: `{}`},
-		client.Event{Type: "usage", Payload: `{"input":1200,"output":842}`},
+		client.Event{Type: "status_update", Payload: `{"cost":0.0123}`},
 		client.Event{Type: "turn_end", Payload: `{"stop_reason":"end_turn"}`},
 	)
-	if m.busy.tokens.empty() {
-		t.Fatal("收工后计数应保留到下一次 begin（本轮结果仍可见）")
+	if m.busy.cost.empty() {
+		t.Fatal("收工后花费应保留到下一次 begin（本轮结果仍可见）")
 	}
 	feedEvents(&m, client.Event{Type: "turn_start", Payload: `{}`})
-	if !m.busy.tokens.empty() {
-		t.Errorf("新一轮 run 计数应清零，实际 %+v", m.busy.tokens)
+	if !m.busy.cost.empty() {
+		t.Errorf("新一轮 run 花费应清零，实际 %+v", m.busy.cost)
 	}
 }
 
-func TestStatusRenderTokens(t *testing.T) {
+func TestStatusRenderCost(t *testing.T) {
 	var a activity
 	base := time.Unix(0, 0)
 	a.begin("生成回复", base)
-	a.tokens = tokens{In: 12000, Out: 842, CacheRead: 345}
+	a.cost = cost{USD: 0.0123}
 	a.tick(tickMsg{seq: a.seq, t: base.Add(5 * time.Second)})
 
 	full := a.render(80)
-	if !strings.Contains(full, "↑12.3k ↓842") || !strings.Contains(full, "esc 中断") {
+	if !strings.Contains(full, "$0.0123") || !strings.Contains(full, "esc 中断") {
 		t.Errorf("宽终端应显示完整尾巴，实际 %q", full)
 	}
-	// 降级阶梯：先丢提示，再丢 token，最后只剩读秒
-	if noHint := a.render(30); strings.Contains(noHint, "ctrl+c") || !strings.Contains(noHint, "↑12.3k") {
-		t.Errorf("width=30 应丢提示保 token，实际 %q", noHint)
+	// 降级阶梯：先丢提示，再丢花费，最后只剩读秒
+	if noHint := a.render(30); strings.Contains(noHint, "ctrl+c") || !strings.Contains(noHint, "$0.0123") {
+		t.Errorf("width=30 应丢提示保花费，实际 %q", noHint)
 	}
-	if narrow := a.render(16); strings.Contains(narrow, "↑") || !strings.Contains(narrow, "5s") {
-		t.Errorf("width=16 应丢 token 保读秒，实际 %q", narrow)
+	if narrow := a.render(16); strings.Contains(narrow, "$") || !strings.Contains(narrow, "5s") {
+		t.Errorf("width=16 应丢花费保读秒，实际 %q", narrow)
 	}
-	// 无 token 数据（旧 core / 端点不报 usage）：整段隐藏，绝不显示 0
-	a.tokens = tokens{}
-	if s := a.render(80); strings.Contains(s, "↑") {
-		t.Errorf("无 usage 数据时不应渲染 token 段，实际 %q", s)
+	// 无花费数据（插件没模型表 / 端点不报用量）：整段隐藏，绝不显示 $0
+	a.cost = cost{}
+	if s := a.render(80); strings.Contains(s, "$") {
+		t.Errorf("无花费数据时不应渲染花费段，实际 %q", s)
 	}
 }

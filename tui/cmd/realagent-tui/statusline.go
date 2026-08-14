@@ -85,14 +85,14 @@ func gitBranch() string {
 	return branch
 }
 
-// statusMsg 携带 GET /status 的拉取结果
+// statusMsg 携带 GET /statusline 的拉取结果
 type statusMsg struct {
 	model string
 }
 
 func fetchStatusCmd(c *client.Client) tea.Cmd {
 	return func() tea.Msg {
-		s, err := c.FetchStatus()
+		s, err := c.FetchStatusline()
 		if err != nil {
 			return statusMsg{}
 		}

@@ -11,7 +11,7 @@
  *  - 工具参数 Schema：JSON 字符串
  *  - 插件不感知客户端（TUI/gui），core 是中枢
  *
- * ABI 版本：1
+ * ABI 版本：2
  */
 #ifndef PLUGIN_API_H
 #define PLUGIN_API_H
@@ -22,7 +22,7 @@
 extern "C" {
 #endif
 
-#define PLUGIN_ABI_VERSION 1
+#define PLUGIN_ABI_VERSION 2
 
 /* 导出宏：插件库须导出 plugin_create（Windows 用 dllexport，macOS/Linux 用 visibility） */
 #if defined(_WIN32)
@@ -178,6 +178,12 @@ typedef struct plugin_api {
      * chunk == NULL 表示流结束（flush）。 */
     plugin_status_t (*parse_feed)(plugin_t*, const char* chunk,
                                   plugin_event_sink_t sink, void* sink_ctx);
+    /* 模型清单（ADR-0009）：JSON 数组字符串，每项 {name, owned_by, context}。
+     * 数据是插件自己的（自读自解析），此处只报 core 用得着的字段——
+     * 单价不报，core 不算钱。无模型返回 NULL（协议层供应商中立，模型属于供应商身份，
+     * 清单不沿嵌套链透传）。
+     * 内存归插件所有，core 只读不释放（返回静态/成员字符串即可）。 */
+    const char* (*list_models)(plugin_t*);
 
     /* —— type = PLUGIN_TYPE_SESSION —— */
     /* 会话操作由 register_command 注册，命令处理走 command->handler */

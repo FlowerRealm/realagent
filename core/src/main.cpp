@@ -7,6 +7,7 @@
  *   realagent-core → 加载插件 + 启动 QUIC/HTTP3 服务（PROTOCOL.md 端点）
  *   POST /message → 启动 agent loop
  */
+#include <algorithm>
 #include <cstdio>
 #include <string>
 #include <thread>
@@ -52,6 +53,24 @@ static int run_tool_test(CoreContext& ctx) {
  * 的字段表生成，即结构体声明本身——契约与结构体不可能再走散。 */
 static json plugins_payload(const std::vector<PluginInfo>& list) { return to_json(list); }
 
+/* /model 响应：模型注册表 → JSON 数组，按名排序（哈希表顺序每次都不一样，
+ * 列表每次换位置没法看）。current 标出配置里当前那档。 */
+static json models_payload(const CoreContext& ctx) {
+    std::vector<const Model*> sorted;
+    sorted.reserve(ctx.models.size());
+    for (const auto& [name, e] : ctx.models) sorted.push_back(&e.def);
+    std::sort(sorted.begin(), sorted.end(),
+              [](const Model* a, const Model* b) { return a->name < b->name; });
+    const std::string cur = ctx.config->model(ModelTier::Main);
+    json arr = json::array();
+    for (const auto* m : sorted) {
+        json e = to_json(*m);
+        e["current"] = (m->name == cur);
+        arr.push_back(std::move(e));
+    }
+    return arr;
+}
+
 int main(int argc, char** argv) {
     // 配置是刚需：缺键/配置文件坏了就地退出，不带残缺配置往下跑
     auto loaded = Config::load();
@@ -70,6 +89,9 @@ int main(int argc, char** argv) {
     fprintf(stderr, "=== 插件 %zu 个 ===\n", mgr.plugins().size());
     for (const auto& [name, t] : ctx.tools)
         fprintf(stderr, "  tool: %s (dangerous=%d)\n", name.c_str(), t.def.dangerous);
+    for (const auto& [name, m] : ctx.models)
+        fprintf(stderr, "  model: %s [%s] ctx=%lld\n", name.c_str(), m.def.owned_by.c_str(),
+                (long long)m.def.context);
 
     if (argc > 1 && std::string(argv[1]) == "test-tools") {
         return run_tool_test(ctx);
@@ -124,6 +146,12 @@ int main(int argc, char** argv) {
             cmd["description"] = "查看插件列表（/plugins enable|disable <name> 启停插件）";
             arr.push_back(std::move(cmd));
         }
+        {
+            json cmd;
+            cmd["name"] = "model";
+            cmd["description"] = "查看模型清单（/model <name> 切换主模型）";
+            arr.push_back(std::move(cmd));
+        }
         // 插件注册的斜杠命令（名称不带 '/'，core 是唯一真相源）
         for (const auto& [name, ce] : ctx.commands) {
             json cmd;
@@ -155,8 +183,34 @@ int main(int argc, char** argv) {
                 return std::string("{\"ok\":true,\"command\":\"resume\",\"messages\":" +
                                    std::to_string(n) + "}");
             }
-            // 首空白分词为命令名：/plugins[ enable|disable <name>]
+            // 首空白分词为命令名：/plugins[ enable|disable <name>]、/model[ <name>]
             const std::string cmd = user_input.substr(0, user_input.find(' '));
+            if (cmd == "/model") {
+                // 无参 = 列清单；带名 = 切主模型（写回 settings.json，下一次调用即生效）。
+                // 只认注册表里的模型：交互式选择就该从已知的里挑，打字选中不存在的
+                // 只会得到一个端点 400。启动时不校验配置是另一回事（ADR-0009）。
+                std::string name = user_input.size() > cmd.size()
+                    ? user_input.substr(cmd.size() + 1) : "";
+                while (!name.empty() && name.back() == ' ') name.pop_back();
+                json out;
+                out["command"] = "model";
+                if (!name.empty()) {
+                    if (!ctx.models.contains(name)) {
+                        out["ok"] = false;
+                        out["error"] = "unknown model: " + name;
+                        return out.dump();
+                    }
+                    ctx.config->set("model", json(name));
+                    if (!ctx.config->persist()) {
+                        out["ok"] = false;
+                        out["error"] = "写入 settings.json 失败";
+                        return out.dump();
+                    }
+                }
+                out["ok"] = true;
+                out["data"] = models_payload(ctx);
+                return out.dump();
+            }
             if (cmd == "/plugins") {
                 const std::string rest = user_input.size() > cmd.size()
                     ? user_input.substr(cmd.size() + 1) : "";
@@ -213,10 +267,16 @@ int main(int argc, char** argv) {
     // —— 插件管理端点（TUI /plugins 命令的数据源） ——
     // 写操作锁 agent_mtx（对齐 /new 线程纪律：与 agent 运行互斥，避免执行中改注册表）
     cbs.on_plugins = [&mgr]() { return plugins_payload(mgr.list()).dump(); };
-    // 运行态信息（GET /status，statusline 数据源）：目前只有 model，按需再加字段
-    cbs.on_status = [&ctx]() {
+    // 状态栏数据（GET /statusline）：配的模型名 + 注册表里查到的元数据。
+    // 查不到就只回名字——模型注册表是参考资料，不是白名单（ADR-0009）
+    cbs.on_statusline = [&ctx]() {
         json out;
-        out["model"] = ctx.config->model(ModelTier::Main);
+        const std::string name = ctx.config->model(ModelTier::Main);
+        out["model"] = name;
+        if (const auto it = ctx.models.find(name); it != ctx.models.end()) {
+            out["owned_by"] = it->second.def.owned_by;
+            out["context"] = it->second.def.context;
+        }
         return out.dump();
     };
     cbs.on_plugin_enable = [&mgr, &agent_mtx](const std::string& name) {

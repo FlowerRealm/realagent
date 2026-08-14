@@ -136,6 +136,10 @@ std::vector<std::string> Config::extension_dirs() const {
 
 std::string Config::session_dir() const { return std::string(kSessionDir); }
 
+std::string Config::models_path(std::string_view plugin_name) const {
+    return (global_dir() / ".realagent" / "models" / (std::string(plugin_name) + ".json")).string();
+}
+
 json Config::to_json() const {
     std::lock_guard<std::mutex> lk(*mutex_);
     return settings_;

@@ -6,13 +6,15 @@
  *   - v1-messages：抽象对话 → /v1/messages 请求体（供应商无关，无默认端点/模型）
  *   - v1-messages：SSE → 事件（含 thinking 三帧）
  *   - deepseek 壳：兜底 DeepSeek 默认端点/模型；已配置值原样透传；claude-* 模型不做映射
- *   - deepseek 壳：parse_feed 纯透传（thinking 事件经壳流出）
+ *   - deepseek 壳：parse_feed 透传（thinking 事件经壳流出）
+ *   - deepseek 壳：拦 usage 换 cost（ADR-0009），token 不再上传；list_models 不报单价
  */
 #include <dlfcn.h>
 
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <fstream>
 #include <string>
 #include <vector>
 
@@ -37,11 +39,14 @@ static int failures = 0;
 /* —— fake core（get_config 可改写：同一实例链不同配置分支测试） —— */
 static struct { const char* base_url; const char* api_key; const char* model; } g_cfg = {
     "", "test-key-123", ""};
+/* 模型数据表路径（core 给的，见 ADR-0009）：测试用临时表，单价取整数好算 */
+static std::string g_models_path;
 
 static const char* fake_get_config(plugin_core_t*, const char* key) {
     if (std::strcmp(key, "api_key") == 0) return g_cfg.api_key;
     if (std::strcmp(key, "base_url") == 0) return g_cfg.base_url;
     if (std::strcmp(key, "model") == 0) return g_cfg.model;
+    if (std::strcmp(key, "models_path") == 0) return g_models_path.c_str();
     return "";
 }
 static plugin_status_t fake_register_tool(plugin_core_t*, const plugin_tool_t*) { return PLUGIN_OK; }
@@ -305,15 +310,27 @@ static void test_deepseek_build_request(const plugin_api_t* api, plugin_t* inst,
     free_request(api, inst, req2);
 }
 
-/* 测试 4：deepseek 壳 parse_feed 纯透传（thinking 事件经壳流出） */
+/* 测试 4：deepseek 壳 parse_feed——事件透传 + usage 拦截换 cost（ADR-0009） */
 static void test_deepseek_parse_feed(const plugin_api_t* api, plugin_t* inst) {
-    printf("[deepseek 壳 parse_feed 透传]\n");
+    printf("[deepseek 壳 parse_feed 透传 + 计价]\n");
+    // 先构造一次请求，把本次生效的模型名钉死（算钱按它查单价）
+    const char* dialog = R"({
+        "model": "deepseek-v4-flash",
+        "system": "s",
+        "messages": [{"role":"user","content":[{"type":"text","text":"hi"}]}],
+        "tools": []
+    })";
+    plugin_request_t req{};
+    api->build_request(inst, dialog, &req);
+    free_request(api, inst, req);
+
     struct Sink {
         std::string thinking_start;
         std::string thinking;
         int thinking_stops = 0;
         std::string text;
         std::string usage;
+        std::string status_update;
     } sink;
     const auto cb = [](void* ctx, const char* type, const char* payload) {
         auto* s = static_cast<Sink*>(ctx);
@@ -323,6 +340,7 @@ static void test_deepseek_parse_feed(const plugin_api_t* api, plugin_t* inst) {
         else if (t == "thinking_stop") ++s->thinking_stops;
         else if (t == "message_update") s->text += payload;
         else if (t == "usage") s->usage = payload;
+        else if (t == "status_update") s->status_update = payload;
     };
     const char* chunk =
         "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"m1\","
@@ -343,7 +361,36 @@ static void test_deepseek_parse_feed(const plugin_api_t* api, plugin_t* inst) {
     CHECK(sink.thinking.find("想一下") != std::string::npos, "thinking_update 经壳透传");
     CHECK(sink.thinking_stops == 1, "thinking_stop 经壳透传");
     CHECK(sink.text.find("答案") != std::string::npos, "message_update 经壳透传");
-    CHECK(sink.usage.find("77") != std::string::npos, "usage 经壳透传（壳不碰计数）");
+    // token 到壳为止：core 只该看见钱
+    CHECK(sink.usage.empty(), "usage 被壳吞掉（token 不上传）");
+    CHECK(!sink.status_update.empty(), "壳报出 status_update");
+    if (!sink.status_update.empty()) {
+        boost::system::error_code ec;
+        const bj::value v = bj::parse(sink.status_update, ec);
+        CHECK(!ec && v.is_object() && v.as_object().contains("cost"), "status_update 带 cost");
+        if (!ec && v.is_object() && v.as_object().contains("cost")) {
+            // 表里 input 单价 1000/1M，77 token → 0.077
+            const double cost = v.as_object().at("cost").to_number<double>();
+            CHECK(cost > 0.0769 && cost < 0.0771, "cost = input 77 × 1000/1M = 0.077");
+        }
+    }
+}
+
+/* 测试 4b：list_models 只报公共字段，单价留在壳里（ADR-0009） */
+static void test_deepseek_list_models(const plugin_api_t* api, plugin_t* inst) {
+    printf("[deepseek list_models]\n");
+    const char* text = api->list_models ? api->list_models(inst) : nullptr;
+    CHECK(text != nullptr, "壳报出模型清单");
+    if (!text) return;
+    boost::system::error_code ec;
+    const bj::value v = bj::parse(text, ec);
+    CHECK(!ec && v.is_array() && v.as_array().size() == 1, "清单是 JSON 数组（1 条）");
+    if (ec || !v.is_array() || v.as_array().empty()) return;
+    const auto& o = v.as_array()[0].as_object();
+    CHECK(bj::value_to<std::string>(o.at("name")) == "deepseek-v4-flash", "name 报上来");
+    CHECK(bj::value_to<std::string>(o.at("owned_by")) == "deepseek", "owned_by 报上来");
+    CHECK(o.at("context").as_int64() == 131072, "context 报上来");
+    CHECK(!o.contains("pricing"), "单价不报给 core");
 }
 
 /* 测试 5：v1-messages usage 事件（message_start 给 input，message_delta 给 output，合并上报） */
@@ -425,6 +472,17 @@ int main() {
     g_dep_api = v1_api; // get_dependency 目标：deepseek 壳包住 v1a
     g_dep_inst = v1a;
 
+    // 模型数据表（ADR-0009）：壳自读自解析，单价取整数便于核对算出来的钱。
+    // 峰谷两张表填同一组数——测试不能因为跑在几点而结果不同
+    g_models_path = "test_models.json";
+    {
+        std::ofstream f(g_models_path);
+        f << R"([{"name":"deepseek-v4-flash","owned_by":"deepseek","context":131072,)"
+             R"("pricing":{"peak_hours_utc":[[1,4],[6,10]],)"
+             R"("peak":{"input":1000,"output":2000,"cache_read":0},)"
+             R"("off_peak":{"input":1000,"output":2000,"cache_read":0}}}])";
+    }
+
     // —— deepseek_default：空配置 → 壳默认 DeepSeek 端点/模型 ——
     plugin_t* ds_default = create_inst(h2, &ds_api);
     if (!ds_default || !ds_api || ds_api->init(ds_default, &core_handle) != PLUGIN_OK) {
@@ -453,6 +511,7 @@ int main() {
                                 "https://api.deepseek.com/anthropic/v1/messages");
     test_deepseek_build_request(ds_api, ds_cfg, "http://127.0.0.1:18080/v1/messages");
     test_deepseek_parse_feed(ds_api, ds_default);
+    test_deepseek_list_models(ds_api, ds_default);
     test_v1_usage(v1_api, v1a);
 
     if (v1_api->destroy) { v1_api->destroy(v1b); v1_api->destroy(v1a); }

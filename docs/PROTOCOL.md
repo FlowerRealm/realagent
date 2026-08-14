@@ -29,7 +29,7 @@ TUI ◀──(2) 长生命周期单向流────────────  c
 | `GET /commands` | 斜杠命令列表 `[{name, description}]`（TUI 菜单数据源，core 是唯一真相；内置 new/resume 与插件注册命令合并） |
 | `POST /approval-response` | 审批裁决回传（TUI → core） |
 | `GET /plugins` | 插件列表（TUI /plugins 数据源：loaded/disabled/failed + error） |
-| `GET /status` | 运行态信息（TUI statusline 数据源）：`{"model": "..."}` |
+| `GET /statusline` | 状态栏数据（输入框下方那条）：`{"model", "owned_by", "context"}`，后两项来自模型注册表，查不到就只有 model |
 | `POST /plugins/enable` | 启用插件（体 `{"name"}`） |
 | `POST /plugins/disable` | 禁用插件（体 `{"name"}`） |
 | `GET /sessions` / `POST /session` | 会话列表 / 新建-恢复 |
@@ -56,20 +56,23 @@ data: <json>
 | `tool_output` | stdout 行 | bash 实时输出 |
 | `tool_execution_start/end` | 工具信息 | 工具生命周期 |
 | `turn_start/end` | 轮次信息 | Turn 生命周期 |
-| `usage` | token 计数 | 模型上报的真实用量（见下） |
+| `status_update` | 运行态数据 | 插件报的状态行数字（开放键集，见下） |
 | `permission_request` | 审批问询 | 审批请求（可靠，卡点） |
 | `agent_start/end` | 运行信息 | Agent 生命周期 |
 
-### usage 帧
+### status_update 帧
 
 ```json
-{"input": 12345, "output": 842, "cache_read": 0, "cache_write": 0}
+{"cost": 0.0123}
 ```
 
-- **本次 run 累计**：一次用户输入触发的全部 turn 之和，`POST /message` 起算清零。多 turn 会重发完整历史，`input` 因此逐轮膨胀——这是真实计费口径，core 不做修正。
+状态行（读秒行）的数据源。**开放键集**：插件报什么键就是什么键，core 除 `cost` 外一律不认识、原样转发，客户端渲染认识的键、忽略其余。将来加"已用上下文"一类数字，零协议改动。
+
+- **本次 run 累计**：一次用户输入触发的全部 turn 之和，`POST /message` 起算清零。多 turn 会重发完整历史，花费因此逐轮膨胀——这是真实计费口径，core 不做修正。
 - **绝对值，非增量**：客户端覆盖写即可，不累加。丢帧不产生永久偏差。
-- **数据来源是模型上报**，core 与客户端都不估算。协议层从 `/v1/messages` SSE 的 `message_start`（`input_tokens`）与 `message_delta`（`output_tokens`）取值，在插件内合并为完整一组后上报；端点不给 usage 就不发帧（客户端按"无数据"处理，不显示为 0）。
-- 每轮至少两帧（`message_start` 后一帧、`message_delta` 后一帧），`message_delta` 的 usage 帧**先于** `stop` 送出，保证客户端收工时数字已定。
+- **钱由插件算**（ADR-0009）：供应商壳拦下协议层解析出的 token 用量，按本次模型查自己的模型数据表算出金额。**token 不跨 core 边界**——core 收到的只有钱，单价表它一眼都没见过。
+- 插件算不出钱（没有模型数据表、端点不报用量）就不发 `cost`，客户端按"无数据"处理，不显示 $0。
+- 每轮至少两帧（`message_start` 后一帧、`message_delta` 后一帧），后者**先于** `stop` 送出，保证客户端收工时数字已定。
 
 完整 message / tool_result 作为独立帧或结束帧，与增量同流保证最终一致。
 
@@ -86,6 +89,8 @@ data: <json>
 | `/plugins` | 查看插件列表 | `{"ok":true,"command":"plugins","data":[...]}` |
 | `/plugins enable <n>` | 启用插件 | 同上（`data` 为更新后列表） |
 | `/plugins disable <n>` | 禁用插件 | 同上 |
+| `/model` | 查看模型清单 | `{"ok":true,"command":"model","data":[{name,owned_by,context,current}]}` |
+| `/model <name>` | 切换主模型（写回 settings.json，下次调用即生效） | 同上（`data` 为更新后清单）；模型不在注册表里 → `{"ok":false,"error":"unknown model: ..."}` |
 | 失败 | — | `{"ok":false,"command":"plugins","error":"..."}` |
 
 ### GET /plugins

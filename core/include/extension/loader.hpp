@@ -17,6 +17,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "../ai/model.hpp"
 #include "../config.hpp"
 #include "../../sdk/plugin_api.h"
 
@@ -36,11 +37,19 @@ struct CommandEntry {
     struct Plugin* owner;
 };
 
+/* 已注册的模型（ADR-0009：数据来自插件 list_models，core 不内置） */
+struct ModelEntry {
+    Model def;
+    struct Plugin* owner; /* 声明该模型的插件（禁用时随之注销） */
+};
+
 /* core 运行上下文：配置 + 注册表 + 事件出口。插件经 plugin_core_t.ctx 访问。 */
 struct CoreContext {
     Config* config = nullptr; // 非 const：plugins 禁用清单写入（Config::set/persist）需写路径
     std::unordered_map<std::string, ToolEntry> tools;
     std::unordered_map<std::string, CommandEntry> commands;
+    /* 模型注册表（键 = 模型名）。重名后写覆盖，不检测——表是参考资料，不是白名单 */
+    std::unordered_map<std::string, ModelEntry> models;
     /* 已加载插件（PluginManager::load_all 后填充，供 executor/agent 遍历） */
     std::vector<Plugin*> all_plugins;
     /* 事件出口：把事件推给客户端（TUI/gui 推送流）。M5 接入，首版可为空。 */
@@ -129,7 +138,9 @@ private:
      * 成功 → plugins_ 追加 + known_ 状态 loaded；失败 → known_ failed + 日志，返回 false */
     bool load_plugin(PluginInfo* info);
     void assemble_nested();
-    /* 注销插件注册的 tool/command（owner 匹配） */
+    /* 模型清单入册（list_models → Model 注册表）。解析失败返回人话错误，调用方按加载失败处理 */
+    std::string register_models(Plugin* p);
+    /* 注销插件注册的 tool/command/model（owner 匹配） */
     void unregister_entries(const Plugin* p);
     /* destroy + dlclose（shutdown / disable 共用） */
     void destroy(Plugin* p);

@@ -39,11 +39,14 @@ core 只调协议链入口（最外层、未被其他协议插件依赖者），
 
 ### 1b. `deepseek`（外层壳，type = protocol，deps: v1-messages）
 
-DeepSeek 供应商壳：包住 `v1-messages`。壳只做两件事——
+DeepSeek 供应商壳：包住 `v1-messages`。壳做三件事——
 1. **声明供应商身份**：`deps: ["v1-messages"]` 让 core 解析协议链入口为本壳；
-2. **兜底供应商默认配置**：端点默认 `https://api.deepseek.com/anthropic`、模型默认 `deepseek-v4-flash`、缺 Authorization 补凭证。
+2. **兜底供应商默认配置**：端点默认 `https://api.deepseek.com/anthropic`、模型默认 `deepseek-v4-flash`、缺 Authorization 补凭证；
+3. **模型与计价**（ADR-0009）：读自己的模型数据表（`models.json`，含单价），经 `list_models` 把 `name/owned_by/context` 报给 core（**单价不报**）；`parse_feed` 中拦下内层的 usage 事件，按本次模型算出金额，只向上报 `status_update {"cost"}`——**token 到此为止不再上传**。
 
-**无任何供应商特殊逻辑**：不做模型映射（`claude-*` 原样透传）、不重写请求结构。协议层留空处填默认，其余原样透传；`parse_feed` 纯透传（响应解析无供应商差异）。
+**无任何供应商特殊逻辑**：不做模型映射（`claude-*` 原样透传）、不重写请求结构。协议层留空处填默认，其余原样透传；`parse_feed` 除拦 usage 换 cost 外全部透传。
+
+**模型数据表**：路径由 core 给（`get_config("models_path")`）——用户接管版 `~/.realagent/models/deepseek.json` 存在就用它，否则用包内出厂版 `models.json`，两者不合并。解析严格：文件在但格式错、条目缺字段即 init 失败（core 随即卸载该插件）。
 
 **嵌套链职责**（ADR-0004）：core 按依赖序加载（`v1-messages` 先），`deepseek` init 中 `get_dependency("v1-messages", ...)` 取内层接口表，`build_request` 调内层构造初步请求→壳兜底默认→产出最终请求；`parse_feed` 调内层。新增第二个供应商（如 OpenRouter）时另写一个壳声明 `deps: ["v1-messages"]`，复用同一协议层，core 据依赖自动选入口。
 

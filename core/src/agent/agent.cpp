@@ -13,7 +13,7 @@ Agent::Agent(CoreContext& ctx, Executor& exe) : ctx_(ctx), exe_(exe) {
 
 void Agent::reset() {
     messages_ = json::array();
-    run_usage_ = Usage{};
+    run_cost_ = 0;
     abort_.store(false);
 }
 
@@ -57,7 +57,7 @@ struct CurlSink {
     Plugin* proto;
     LlmOutcome* out;
     CoreContext* ctx;
-    const Usage* base;
+    const double* base; // 已完成 turn 的累计花费（本次调用的钱加在它上面才是 run 累计）
     const std::atomic<bool>* abort;
     bool parse_failed = false; // 协议插件报了 PLUGIN_ERR：与用户中断区分开
 };
@@ -113,16 +113,17 @@ static void feed_sink(void* sink_ctx, const char* type, const char* payload) {
         tu.name = ev["name"].as_string().value_or("");
         tu.input = ev["input"].is_null() ? "{}" : json(ev["input"]).dump();
         out->tool_uses.push_back(std::move(tu));
-    } else if (t == "usage") {
-        // 插件给的是本次调用的绝对值（后到覆盖先到），累加只在 Agent 跨 turn 做一次。
-        // 四字段齐不齐是协议插件的契约（PROTOCOL.md），core 不替它把关——插件吐坏帧
-        // 是插件的 bug，core 加一层校验既挡不住也修不了，只会把锅接过来。
-        out->usage.input = ev["input"].as_int64().value_or(0);
-        out->usage.output = ev["output"].as_int64().value_or(0);
-        out->usage.cache_read = ev["cache_read"].as_int64().value_or(0);
-        out->usage.cache_write = ev["cache_write"].as_int64().value_or(0);
-        // 推送流里的 usage 帧一律是"本次 run 累计"：已完成 turn + 当前 turn
-        if (s->ctx->emit_fn) s->ctx->emit_fn("usage", to_json(*s->base + out->usage).dump());
+    } else if (t == "status_update") {
+        // 运行态帧（ADR-0009）：开放键集，core 只认识 cost（要跨 turn 累加），
+        // 其余键原样转发——插件报什么客户端渲染什么，core 不解释、不校验。
+        json fwd = ev;
+        if (ev.contains("cost")) {
+            // 插件给的是本次调用的绝对值（后到覆盖先到），累加只在 Agent 跨 turn 做一次
+            out->cost = ev["cost"].as_double().value_or(0);
+            // 推送流里的花费一律是"本次 run 累计"：已完成 turn + 当前 turn
+            fwd["cost"] = *s->base + out->cost;
+        }
+        if (s->ctx->emit_fn) s->ctx->emit_fn("status_update", fwd.dump());
     } else if (t == "stop") {
         out->stop_reason = ev["reason"].as_string().value_or("stop");
     }
@@ -156,7 +157,7 @@ bool Agent::llm_call(const json& dialog, LlmOutcome& out) {
     // libcurl 流式 POST
     CURL* curl = curl_easy_init();
     if (!curl) return false;
-    CurlSink sink{proto, &out, &ctx_, &run_usage_, &abort_};
+    CurlSink sink{proto, &out, &ctx_, &run_cost_, &abort_};
     curl_easy_setopt(curl, CURLOPT_URL, req.url);
     curl_easy_setopt(curl, CURLOPT_POST, 1L);
     curl_easy_setopt(curl, CURLOPT_POSTFIELDS, req.body);
@@ -229,7 +230,7 @@ json Agent::build_dialog(ModelTier tier) const {
 
 void Agent::run(const std::string& user_input) {
     abort_.store(false);
-    run_usage_ = Usage{};
+    run_cost_ = 0;
     json um;
     um["role"] = "user";
     um["content"] = json::array();
@@ -270,7 +271,7 @@ void Agent::run(const std::string& user_input) {
             }
             break;
         }
-        run_usage_ += out.usage;
+        run_cost_ += out.cost;
 
         if (!out.tool_uses.empty()) {
             json am;

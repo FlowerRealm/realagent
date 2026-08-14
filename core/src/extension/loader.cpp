@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 
@@ -51,7 +52,17 @@ void api_log(plugin_core_t* core, int level, const char* msg) {
 
 const char* api_get_config(plugin_core_t* core, const char* key) {
     auto* ctx = ctx_of(core);
+    auto* owner = static_cast<Plugin*>(core->ctx);
     static std::string slot; // 单线程首版可接受；多线程需换 thread_local
+    // 模型数据表路径（ADR-0009）：内容是插件自己的，"去哪儿找"这条规矩归 core——
+    // 用户接管版存在就用它，否则用包内出厂版。两者不合并，插件只管读给到的路径。
+    if (key && std::strcmp(key, "models_path") == 0) {
+        const std::string runtime = ctx->config->models_path(owner->name);
+        slot = std::filesystem::exists(runtime)
+                   ? runtime
+                   : (std::filesystem::path(owner->dir) / "models.json").string();
+        return slot.c_str();
+    }
     slot = ctx->config->get(key);
     return slot.c_str();
 }
@@ -273,10 +284,20 @@ bool PluginManager::load_plugin(PluginInfo* info) {
     p->core_ctx = &ctx_;
     p->core_handle.api = &k_core_api;
     p->core_handle.ctx = p.get();
-    if (p->api->init) {
-        if (p->api->init(p->instance, &p->core_handle) != PLUGIN_OK) {
-            fprintf(stderr, "[extension] %s: init 失败\n", p->name.c_str());
-        }
+    // init 失败即加载失败：半死的插件留在链路里，只会让后面每一个症状都对不上号
+    if (p->api->init && p->api->init(p->instance, &p->core_handle) != PLUGIN_OK) {
+        mark_failed(info, "init 失败（见插件日志）");
+        unregister_entries(p.get());
+        destroy(p.get());
+        return false;
+    }
+    // 模型清单入册（init 之后：插件此时已读完自己的模型数据表）。
+    // 清单坏了就是插件坏了——卸载，不留半个能用的插件在链路里
+    if (const auto err = register_models(p.get()); !err.empty()) {
+        mark_failed(info, err);
+        unregister_entries(p.get());
+        destroy(p.get());
+        return false;
     }
     fprintf(stderr, "[extension] 已加载: %s (%s) v%s\n", p->name.c_str(), p->type_name.c_str(),
             p->version.c_str());
@@ -302,14 +323,37 @@ void PluginManager::assemble_nested() {
     }
 }
 
+std::string PluginManager::register_models(Plugin* p) {
+    // 模型清单入册（ADR-0009）：数据是插件自己的，此处只收它报上来的公共字段。
+    // 不报清单（协议层供应商中立、非协议插件）是正常状态，不是错误。
+    if (!p->api->list_models) return {};
+    const char* text = p->api->list_models(p->instance); // 内存归插件，core 不释放
+    if (!text) return {};
+    const auto arr = json::parse(text);
+    if (!arr || !arr->is_array())
+        return p->name + ": list_models 不是 JSON 数组";
+    for (std::size_t i = 0; i < arr->size(); ++i) {
+        const auto m = strict_from<Model>((*arr)[i], p->name + ": list_models[" + std::to_string(i) + "]");
+        // 一条写坏就整个插件加载失败：模型表是人手写的，打错字当场死好过算错账
+        if (!m) return m.error();
+        // 重名后写覆盖，不检测——用户嫌烦就自己写一份模型数据表接管
+        ctx_.models[m->name] = ModelEntry{*m, p};
+    }
+    return {};
+}
+
 void PluginManager::unregister_entries(const Plugin* p) {
-    // 注销该插件注册的 tool / command（owner 匹配），其余条目不动
+    // 注销该插件注册的 tool / command / model（owner 匹配），其余条目不动
     for (auto it = ctx_.tools.begin(); it != ctx_.tools.end();) {
         if (it->second.owner == p) it = ctx_.tools.erase(it);
         else ++it;
     }
     for (auto it = ctx_.commands.begin(); it != ctx_.commands.end();) {
         if (it->second.owner == p) it = ctx_.commands.erase(it);
+        else ++it;
+    }
+    for (auto it = ctx_.models.begin(); it != ctx_.models.end();) {
+        if (it->second.owner == p) it = ctx_.models.erase(it);
         else ++it;
     }
 }

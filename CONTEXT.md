@@ -70,7 +70,7 @@ _Avoid_: `anthropic api`（Anthropic 是一家公司，协议本身供应商中�
 
 在协议层之上包裹的薄壳插件：声明 `deps` 包住协议层，core 据此解析协议链入口；运行时兜底该供应商的默认配置（端点/模型/凭证），不做协议改写、不做模型映射。同一协议层下可叠加多个供应商壳（DeepSeek、OpenRouter…），core 按依赖链自动选入口。
 
-供应商壳与协议层是**嵌套链**关系（装饰器模式）：壳 init 中经 `get_dependency` 取内层接口表，build_request 调内层构造初步请求再补默认，parse_feed 纯透传。
+供应商壳与协议层是**嵌套链**关系（装饰器模式）：壳 init 中经 `get_dependency` 取内层接口表，build_request 调内层构造初步请求再补默认，parse_feed 默认透传、按需拦截改写（外层有权修改内层输出，见 [[Plugin Nesting]]）。
 
 _Avoid_: `vendor shim`、`provider plugin`（壳是供应商身份 + 兜底，不是协议层）
 
@@ -84,7 +84,9 @@ _Avoid_: `provider plugin`（协议层 ≠ 供应商层，见下）
 
 在协议层之上包裹的薄壳插件（见 [[Provider 壳]]）：声明前置依赖包住协议层，core 据此解析协议链入口；兜底该供应商的默认配置（端点/模型/凭证），不做协议改写、不做模型映射。复用同一协议层，新增供应商只写新壳。
 
-供应商壳与协议层插件是**嵌套链**关系（装饰器模式）：壳经 `get_dependency` 取协议层接口表，build_request 调协议层初步构造再补默认，parse_feed 纯透传。core 不内置任何供应商默认值。
+供应商壳与协议层插件是**嵌套链**关系（装饰器模式）：壳经 `get_dependency` 取协议层接口表，build_request 调协议层初步构造再补默认，parse_feed 默认透传、按需拦截改写。core 不内置任何供应商默认值。
+
+计价属于供应商身份，落在壳里：壳拦下协议层解析出的 token 用量事件，按本次模型查自己的[[模型数据表]]乘出钱数，只向上 sink [[Cost]]，token 到壳为止不再上传。壳同时经 `list_models` 把模型清单（不含单价）报给 core。
 
 ## Plugin Nesting（插件嵌套）
 
@@ -130,6 +132,50 @@ assistant 消息中的一种 content block 类型（`{"type":"thinking","thinkin
 
 _Avoid_: `reasoning_content`（DeepSeek 原生 API 字段名，Anthropic 兼容端点映射为 thinking 块）
 
+## Model（模型元数据）
+
+一个模型"是什么"：名称、归属供应商、上下文窗口。**不含计价**——单价是 [[Provider 壳]] 的私事，core 只收 [[Cost]] 的最终数字。
+
+与 [[Model Tier]] 划清：Tier 是"这次调用用哪一档"，Model 是"那一档指向的模型是什么货色"。
+
+数据归**插件**所有，不是 core 的配置：[[Provider 壳]]自己读自己的模型数据表（[[模型数据表]]），只把 core 用得着的部分经 `list_models` 报上来。**单价不报**——core 不算钱，存了没有消费方。
+
+core 不内置任何模型数据，也不校验用户配的模型名在不在表里——**表是参考资料，不是白名单**：配了表外的模型照发不误，不检查、不警告、不兜底。
+
+_Avoid_: `模型清单`（指单个模型时）、`provider model`
+
+## 模型数据表（models.json）
+
+[[Provider 壳]]自有的模型数据文件，含单价在内的全部字段。两个位置，**不合并**：包内 `models.json` 是出厂数据（打包产物，只读，随插件升级更新）；运行时目录 `~/.realagent/models/<插件名>.json` 是用户接管版，**存在即整体接管**，出厂数据一概不看。
+
+解析严格：缺字段、格式错即插件加载失败并报错原文，不跳过坏条目、不补默认值。
+
+_Avoid_: `模型配置`（它不走 [[配置]] 那套 core 注入机制，是插件自己的数据）
+
+## Cost（花费）
+
+一次 run 花掉的钱（USD）。由 [[Provider 壳]] 按本次调用的模型查自己的[[模型数据表]]算出——**单价与 token 用量都不出插件**，core 只收最终数字。core 按 agent 实例跨 turn 累加，随 [[status_update]] 帧下发；一次用户输入起算清零，帧内为累计绝对值。
+
+_Avoid_: `usage`、`token 统计`（core 侧已无 token 概念，只有钱）
+
+## status_update（运行态帧）
+
+插件向客户端报运行态数据的推送帧，**开放键集**：插件报什么键就是什么键，core 除 `cost`（需累加）外一律不认识、原样转发。落点是 [[Status（状态行）]]——本次 run 的实时数字，run 结束即消失。
+
+_Avoid_: `cost 帧`（单值帧型是死路，加第二个值就得破坏客户端）
+
+## Statusline（状态栏）
+
+输入框**下方**的常驻栏：`🤖 model | 📁 dir | 🌿 git`。内容是**这次会话的身份信息**——哪个模型、哪个目录、哪个分支，会话期内基本不变，故启动拿一次即可，不常驻刷新循环。展示偏好（显示哪几段、emoji 还是 nerd font）纯客户端状态，core 不认。
+
+_Avoid_: `状态行`（那是活动区里的另一条，见下）
+
+## Status（状态行）
+
+[[活动区（Live Region）]]里的读秒行：`⠋ 思考中… (1m23s · $0.0123 · esc 中断)`。内容是**本次 run 的实时数字**（读秒、[[Cost]]），数据经 [[status_update]] 帧推送。run 结束整行消失——它描述"正在发生的事"，事结束了就没有它。
+
+_Avoid_: `statusline`（那是输入框下方那条常驻栏）
+
 ## 活动区（Live Region）
 
 TUI 底部由 Bubble Tea 每帧重绘的区域：未定型行 + 审批框 + 斜杠菜单 + 读秒状态行 + 输入框。其上方是**终端原生 scrollback**——已定型的行由 TUI 打进去后不再归 TUI 管（[[ADR-0008]]）。活动区绝不能高过终端。
@@ -167,13 +213,18 @@ _Avoid_: `finalize`（原指把 streaming 消息收进列表，行模型下已�
 - Provider（第一版）：只做 Anthropic `/v1/messages` 协议，目标模型 Deepseek。
 - 权限（第一版）：最小策略插件——永远允许，只为打通链路，非真实安全。
 - 审批链路：core 永远是发起方。首版插件直接通过；未来插件 ask 时 core 向用户交互界面（TUI/gui）发询问，界面回传裁决。gui 与 TUI 是平等的 HTTP 客户端，接口按多客户端设计。
+- 模型元数据（[[Model]]）：core 定义类型 + 持有注册表，数据全部来自插件（`list_models`，ABI 升 2）。core 的 Model 只有 name / owned_by / context 三个字段，**不含单价**。
+- 计价：全在 [[Provider 壳]]，core 只收 [[Cost]] 并按 agent 实例跨 turn 累加，经 [[status_update]] 帧下发（本次 run 累计绝对值，客户端覆盖写）。token 不跨 core 边界，`Usage` 结构体删除。
+- 模型数据表：插件自有，不走 core 配置注入；运行时目录用户版存在即整体接管出厂版，不合并。
+- 不兜底原则：模型表解析失败即硬错，模型重名后写覆盖不检测，配置的模型名不在表里不检查不警告。少写代码优先于替用户擦屁股。
 - 插件 type：protocol / tool / permission / session 四类（ADR-0001）。
 - 插件元数据：独立 JSON 文件（`plugin.json`），含名称/描述/版本/ABI 版本/前置依赖。
-- 配置机制：唯一来源是 `settings.json`（全局 `~/.realagent/` 打底，项目级 `.realagent/` 覆盖）。**无 env 覆盖、无内置默认、无回落**：必需键（api_key / base_url / model / small_model）缺一个 core 就退出并点名缺哪个；配置文件存在但解析失败同样是硬错。core 不认任何供应商身份，端点与模型名一律由用户配置。插件初始化时由 core 注入配置节，插件不自行解析配置。
+- 配置产物与打包产物分离：用户可改的一律在运行时目录（`~/.realagent/settings.json`、`~/.realagent/models.json`），插件目录只放打包产物（`plugin.json` + 动态库 + 出厂 `models.json`），重装即覆盖，不劝用户改。
+- 配置机制：凭证与偏好的唯一来源是 `settings.json`（全局 `~/.realagent/` 打底，项目级 `.realagent/` 覆盖）。**无 env 覆盖、无内置默认、无回落**：必需键（api_key / base_url / model / small_model）缺一个 core 就退出并点名缺哪个；配置文件存在但解析失败同样是硬错。core 不认任何供应商身份，端点与模型名一律由用户配置。插件初始化时由 core 注入配置节，插件不自行解析配置。
 - 协议插件可配项：api_key / base_url / model / small_model，全部必配。base_url 与 api_key 同级——代理/网关用户（OpenRouter / one-api / 内网中转）必须能自定义端点。
 - 模型档位（[[Model Tier]]）：`model` 主模型 + `small_model` 小模型两档，共用 base_url / api_key。档位只换模型名，不换端点凭证——跨供应商小模型不做（真需要时再让 dialog 携带端点 override）。两档都必配，不存在小模型回落主模型这种隐式默认。core 侧 `Config::model(ModelTier)` 是唯一知道键名的地方，协议插件/SDK/ABI 无感。
 - 会话目录不是配置项：`.realagent/sessions` 是 core 自己的落盘路径，写死在 core 里，settings.json 写它不生效。
-- 斜杠命令：插件可注册（通用能力，不限 type）。首版只留接口不实现；`/quit` core 内置，`/new` `/resume` 由 session-manager 插件提供。
+- 斜杠命令：插件可注册（通用能力，不限 type）。首版只留接口不实现；`/quit` core 内置，`/new` `/resume` 由 session-manager 插件提供。`/model` core 内置（改的是配置，不是插件能力）：无参列 [[Model]] 注册表，带名切主模型并写回 settings.json；只认注册表里的模型——交互式选择就该从已知的里挑。
 - 首版插件清单：见 `docs/plugins.md`（6 个插件：v1-messages + deepseek 壳协议链 / core-tools / perm-allow-all / perm-ask / session-manager）。
 - 通信协议：见 `docs/PROTOCOL.md`（可靠流请求-响应 + 推送流，全可靠 + 0-RTT）。
 - 架构：core 为常驻服务，客户端（TUI/未来 gui）通过 **QUIC/HTTP3** 连接（ADR-0006）。REST 语义（POST /message、POST /approval-response 等）；推送流为 HTTP/3 长生命周期单向流（SSE 语义），**全可靠**（增量与事件无差别，QUIC 可靠流原生保证，无自建确认机制）。0-RTT 快握手。支持公网部署。

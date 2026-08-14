@@ -16,7 +16,7 @@
  * 插件初始化时经 ra_core_api.get_config 读取，插件不自行解析配置。
  * 线程安全：内部 mutex 保护配置树——agent 线程并发 get / 事件循环 set、persist 均安全。
  * persist() 原子写 ~/.realagent/settings.json（tmp+rename）。
- * 变更 API（set/persist）仅服务于插件启停持久化。
+ * 变更 API（set/persist）仅服务于运行时开关的持久化：插件启停、/model 切档。
  */
 #pragma once
 
@@ -63,6 +63,10 @@ public:
 
     // 会话存储目录（core 常量，不可配置）
     std::string session_dir() const;
+
+    // 模型数据表的运行时落点（用户接管版）：~/.realagent/models/<插件名>.json。
+    // 内容是插件的数据（含单价），core 只认路径不认内容（ADR-0009）
+    std::string models_path(std::string_view plugin_name) const;
 
     // 合并后的完整配置（JSON，注入给插件 init 用）
     json to_json() const;

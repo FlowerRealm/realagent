@@ -21,33 +21,6 @@
 
 namespace realagent {
 
-/* token 计数（协议插件的 usage 事件；一次 LLM 调用内为绝对值，跨 turn 由 Agent
- * 累加） */
-struct Usage {
-  int64_t input = 0;
-  int64_t output = 0;
-  int64_t cache_read = 0;
-  int64_t cache_write = 0;
-
-  Usage &operator+=(const Usage &o) {
-    input += o.input;
-    output += o.output;
-    cache_read += o.cache_read;
-    cache_write += o.cache_write;
-    return *this;
-  }
-  Usage operator+(const Usage &o) const {
-    Usage r = *this;
-    r += o;
-    return r;
-  }
-  bool empty() const {
-    return input == 0 && output == 0 && cache_read == 0 && cache_write == 0;
-  }
-};
-/* 描述表供出站用（to_json）：字段名与 PROTOCOL.md 的 usage 帧逐字一致 */
-BOOST_DESCRIBE_STRUCT(Usage, (), (input, output, cache_read, cache_write))
-
 /* 协议插件的解析结果（一次 LLM 调用的产出） */
 struct LlmOutcome {
   std::string text;     // 累积文本（非 tool_use 时）
@@ -62,7 +35,7 @@ struct LlmOutcome {
   std::vector<ToolUse> tool_uses;
   std::string stop_reason;
   std::string error; // 非空 = 本次调用失败的人话原因（广播给客户端）
-  Usage usage;       // 本次调用的 token 计数（绝对值，后到覆盖先到）
+  double cost = 0;   // 本次调用花掉的钱（USD，插件算好的绝对值，后到覆盖先到）
 };
 
 class Agent {
@@ -93,7 +66,7 @@ private:
   CoreContext &ctx_;
   Executor &exe_;
   json messages_;
-  Usage run_usage_;
+  double run_cost_ = 0; // 本次 run 累计花费（USD），一次用户输入起算清零
   std::atomic<bool> abort_{false};
 };
 

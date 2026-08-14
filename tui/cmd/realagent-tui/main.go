@@ -203,8 +203,11 @@ func (m model) update(msg tea.Msg) (model, tea.Cmd) {
 			// 斜杠命令结果（core 返回 {"ok":true,"command":...}），渲染为 info 行。
 			// plugins 命令携带 data 载荷（[]PluginInfo），可直接展示。
 			text := describeCommand(v.reply.Command, v.reply.Messages)
-			if v.reply.Command == "plugins" {
+			switch v.reply.Command {
+			case "plugins":
 				text = renderPlugins(v.reply.Data)
+			case "model":
+				text = renderModels(v.reply.Data)
 			}
 			m.emit("info", text)
 			m.awaiting = false
@@ -440,9 +443,10 @@ func (m *model) handleEvent(ev client.Event) tea.Cmd {
 	case "thinking_stop":
 		m.closeLine()
 
-	case "usage":
-		// core 给的是本次 run 累计的绝对值：覆盖写，TUI 不做任何算术
-		jsonUnmarshal(ev.Payload, &m.busy.tokens)
+	case "status_update":
+		// core 给的是本次 run 累计的绝对值：覆盖写，TUI 不做任何算术。
+		// 帧是开放键集，这里只取认得的键，不认识的忽略（ADR-0009）
+		jsonUnmarshal(ev.Payload, &m.busy.cost)
 
 	case "tool_execution_start":
 		var d struct {
@@ -630,6 +634,48 @@ func renderPlugins(data json.RawMessage) string {
 		out = append(out, text)
 	}
 	return strings.Join(out, "\n")
+}
+
+// renderModels 把 /model 结果（[]ModelInfo JSON）渲染为多行 info 文本。
+// 每行：标记 名称 [供应商] 上下文；● 是当前主模型。切换用 /model <name>。
+func renderModels(data json.RawMessage) string {
+	var list []client.ModelInfo
+	if err := json.Unmarshal(data, &list); err != nil {
+		return "✅ 命令已执行: /model" // 载荷解析失败降级为通用提示
+	}
+	if len(list) == 0 {
+		return "✅ /model: 无模型清单（插件没有模型数据表）"
+	}
+	var out []string
+	for _, m := range list {
+		mark := "  "
+		if m.Current {
+			mark = "● "
+		}
+		text := mark + m.Name
+		if m.OwnedBy != "" {
+			text += " [" + m.OwnedBy + "]"
+		}
+		if c := humanContext(m.Context); c != "" {
+			text += "  " + c
+		}
+		out = append(out, text)
+	}
+	return strings.Join(out, "\n")
+}
+
+// humanContext 把上下文窗口折算成人话：1048576 → 1M，131072 → 128k；0（未知）返回空串
+func humanContext(n int64) string {
+	switch {
+	case n <= 0:
+		return ""
+	case n%(1024*1024) == 0:
+		return fmt.Sprintf("%dM", n/(1024*1024))
+	case n%1024 == 0:
+		return fmt.Sprintf("%dk", n/1024)
+	default:
+		return fmt.Sprintf("%d", n)
+	}
 }
 
 // renderApproval 渲染审批对话框（模态，等待 y/n 裁决）
