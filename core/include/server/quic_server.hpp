@@ -38,6 +38,8 @@ struct QuicCallbacks {
     std::function<std::string()> on_commands;
     /* 插件列表（GET /plugins）→ JSON 数组字符串 */
     std::function<std::string()> on_plugins;
+    /* 运行态信息（GET /status，statusline 数据源）→ JSON 对象字符串 {"model":"..."} */
+    std::function<std::string()> on_status;
     /* 启用插件（POST /plugins/enable，体 {"name"}）→ 响应 JSON 字符串 */
     std::function<std::string(const std::string& name)> on_plugin_enable;
     /* 禁用插件（POST /plugins/disable，体 {"name"}）→ 响应 JSON 字符串 */

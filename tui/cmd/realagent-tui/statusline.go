@@ -1,0 +1,184 @@
+// 状态栏（输入框下方，参考本地 claude code statusline / ccline cometix 主题）：
+// model | directory | git，一次性拿数据，进程存活期内不重复拉取——
+// 三者在一次会话里基本不变，没必要为罕见的分支切换常驻一个刷新循环。
+//
+// 显示什么、图标用 emoji 还是 nerd font 由 /statusline 命令配置（本文件末尾），
+// 纯客户端状态——core 不认展示偏好，不走网络、不持久化，进程重启即复原默认值。
+package main
+
+import (
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+
+	"github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
+	"realagent/tui/internal/client"
+)
+
+// statuslineSep 段间分隔符，跟本地 ccline 配置一致
+const statuslineSep = " | "
+
+var (
+	slModelIconStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("14")).Bold(true)
+	slModelTextStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("14")).Bold(true)
+	slDirIconStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("11")).Bold(true)
+	slDirTextStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("10")).Bold(true)
+	slGitIconStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("12")).Bold(true)
+	slGitTextStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("12")).Bold(true)
+)
+
+// statuslineIcons 一套图标（emoji 或 nerd font）
+type statuslineIcons struct {
+	model, dir, git string
+}
+
+var emojiIcons = statuslineIcons{model: "🤖", dir: "📁", git: "🌿"}
+var nerdIcons = statuslineIcons{model: "", dir: "\U000f024b", git: "\U000f02a2"}
+
+// pickIconSet 按 REALAGENT_ICONS 环境变量选初始图标集，默认 emoji（零配置可用）；
+// /statusline icons 命令可在运行时改，iconSet 是唯一真相源，图标集只是它的派生值。
+func pickIconSet() string {
+	if os.Getenv("REALAGENT_ICONS") == "nerd" {
+		return "nerd"
+	}
+	return "emoji"
+}
+
+// statusline 是状态栏的数据源 + 展示偏好
+type statusline struct {
+	model  string // GET /status 拿到的模型名；空 = 未知，段隐藏
+	dir    string // 进程 cwd 的 basename
+	branch string // 当前 git 分支；非 git 仓库则空，段隐藏
+
+	showModel, showDir, showGit bool
+	iconSet                     string // "emoji" | "nerd"
+}
+
+func newStatusline() statusline {
+	sl := statusline{showModel: true, showDir: true, showGit: true, iconSet: pickIconSet()}
+	if wd, err := os.Getwd(); err == nil {
+		sl.dir = filepath.Base(wd)
+	}
+	sl.branch = gitBranch()
+	return sl
+}
+
+func (sl statusline) icons() statuslineIcons {
+	if sl.iconSet == "nerd" {
+		return nerdIcons
+	}
+	return emojiIcons
+}
+
+// gitBranch 取当前分支名；非仓库或命令失败返回空（PROTOCOL.md 一贯原则：无数据不伪造）
+func gitBranch() string {
+	out, err := exec.Command("git", "rev-parse", "--abbrev-ref", "HEAD").Output()
+	if err != nil {
+		return ""
+	}
+	branch := strings.TrimSpace(string(out))
+	if branch == "" || branch == "HEAD" {
+		return ""
+	}
+	return branch
+}
+
+// statusMsg 携带 GET /status 的拉取结果
+type statusMsg struct {
+	model string
+}
+
+func fetchStatusCmd(c *client.Client) tea.Cmd {
+	return func() tea.Msg {
+		s, err := c.FetchStatus()
+		if err != nil {
+			return statusMsg{}
+		}
+		return statusMsg{model: s.Model}
+	}
+}
+
+// render 渲染状态栏一行；无任何段时返回 ""（调用方按空串跳过）
+func (sl statusline) render() string {
+	icons := sl.icons()
+	var segs []string
+	if sl.showModel && sl.model != "" {
+		segs = append(segs, slModelIconStyle.Render(icons.model)+" "+slModelTextStyle.Render(sl.model))
+	}
+	if sl.showDir && sl.dir != "" {
+		segs = append(segs, slDirIconStyle.Render(icons.dir)+" "+slDirTextStyle.Render(sl.dir))
+	}
+	if sl.showGit && sl.branch != "" {
+		segs = append(segs, slGitIconStyle.Render(icons.git)+" "+slGitTextStyle.Render(sl.branch))
+	}
+	if len(segs) == 0 {
+		return ""
+	}
+	return strings.Join(segs, statuslineSep)
+}
+
+// ==================== /statusline 命令（纯本地，不经 core） ====================
+
+// statuslineCmd 是本地命令的注册项（合入斜杠菜单，见 main.go menuMatches）
+var statuslineCmd = client.Command{
+	Name:        "statusline",
+	Description: "配置状态栏：icons emoji|nerd，enable|disable model|directory|git",
+}
+
+const statuslineUsage = "用法: /statusline [icons emoji|nerd] [enable|disable model|directory|git]"
+
+// applyStatuslineCmd 解析 /statusline 的参数（不含命令名本身），返回更新后的状态与提示文本。
+// 无参数 = 查看当前配置；参数不合法一律回退到原值 + 用法提示，绝不半改。
+func (sl statusline) applyStatuslineCmd(rest string) (statusline, string) {
+	args := strings.Fields(rest)
+	if len(args) == 0 {
+		return sl, sl.describe()
+	}
+	if len(args) != 2 {
+		return sl, statuslineUsage
+	}
+	verb, arg := args[0], args[1]
+	switch verb {
+	case "icons":
+		if arg != "emoji" && arg != "nerd" {
+			return sl, "未知图标集: " + arg + "（emoji|nerd）\n" + statuslineUsage
+		}
+		sl.iconSet = arg
+		return sl, "✅ 图标切换为 " + arg
+
+	case "enable", "disable":
+		on := verb == "enable"
+		switch arg {
+		case "model":
+			sl.showModel = on
+		case "directory":
+			sl.showDir = on
+		case "git":
+			sl.showGit = on
+		default:
+			return sl, "未知段: " + arg + "（model|directory|git）\n" + statuslineUsage
+		}
+		state := "隐藏"
+		if on {
+			state = "显示"
+		}
+		return sl, "✅ " + state + " " + arg
+
+	default:
+		return sl, statuslineUsage
+	}
+}
+
+// describe 列出当前状态栏配置（/statusline 无参数时展示）
+func (sl statusline) describe() string {
+	seg := func(name string, on bool) string {
+		if on {
+			return name + ":on"
+		}
+		return name + ":off"
+	}
+	return "状态栏配置 — " + seg("model", sl.showModel) + " " + seg("directory", sl.showDir) +
+		" " + seg("git", sl.showGit) + " icons:" + sl.iconSet
+}

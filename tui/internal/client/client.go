@@ -178,6 +178,20 @@ func (c *Client) FetchPlugins() ([]PluginInfo, error) {
 	return list, nil
 }
 
+// Status 是运行态信息（GET /status，statusline 数据源）
+type Status struct {
+	Model string `json:"model"`
+}
+
+// FetchStatus 拉取运行态信息（GET /status）。失败返回错误（TUI 降级为隐藏该段）。
+func (c *Client) FetchStatus() (Status, error) {
+	var s Status
+	if err := c.getJSON("/status", &s); err != nil {
+		return Status{}, err
+	}
+	return s, nil
+}
+
 // EnablePlugin 启用插件（POST /plugins/enable，core 从 known dir 重载）。
 func (c *Client) EnablePlugin(name string) error {
 	r, err := c.postJSON("/plugins/enable", map[string]string{"name": name})

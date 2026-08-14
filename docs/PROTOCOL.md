@@ -29,6 +29,7 @@ TUI ◀──(2) 长生命周期单向流────────────  c
 | `GET /commands` | 斜杠命令列表 `[{name, description}]`（TUI 菜单数据源，core 是唯一真相；内置 new/resume 与插件注册命令合并） |
 | `POST /approval-response` | 审批裁决回传（TUI → core） |
 | `GET /plugins` | 插件列表（TUI /plugins 数据源：loaded/disabled/failed + error） |
+| `GET /status` | 运行态信息（TUI statusline 数据源）：`{"model": "..."}` |
 | `POST /plugins/enable` | 启用插件（体 `{"name"}`） |
 | `POST /plugins/disable` | 禁用插件（体 `{"name"}`） |
 | `GET /sessions` / `POST /session` | 会话列表 / 新建-恢复 |

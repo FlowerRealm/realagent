@@ -1,0 +1,81 @@
+// 状态栏：/statusline 命令解析、段开关、图标切换、渲染降级。
+package main
+
+import (
+	"strings"
+	"testing"
+)
+
+func testStatusline() statusline {
+	return statusline{
+		model: "claude-sonnet-5", dir: "realagent", branch: "main",
+		showModel: true, showDir: true, showGit: true, iconSet: "emoji",
+	}
+}
+
+func TestStatuslineDescribeNoArgs(t *testing.T) {
+	sl, msg := testStatusline().applyStatuslineCmd("")
+	if sl != testStatusline() {
+		t.Error("无参数不应改配置")
+	}
+	for _, want := range []string{"model:on", "directory:on", "git:on", "icons:emoji"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("describe() = %q，缺 %q", msg, want)
+		}
+	}
+}
+
+func TestStatuslineToggleSegment(t *testing.T) {
+	sl, msg := testStatusline().applyStatuslineCmd("disable git")
+	if sl.showGit {
+		t.Error("disable git 后 showGit 应为 false")
+	}
+	if !strings.Contains(msg, "隐藏") {
+		t.Errorf("提示应含隐藏，got %q", msg)
+	}
+	sl2, _ := sl.applyStatuslineCmd("enable git")
+	if !sl2.showGit {
+		t.Error("enable git 后 showGit 应为 true")
+	}
+}
+
+func TestStatuslineSwitchIcons(t *testing.T) {
+	sl, msg := testStatusline().applyStatuslineCmd("icons nerd")
+	if sl.iconSet != "nerd" {
+		t.Errorf("iconSet = %q, want nerd", sl.iconSet)
+	}
+	if !strings.Contains(msg, "nerd") {
+		t.Errorf("提示应含 nerd，got %q", msg)
+	}
+}
+
+func TestStatuslineRejectsUnknownArgs(t *testing.T) {
+	cases := []string{"icons foo", "enable bar", "disable", "wat", "icons"}
+	orig := testStatusline()
+	for _, rest := range cases {
+		sl, msg := orig.applyStatuslineCmd(rest)
+		if sl != orig {
+			t.Errorf("applyStatuslineCmd(%q) 不应改配置，got %+v", rest, sl)
+		}
+		if msg == "" {
+			t.Errorf("applyStatuslineCmd(%q) 应给出提示", rest)
+		}
+	}
+}
+
+func TestStatuslineRenderHidesDisabledOrEmptySegments(t *testing.T) {
+	sl := testStatusline()
+	sl.showGit = false
+	got := sl.render()
+	if strings.Contains(got, "main") {
+		t.Errorf("disable 的段不应出现在渲染结果: %q", got)
+	}
+	if !strings.Contains(got, "claude-sonnet-5") || !strings.Contains(got, "realagent") {
+		t.Errorf("未 disable 的段应渲染: %q", got)
+	}
+
+	empty := statusline{showModel: true, showDir: true, showGit: true}
+	if got := empty.render(); got != "" {
+		t.Errorf("全无数据应返回空串，got %q", got)
+	}
+}

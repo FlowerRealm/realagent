@@ -295,6 +295,14 @@ void QuicServer::run() {
                             else
                                 resp_body = "[]";
                             send_json(c, resp_body);
+                        } else if (c.request_method == "GET" && c.request_path == "/status") {
+                            // 运行态信息（TUI statusline 数据源，见 PROTOCOL.md）
+                            std::string resp_body;
+                            if (impl_->cbs.on_status)
+                                resp_body = impl_->cbs.on_status();
+                            else
+                                resp_body = "{}";
+                            send_json(c, resp_body);
                         } else if (c.request_method == "POST" && c.request_path == "/plugins/enable") {
                             // 启用插件（体 {"name"}）
                             std::string resp_body;

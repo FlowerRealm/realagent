@@ -213,6 +213,12 @@ int main(int argc, char** argv) {
     // —— 插件管理端点（TUI /plugins 命令的数据源） ——
     // 写操作锁 agent_mtx（对齐 /new 线程纪律：与 agent 运行互斥，避免执行中改注册表）
     cbs.on_plugins = [&mgr]() { return plugins_payload(mgr.list()).dump(); };
+    // 运行态信息（GET /status，statusline 数据源）：目前只有 model，按需再加字段
+    cbs.on_status = [&ctx]() {
+        json out;
+        out["model"] = ctx.config->model(ModelTier::Main);
+        return out.dump();
+    };
     cbs.on_plugin_enable = [&mgr, &agent_mtx](const std::string& name) {
         std::lock_guard<std::mutex> lk(agent_mtx);
         if (mgr.enable(name)) return std::string("{\"ok\":true}");

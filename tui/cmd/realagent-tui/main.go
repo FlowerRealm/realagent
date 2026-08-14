@@ -1,6 +1,6 @@
 // realagent-tui — 终端客户端（M6 基本功能 + ADR-0005 审批对话框）
 //
-// Bubble Tea 界面：消息流 + 底部输入框（参考 claude code / codex，无状态栏）。
+// Bubble Tea 界面：消息流 + 底部输入框 + 状态栏（参考 claude code / codex）。
 // 订阅 /events 推送流渲染流式打字效果；POST /message 提交用户消息（立即返回
 // {"status":"processing"}，回复与审批事件均走推送流）。
 //
@@ -87,10 +87,11 @@ type model struct {
 	menuHid  bool             // esc 收起菜单（下次编辑输入即复原）
 	awaiting bool             // 已 POST /message 但推送流还没吐出任何内容
 	busy     activity         // 读秒状态行（status.go）：模型在干什么 + 已耗时
+	sl       statusline       // 状态栏（statusline.go）：model | directory | git
 }
 
 func initialModel(c *client.Client) model {
-	m := model{client: c}
+	m := model{client: c, sl: newStatusline()}
 	m.emit("info", "连接 core (QUIC/HTTP3) — Enter 发送，Alt+Enter 换行，Esc 中断，Ctrl+C 退出")
 	return m
 }
@@ -133,7 +134,7 @@ func approvalCmd(c *client.Client, id string, allow bool) tea.Cmd {
 // ==================== Bubble Tea 接口 ====================
 
 func (m model) Init() tea.Cmd {
-	return tea.Batch(subscribeCmd(m.client), fetchCommandsCmd(m.client))
+	return tea.Batch(subscribeCmd(m.client), fetchCommandsCmd(m.client), fetchStatusCmd(m.client))
 }
 
 // Update 是唯一的状态入口：先跑业务，再把定型的行推进 scrollback。
@@ -170,6 +171,10 @@ func (m model) update(msg tea.Msg) (model, tea.Cmd) {
 		if v.err == nil {
 			m.commands = v.cmds
 		}
+		return m, nil
+
+	case statusMsg:
+		m.sl.model = v.model
 		return m, nil
 
 	case eventMsg:
@@ -320,8 +325,12 @@ func (m model) menuMatches() []client.Command {
 	if strings.ContainsAny(prefix, " \n") {
 		return nil
 	}
+	all := make([]client.Command, 0, len(m.commands)+1)
+	all = append(all, m.commands...)
+	all = append(all, statuslineCmd) // 本地命令（statusline.go），不经 core
+
 	var out []client.Command
-	for _, c := range m.commands {
+	for _, c := range all {
 		if strings.HasPrefix(c.Name, prefix) {
 			out = append(out, c)
 		}
@@ -370,6 +379,16 @@ func (m model) submitInput() (model, tea.Cmd) {
 	m.ed.clear()
 	m.menuSel = 0
 	m.emit("user", input)
+
+	// /statusline 是纯客户端命令（statusline.go）：core 不认展示偏好，本地处理，不占用网络往返
+	if input == "/statusline" || strings.HasPrefix(input, "/statusline ") {
+		rest := strings.TrimSpace(strings.TrimPrefix(input, "/statusline"))
+		var msg string
+		m.sl, msg = m.sl.applyStatuslineCmd(rest)
+		m.emit("info", msg)
+		return m, nil
+	}
+
 	m.awaiting = true
 	// 读秒从按下 Enter 起算（不等 turn_start，网络往返也是等待）
 	return m, tea.Batch(sendCmd(m.client, input), m.busy.begin("发送中", time.Now()))
@@ -504,7 +523,7 @@ func jsonUnmarshal(s string, v any) {
 
 // ==================== 渲染 ====================
 
-// View 只画活动区：未定型行 + 审批框 + 斜杠菜单 + 状态行 + 输入框。
+// View 只画活动区：未定型行 + 审批框 + 斜杠菜单 + 读秒状态行 + 输入框 + 状态栏。
 // 已定型的行早已由 outbox 打进终端 scrollback，不在这里重绘。
 func (m model) View() string {
 	width := m.width
@@ -529,6 +548,9 @@ func (m model) View() string {
 		rows = append(rows, status)
 	}
 	rows = append(rows, m.ed.view(width)...)
+	if status := m.sl.render(); status != "" {
+		rows = append(rows, status)
+	}
 
 	// 兜底：活动区绝不能高过终端（否则 Bubble Tea 自己会截，光标算错就花屏）。
 	// 正常情况下这里不会触发——定型的行每帧都在往 scrollback 走。
