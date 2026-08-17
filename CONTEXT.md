@@ -336,6 +336,7 @@ _Avoid_: `finalize`（原指把 streaming 消息收进列表，行模型下已�
 - TUI：Go + Bubble Tea（ADR-0007）。参考 claude code / codex 客户端外观，**有状态栏**（见 [[Statusline（状态栏）]]）。原定"无状态栏"，后反转并已完整实现（core 侧 `GET /statusline` + `statusline` 帧，TUI 侧 `tui/cmd/realagent-tui/statusline.go`）；**反转无 ADR 记录，且与现存 ADR 冲突**——`docs/adr/0007-tui-go-bubbletea.md:34` 至今写着"无状态栏（用户明确）"，无 ADR 取代它。理由未知。
 - TUI 渲染：历史归终端管，不进 altscreen（ADR-0008）——定型的行打进终端原生 scrollback，Bubble Tea 只重绘底部活动区。
 - 配置约定：项目级 `.realagent/`（settings.json + extensions/）+ AGENTS.md；全局 `~/.realagent/`。
+  - 实况注（2026-08-16）：**项目级那一半没落地**。`settings.json` 只读 `~/.realagent/settings.json`（`core/src/config.cpp:20` 明写"唯一的覆盖来源，不看 cwd"），`extensions/` 只扫 `~/.realagent/extensions`（`config.cpp:140`）。唯一真按项目分家的是会话目录 `.realagent/sessions`（相对 cwd）。
 - 上下文压缩：第一版不做。靠最大上下文模型硬撑，会话满则开新会话；后期可加 auto-compact。
 - Steering：第一版只支持中止（abort），不支持中途插话。插话（steering queue）后期基于异步引擎再加。
 - 会话管理：第一版支持新建/恢复/列表，无 fork/树导航。
@@ -355,7 +356,7 @@ _Avoid_: `finalize`（原指把 streaming 消息收进列表，行模型下已�
 - 冲突不静默：能力槽独占、具名条目经[[命名空间]]隔离、最终名字撞车即加载失败并点名。`register_*` 撞名返回 `PLUGIN_ERR`（原先一律返回 OK，插件不知道自己踩了谁）。
   - 实况注（2026-08-16）：`register_*` 这套 API **整个不存在了**（ADR-0012 取代 ADR-0011 决策 8，连同三张注册表、撞名记账、`unregister_entries` 一并删除），故"撞名返回 `PLUGIN_ERR`"已无所指。前半句三条不变；另外**能力槽冲突改为"空置并点名"，不再卸载插件**（ADR-0012 决策 11）。
 - 跨边界内存**统一 core 分配**：core API 提供 `alloc`，凡交给 core 的内存一律经它分配、由 core 释放；`plugin_api_t` 的 `free` 删除。`list_models` 的"内存归插件、core 只读"特例一并取消（改为拷贝一份）。少一条规则胜过省一次拷贝——跨 dlopen 边界的堆错误两侧可能链着不同 allocator，定位成本远高于几 KB memcpy。
-  - 实况注（2026-08-16）：**"统一 core 分配 + 清单改为拷贝一份"已被 ADR-0012 决策 5 取代**，现行是**两类规则**（见 [[借阅]]）：插件长期持有的（工具清单、模型清单、能力表等静态表）走**借阅**——`const` 指针、有效期 = 容器在位时长、**两侧都不释放、不拷贝**；本次调用现造的（请求 JSON、工具结果）走**转移**——经 `core->api->alloc` 分配、core 释放。判据是"这份数据本来就在插件手里，还是这次现造的"。代码与 SDK 均按此实现（realugin `include/realugin/plugin_api.h` 开头的两类规则说明，各能力签名处逐个标注"借阅"；realugin `src/loader.cpp` 的 `api_alloc`/`api_release` 注释写明"转移类一律 core 分配"）。**因此本条末尾的"改为拷贝一份"与 [[借阅]] 词条 _Avoid_ 的「`拷贝一份`（清单类不拷）」直接冲突，以词条为准。** 保留的只有那半句动机：跨 dlopen 边界的堆所有权要么归一侧、要么两侧都不碰。
+  - 实况注（2026-08-16）：**"统一 core 分配 + 清单改为拷贝一份"已被 ADR-0012 决策 5 取代**，现行是**两类规则**（见 [[借阅]]）：插件长期持有的（工具清单、模型清单、能力表等静态表）走**借阅**——`const` 指针、有效期 = 容器在位时长、**两侧都不释放、不拷贝**；本次调用现造的（请求 JSON、工具结果）走**转移**——经 `host->api->alloc` 分配、core 释放。判据是"这份数据本来就在插件手里，还是这次现造的"。代码与 SDK 均按此实现（realugin `include/realugin/plugin_api.h` 开头的两类规则说明，各能力签名处逐个标注"借阅"；realugin `src/loader.cpp` 的 `api_alloc`/`api_release` 注释写明"转移类一律 core 分配"）。**因此本条末尾的"改为拷贝一份"与 [[借阅]] 词条 _Avoid_ 的「`拷贝一份`（清单类不拷）」直接冲突，以词条为准。** 保留的只有那半句动机：跨 dlopen 边界的堆所有权要么归一侧、要么两侧都不碰。
 - 当前 provider 由配置 `provider` 显式指定（见[[当前 provider]]），不由依赖链推导。
 - 配置键落点判据：**`plugins.*` 决定装不装载，顶层决定跑起来用哪个**。故 `provider` 在顶层（与 `model` 同性质：在已加载/已注册的东西里选一个，`/provider` `/model` 都能不重启切换），`plugins.unprefixed` 在 `plugins.*`（决定 init 时注册出什么名字，装配期的事）。被 `plugins.disabled` 的插件根本不 dlopen；未被选中的 [[Provider 壳]]照常加载并初始化，只是不进槽。
 - 插件元数据：独立 JSON 文件（`plugin.json`），含名称/描述/版本/ABI 版本/前置依赖。
@@ -392,6 +393,7 @@ realagent/                  # 主仓库（core + tui + docs）
 │   │   ├── server/         #   QUIC/HTTP3 服务（quiche）、推送流、审批端点
 │   │   ├── config.cpp      #   配置：默认树 + settings.json 覆盖 + 点对点写回
 │   │   └── main.cpp        #   启动、事件循环、端点回调、斜杠命令
+│   ├── sdk/realagent/      #   agent_caps.h：能力键与签名（core 的词汇，装给插件用，ADR-0014）
 │   ├── tests/
 │   └── CMakeLists.txt
 ├── tui/                    # Go + Bubble Tea 客户端（ADR-0007）
@@ -402,9 +404,10 @@ realagent/                  # 主仓库（core + tui + docs）
 ├── CONTEXT.md
 └── OPENCODE_RESEARCH.md    # （未重建）
 
-realugin/                   # 独立 git 仓库（插件体系，ADR-0013）
-├── include/realugin/       #   plugin_api.h（C ABI，插件侧唯一依赖）+ host.hpp / loader.hpp
+realugin/                   # 独立 git 仓库（插件体系，ADR-0013 / ADR-0014；MIT）
+├── include/realugin/       #   plugin_api.h（C ABI，**只有机制**，无业务词汇）+ host.hpp / loader.hpp
 ├── src/loader.cpp          #   发现 / dlopen / ABI 校验 / 能力索引 / deps DAG / 启停级联
+├── tests/                  #   14 个用例：拓扑 init、缺依赖、环、暗边、级联、扇出重入守卫
 └── cmake/AddPlugin.cmake   #   realugin_add_plugin() —— 插件工程的建库助手
 
 realagent-plugins/          # 独立 git 仓库（插件单开）

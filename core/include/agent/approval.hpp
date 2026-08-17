@@ -19,7 +19,7 @@
 #include <string>
 #include <unordered_map>
 
-#include <realugin/plugin_api.h>
+#include <realagent/agent_caps.h>
 
 namespace realagent {
 
@@ -27,7 +27,7 @@ struct PendingApproval {
     std::string id;        // 请求 ID（permission_request / approval-response 关联）
     std::string tool_name;
     std::string params;
-    plugin_permission_t verdict = PLUGIN_PERM_DENY;
+    realagent_permission_t verdict = REALAGENT_PERM_DENY;
     bool responded = false;
     std::mutex mtx;
     std::condition_variable cv;
@@ -44,7 +44,7 @@ public:
     }
 
     /* agent 线程：请求审批，阻塞直到裁决。30s 超时按 deny（危险工具默认拒绝）。 */
-    plugin_permission_t await(const std::string& tool_name, const std::string& params);
+    realagent_permission_t await(const std::string& tool_name, const std::string& params);
 
     /* 事件循环线程：收到 /approval-response 裁决 */
     void respond(const std::string& id, bool allow);

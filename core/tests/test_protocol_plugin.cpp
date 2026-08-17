@@ -18,7 +18,7 @@
 #include <string>
 #include <vector>
 
-#include <realugin/plugin_api.h>
+#include <realagent/agent_caps.h>
 
 #include <boost/json.hpp>
 #include <boost/system/error_code.hpp>
@@ -42,31 +42,31 @@ static struct { const char* base_url; const char* api_key; const char* model; } 
 /* 模型数据表路径（core 给的，见 ADR-0009）：测试用临时表，单价取整数好算 */
 static std::string g_models_path;
 
-static const char* fake_get_config(plugin_core_t*, const char* key) {
+static const char* fake_get_config(realugin_host_t*, const char* key) {
     if (std::strcmp(key, "api_key") == 0) return g_cfg.api_key;
     if (std::strcmp(key, "base_url") == 0) return g_cfg.base_url;
     if (std::strcmp(key, "model") == 0) return g_cfg.model;
     if (std::strcmp(key, "models_path") == 0) return g_models_path.c_str();
     return "";
 }
-static plugin_status_t fake_emit(plugin_core_t*, const char*, const char*) { return PLUGIN_OK; }
-static void fake_log(plugin_core_t*, int, const char*) {}
+static realugin_status_t fake_emit(realugin_host_t*, const char*, const char*) { return REALUGIN_OK; }
+static void fake_log(realugin_host_t*, int, const char*) {}
 /* 跨边界内存（ADR-0012）：转移类由 core 分配、core 释放。测试里就是 malloc/free */
-static void* fake_alloc(plugin_core_t*, size_t n) { return std::malloc(n); }
-static void fake_release(plugin_core_t*, void* p) { std::free(p); }
+static void* fake_alloc(realugin_host_t*, size_t n) { return std::malloc(n); }
+static void fake_release(realugin_host_t*, void* p) { std::free(p); }
 
 /* providers：假装 v1-messages 提供 request.build（deepseek 的 init 会问这一句） */
 static const char* const k_builders[] = {"v1-messages"};
-static size_t fake_providers(plugin_core_t*, const char* cap, const char* const** out) {
-    if (std::strcmp(cap, PLUGIN_CAP_REQUEST_BUILD) != 0) return 0;
+static size_t fake_providers(realugin_host_t*, const char* cap, const char* const** out) {
+    if (std::strcmp(cap, REALAGENT_CAP_REQUEST_BUILD) != 0) return 0;
     *out = k_builders;
     return 1;
 }
-static plugin_fn_t fake_import(plugin_core_t*, const char*, const char*, plugin_t**) {
+static realugin_fn_t fake_import(realugin_host_t*, const char*, const char*, realugin_plugin_t**) {
     return nullptr; // 管线上的容器互不取用，本测试不需要
 }
 
-static const plugin_core_api_t k_fake_core_api = {
+static const realugin_host_api_t k_fake_core_api = {
     .emit = fake_emit,
     .log = fake_log,
     .get_config = fake_get_config,
@@ -76,22 +76,27 @@ static const plugin_core_api_t k_fake_core_api = {
     .import = fake_import,
 };
 
-/* —— 工具：dlopen + create —— */
+/* —— 工具：dlopen + create ——
+ * 容器从哪儿来：环境变量 REALAGENT_PLUGIN_DIR 优先，否则用编译期填进来的
+ * RA_PLUGIN_DIR（CMake 变量 REALAGENT_PLUGIN_DIR，默认指向并排的 realagent-plugins/build）。
+ * 两个仓库不必并排摆放 —— 摆哪儿都行，告诉它一声即可。 */
 static void* dl(const char* name) {
-    void* h = dlopen(name, RTLD_NOW | RTLD_LOCAL);
-    if (!h) h = dlopen((std::string("build/") + name).c_str(), RTLD_NOW | RTLD_LOCAL);
-    if (!h) fprintf(stderr, "dlopen %s 失败: %s\n", name, dlerror());
+    const char* env = std::getenv("REALAGENT_PLUGIN_DIR");
+    const std::string dir = env && *env ? env : RA_PLUGIN_DIR;
+    const std::string path = dir.empty() ? name : dir + "/" + name;
+    void* h = dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL);
+    if (!h) fprintf(stderr, "dlopen %s 失败: %s\n", path.c_str(), dlerror());
     return h;
 }
-static plugin_t* create_inst(void* h, const plugin_api_t** api) {
-    auto fn = (plugin_create_fn)dlsym(h, PLUGIN_CREATE_SYM);
+static realugin_plugin_t* create_inst(void* h, const realugin_plugin_api_t** api) {
+    auto fn = (realugin_create_fn)dlsym(h, REALUGIN_CREATE_SYM);
     if (!fn) return nullptr;
-    plugin_t* inst = fn(api);
+    realugin_plugin_t* inst = fn(api);
     return inst;
 }
 /* 按名取一个能力（core 侧提取器的测试版：查表 + 转型） */
-static plugin_fn_t cap(const plugin_api_t* api, plugin_t* inst, const char* name) {
-    const plugin_capability_t* caps = nullptr;
+static realugin_fn_t cap(const realugin_plugin_api_t* api, realugin_plugin_t* inst, const char* name) {
+    const realugin_capability_t* caps = nullptr;
     const size_t n = api->capabilities ? api->capabilities(inst, &caps) : 0;
     for (size_t i = 0; i < n; ++i)
         if (caps[i].name && std::strcmp(caps[i].name, name) == 0) return caps[i].fn;
@@ -99,14 +104,14 @@ static plugin_fn_t cap(const plugin_api_t* api, plugin_t* inst, const char* name
 }
 
 /* 跑一遍管线的前两段：生成请求 →（可选）改请求。返回精请求 JSON（已接管所有权） */
-static bj::value run_request(const plugin_api_t* v1_api, plugin_t* v1, const char* dialog,
-                             const plugin_api_t* ds_api = nullptr, plugin_t* ds = nullptr) {
-    auto build = (plugin_request_build_fn)cap(v1_api, v1, PLUGIN_CAP_REQUEST_BUILD);
+static bj::value run_request(const realugin_plugin_api_t* v1_api, realugin_plugin_t* v1, const char* dialog,
+                             const realugin_plugin_api_t* ds_api = nullptr, realugin_plugin_t* ds = nullptr) {
+    auto build = (realagent_request_build_fn)cap(v1_api, v1, REALAGENT_CAP_REQUEST_BUILD);
     const char* raw = build(v1, dialog);
     std::string text(raw ? raw : "");
     std::free(const_cast<char*>(raw));
     if (ds_api) {
-        auto refine = (plugin_request_refine_fn)cap(ds_api, ds, PLUGIN_CAP_REQUEST_REFINE);
+        auto refine = (realagent_request_refine_fn)cap(ds_api, ds, REALAGENT_CAP_REQUEST_REFINE);
         const char* fine = refine(ds, text.c_str());
         text.assign(fine ? fine : "");
         std::free(const_cast<char*>(fine));
@@ -117,7 +122,7 @@ static bj::value run_request(const plugin_api_t* v1_api, plugin_t* v1, const cha
 }
 
 /* 测试 1：v1-messages build_request（配置了端点：协议层直连；thinking 历史回传） */
-static void test_v1_build_request(const plugin_api_t* api, plugin_t* inst) {
+static void test_v1_build_request(const realugin_plugin_api_t* api, realugin_plugin_t* inst) {
     printf("[v1-messages build_request]\n");
     const char* dialog = R"({
         "model": "deepseek-v4-flash",
@@ -166,9 +171,9 @@ static void test_v1_build_request(const plugin_api_t* api, plugin_t* inst) {
 }
 
 /* 测试 2：v1-messages parse_feed（text + tool_use + thinking 事件） */
-static void test_v1_parse_feed(const plugin_api_t* api, plugin_t* inst) {
+static void test_v1_parse_feed(const realugin_plugin_api_t* api, realugin_plugin_t* inst) {
     printf("[v1-messages response.parse]\n");
-    auto parse = (plugin_response_parse_fn)cap(api, inst, PLUGIN_CAP_RESPONSE_PARSE);
+    auto parse = (realagent_response_parse_fn)cap(api, inst, REALAGENT_CAP_RESPONSE_PARSE);
     struct Sink {
         std::vector<std::string> updates;
         std::vector<std::string> tools;
@@ -274,8 +279,8 @@ static void test_v1_parse_feed(const plugin_api_t* api, plugin_t* inst) {
 }
 
 /* 测试 3：deepseek 壳 build_request —— 未配置时兜底默认，已配置透传，claude 模型不做映射 */
-static void test_deepseek_refine(const plugin_api_t* v1_api, plugin_t* v1,
-                                 const plugin_api_t* ds_api, plugin_t* ds,
+static void test_deepseek_refine(const realugin_plugin_api_t* v1_api, realugin_plugin_t* v1,
+                                 const realugin_plugin_api_t* ds_api, realugin_plugin_t* ds,
                                  const char* want_url) {
     printf("[deepseek request.refine] want_url=%s\n", want_url);
     // 对话不带 model：粗请求里 model 为空，改请求那一段填供应商默认
@@ -311,8 +316,8 @@ static void test_deepseek_refine(const plugin_api_t* v1_api, plugin_t* v1,
 
 /* 测试 4：解析段产出 usage，计价段把它换成钱——两段分属两个容器，
  * 串起来的是 core（ADR-0012）。此处照 core 的做法手工串一次。 */
-static void test_meter(const plugin_api_t* v1_api, plugin_t* v1, const plugin_api_t* ds_api,
-                       plugin_t* ds) {
+static void test_meter(const realugin_plugin_api_t* v1_api, realugin_plugin_t* v1, const realugin_plugin_api_t* ds_api,
+                       realugin_plugin_t* ds) {
     printf("[usage.meter 计价]\n");
     // 先跑一次管线前两段：改请求那一步会把本次生效的模型名钉死，计价按它查单价
     const char* dialog = R"({
@@ -331,7 +336,7 @@ static void test_meter(const plugin_api_t* v1_api, plugin_t* v1, const plugin_ap
         if (t == "usage") s->usage = payload;
         else if (t == "message_update") s->text += payload;
     };
-    auto parse = (plugin_response_parse_fn)cap(v1_api, v1, PLUGIN_CAP_RESPONSE_PARSE);
+    auto parse = (realagent_response_parse_fn)cap(v1_api, v1, REALAGENT_CAP_RESPONSE_PARSE);
     const char* chunk =
         "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"m1\","
         "\"usage\":{\"input_tokens\":77}}}\n\n"
@@ -345,7 +350,7 @@ static void test_meter(const plugin_api_t* v1_api, plugin_t* v1, const plugin_ap
 
     CHECK(sink.text.find("答案") != std::string::npos, "解析段照常产出正文");
     CHECK(!sink.usage.empty(), "解析段产出 usage 事件");
-    auto meter = (plugin_usage_meter_fn)cap(ds_api, ds, PLUGIN_CAP_USAGE_METER);
+    auto meter = (realagent_usage_meter_fn)cap(ds_api, ds, REALAGENT_CAP_USAGE_METER);
     CHECK(meter != nullptr, "供应商容器提供计价能力");
     if (meter && !sink.usage.empty()) {
         // 表里 input 单价 1000/1M，77 token → 0.077
@@ -356,9 +361,9 @@ static void test_meter(const plugin_api_t* v1_api, plugin_t* v1, const plugin_ap
 }
 
 /* 测试 4b：model.list 只报公共字段，单价留在容器里（ADR-0009） */
-static void test_deepseek_list_models(const plugin_api_t* api, plugin_t* inst) {
+static void test_deepseek_list_models(const realugin_plugin_api_t* api, realugin_plugin_t* inst) {
     printf("[deepseek model.list]\n");
-    auto list = (plugin_model_list_fn)cap(api, inst, PLUGIN_CAP_MODEL_LIST);
+    auto list = (realagent_model_list_fn)cap(api, inst, REALAGENT_CAP_MODEL_LIST);
     const char* text = list ? list(inst) : nullptr;
     CHECK(text != nullptr, "供应商容器报出模型清单");
     if (!text) return;
@@ -374,9 +379,9 @@ static void test_deepseek_list_models(const plugin_api_t* api, plugin_t* inst) {
 }
 
 /* 测试 5：v1-messages usage 事件（message_start 给 input，message_delta 给 output，合并上报） */
-static void test_v1_usage(const plugin_api_t* api, plugin_t* inst) {
+static void test_v1_usage(const realugin_plugin_api_t* api, realugin_plugin_t* inst) {
     printf("[v1-messages usage]\n");
-    auto parse = (plugin_response_parse_fn)cap(api, inst, PLUGIN_CAP_RESPONSE_PARSE);
+    auto parse = (realagent_response_parse_fn)cap(api, inst, REALAGENT_CAP_RESPONSE_PARSE);
     struct Sink {
         std::vector<std::string> usages;
         std::vector<std::string> order; // 事件顺序（验证 usage 先于 stop）
@@ -439,14 +444,14 @@ int main() {
     void* h2 = dl("deepseek.dylib");
     if (!h1 || !h2) return 1;
 
-    const plugin_api_t* v1_api = nullptr;
-    const plugin_api_t* ds_api = nullptr;
+    const realugin_plugin_api_t* v1_api = nullptr;
+    const realugin_plugin_api_t* ds_api = nullptr;
 
     // —— v1a：空配置（协议层不设供应商默认，那是"改请求"那一段的事） ——
     g_cfg = {"", "test-key-123", ""};
-    plugin_t* v1a = create_inst(h1, &v1_api);
-    plugin_core_t core_handle{&k_fake_core_api, nullptr};
-    if (!v1a || !v1_api || v1_api->init(v1a, &core_handle) != PLUGIN_OK) {
+    realugin_plugin_t* v1a = create_inst(h1, &v1_api);
+    realugin_host_t core_handle{&k_fake_core_api, nullptr};
+    if (!v1a || !v1_api || v1_api->init(v1a, &core_handle) != REALUGIN_OK) {
         fprintf(stderr, "v1-messages init 失败\n");
         return 1;
     }
@@ -460,23 +465,23 @@ int main() {
     }
 
     // —— deepseek_default：空配置 → 改请求填 DeepSeek 默认端点/模型 ——
-    plugin_t* ds_default = create_inst(h2, &ds_api);
-    if (!ds_default || !ds_api || ds_api->init(ds_default, &core_handle) != PLUGIN_OK) {
+    realugin_plugin_t* ds_default = create_inst(h2, &ds_api);
+    if (!ds_default || !ds_api || ds_api->init(ds_default, &core_handle) != REALUGIN_OK) {
         fprintf(stderr, "deepseek init 失败\n");
         return 1;
     }
 
     // —— v1b：配置了端点（协议层可用配置直连） ——
     g_cfg = {"http://127.0.0.1:18080", "test-key-123", ""};
-    plugin_t* v1b = create_inst(h1, &v1_api);
-    if (!v1b || v1_api->init(v1b, &core_handle) != PLUGIN_OK) {
+    realugin_plugin_t* v1b = create_inst(h1, &v1_api);
+    if (!v1b || v1_api->init(v1b, &core_handle) != REALUGIN_OK) {
         fprintf(stderr, "v1-messages(配置) init 失败\n");
         return 1;
     }
 
     // —— deepseek_configured：配置了端点 → 改请求用配置值 ——
-    plugin_t* ds_cfg = create_inst(h2, &ds_api);
-    if (!ds_cfg || ds_api->init(ds_cfg, &core_handle) != PLUGIN_OK) {
+    realugin_plugin_t* ds_cfg = create_inst(h2, &ds_api);
+    if (!ds_cfg || ds_api->init(ds_cfg, &core_handle) != REALUGIN_OK) {
         fprintf(stderr, "deepseek(配置) init 失败\n");
         return 1;
     }

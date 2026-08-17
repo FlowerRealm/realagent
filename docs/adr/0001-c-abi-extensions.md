@@ -67,7 +67,7 @@ core 的扩展（Extension）机制采用 **C ABI 动态库**：插件编译为 
 
 > ⚠️ **落点已随 ADR-0012 变更（2026-08-16）。** 单入口这一判断不变，但它不再是 `plugin_api_t` 上的一个字段，而是能力表里的一个键 `event.observe`（签名 `void(plugin_t*, const plugin_event_t*)`）——容器填了才收事件，没填 core 就不叫它。可合并能力：所有订阅者都收到同一份，顺序 = 加载序。**旁听，不是拦截**：无返回值，改不了也拦不下事件。
 >
-> 扇出点是 `CoreContext::emit_fn` 这一个出口（`PluginManager::observe`），所以插件看到的事件流与推送给客户端的完全一致。两条契约写在 `plugin_api.h` 的签名注释上：①**同步调用，跑在 emit 的线程上**（运行期事件 = agent 线程），回调里做慢事情就是卡住 agent；②回调内可以调 `core_api->emit`，事件照常送客户端但**不再扇出给插件**（core 有 thread_local 重入守卫），否则两个互相 emit 的订阅者就是无限递归。
+> 扇出点是 `realugin::PluginManager::emit` 这一个出口（ADR-0013：入队与扇出两路都在库里，宿主漏不掉一路），所以插件看到的事件流与推送给客户端的完全一致。**键名归 core**（ADR-0014）：realugin 只问 `Host::broadcast_capability()`，realagent 答 `event.observe`；签名是 `realugin_broadcast_fn`（`plugin_t*, const char* type, const char* payload`）。两条契约写在 `realugin/plugin_api.h` 的签名注释上：①**同步调用，跑在 emit 的线程上**（运行期事件 = agent 线程），回调里做慢事情就是卡住 agent；②回调内可以调 `host_api->emit`，事件照常送客户端但**不再扇出给插件**（thread_local 重入守卫），否则两个互相 emit 的订阅者就是无限递归。
 
 ## 后果
 

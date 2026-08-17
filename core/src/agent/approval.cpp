@@ -9,7 +9,7 @@ namespace realagent {
 
 ApprovalCoordinator::~ApprovalCoordinator() { cancel_all(); }
 
-plugin_permission_t ApprovalCoordinator::await(const std::string& tool_name,
+realagent_permission_t ApprovalCoordinator::await(const std::string& tool_name,
                                                const std::string& params) {
     std::shared_ptr<PendingApproval> p;
     {
@@ -34,7 +34,7 @@ plugin_permission_t ApprovalCoordinator::await(const std::string& tool_name,
         std::lock_guard<std::mutex> pm(mtx_);
         pending_.erase(p->id);
     }
-    return ok ? p->verdict : PLUGIN_PERM_DENY;
+    return ok ? p->verdict : REALAGENT_PERM_DENY;
 }
 
 void ApprovalCoordinator::respond(const std::string& id, bool allow) {
@@ -46,7 +46,7 @@ void ApprovalCoordinator::respond(const std::string& id, bool allow) {
         p = it->second;
     }
     std::lock_guard<std::mutex> lk(p->mtx);
-    p->verdict = allow ? PLUGIN_PERM_ALLOW : PLUGIN_PERM_DENY;
+    p->verdict = allow ? REALAGENT_PERM_ALLOW : REALAGENT_PERM_DENY;
     p->responded = true;
     p->cv.notify_one();
 }
@@ -60,7 +60,7 @@ void ApprovalCoordinator::cancel_all() {
     }
     for (auto& p : all) {
         std::lock_guard<std::mutex> lk(p->mtx);
-        p->verdict = PLUGIN_PERM_DENY;
+        p->verdict = REALAGENT_PERM_DENY;
         p->responded = true;
         p->cv.notify_all();
     }

@@ -25,15 +25,15 @@ bool Executor::check_permission(const ToolView& tool, const std::string& params_
     // 工具，它需要全局唯一的名字才能分辨"哪个容器的 bash"。这与 execute 传本名不矛盾：
     // 插件只认识自己的名字，裁决者只认得全局的名字，两边要的本来就是不同的那一个。
     const auto verdict = perm.fn(perm.self, tool.name.c_str(), params_json.c_str());
-    if (verdict == PLUGIN_PERM_DENY) {
+    if (verdict == REALAGENT_PERM_DENY) {
         if (denied_reason) *denied_reason = "denied by permission plugin";
         return false;
     }
-    if (verdict == PLUGIN_PERM_ASK) {
+    if (verdict == REALAGENT_PERM_ASK) {
         // 审批链路（ADR-0005）：core 发 permission_request → 用户界面裁决 → 回传
         // agent 线程真等裁决（30s 超时 deny），事件循环线程收 /approval-response 唤醒
         // 同理传对外名：审批框是给用户看的，"core-tools_bash" 才说明是谁要跑
-        if (approval_.await(tool.name, params_json) != PLUGIN_PERM_ALLOW) {
+        if (approval_.await(tool.name, params_json) != REALAGENT_PERM_ALLOW) {
             if (denied_reason) *denied_reason = "denied by user";
             return false;
         }
@@ -46,7 +46,7 @@ void Executor::interrupt() {
     interrupted_ = true;
     if (!inflight_owner_) return; // 手上没有在跑的：标记留给下一次 execute 撞上
     // 容器不具备这项能力就是不可中断——照实等它跑完，不假装成功
-    auto itr = cap_of<plugin_tool_interrupt_fn>(*inflight_owner_, PLUGIN_CAP_TOOL_INTERRUPT);
+    auto itr = cap_of<realagent_tool_interrupt_fn>(*inflight_owner_, REALAGENT_CAP_TOOL_INTERRUPT);
     if (itr) itr.fn(itr.self, inflight_call_id_.c_str());
 }
 
@@ -59,12 +59,12 @@ ExecResult Executor::execute(const std::string& call_id, const std::string& name
                              const std::string& params_json) {
     ExecResult bad{.status = 1, .messages = "{\"error\":\"unknown tool\"}"};
     // 现问现答（ADR-0012）：core 不存工具表，用时向各容器拉一遍
-    const auto views = plugins_.tools();
+    const auto views = tools_of(plugins_);
     const auto it = std::find_if(views.begin(), views.end(),
                                  [&](const ToolView& v) { return v.name == name; });
     if (it == views.end()) return bad;
 
-    auto exec = cap_of<plugin_tool_execute_fn>(*it->owner, PLUGIN_CAP_TOOL_EXECUTE);
+    auto exec = cap_of<realagent_tool_execute_fn>(*it->owner, REALAGENT_CAP_TOOL_EXECUTE);
     if (!exec) {
         bad.messages = "{\"error\":\"tool not executable\"}";
         return bad;

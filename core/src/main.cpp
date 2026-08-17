@@ -52,9 +52,9 @@ static int run_tool_test(CoreContext& ctx, PluginManager& mgr) {
     return 0;
 }
 
-/* GET /plugins 响应：PluginInfo → JSON。字段名与顺序由 BOOST_DESCRIBE_STRUCT
- * 的字段表生成，即结构体声明本身——契约与结构体不可能再走散。 */
-static json plugins_payload(const std::vector<PluginInfo>& list) { return to_json(list); }
+/* GET /plugins 响应：字段名与顺序在 extension/slots.cpp 的 PluginWire 上（ADR-0013：
+ * 响应契约是 core 的词汇，realugin 的 PluginInfo 只是加载器的内部快照）。 */
+static json plugins_payload(const std::vector<PluginInfo>& list) { return plugins_json(list); }
 
 /* /model 响应：当前 provider 的模型清单（现问现答，core 不存表——ADR-0012）。
  * current 标出配置里当前那档。没有 provider 就没有清单可谈。 */
@@ -77,11 +77,11 @@ static json models_payload(const CoreContext& ctx, const PluginManager& mgr) {
 static json providers_payload(const CoreContext& ctx, const PluginManager& mgr) {
     json arr = json::array();
     const Plugin* cur = current_provider(mgr, *ctx.config);
-    for (const auto& name : mgr.providers_of(PLUGIN_CAP_REQUEST_REFINE)) {
+    for (const auto& name : mgr.providers_of(REALAGENT_CAP_REQUEST_REFINE)) {
         const Plugin* p = mgr.find(name);
         if (!p) continue;
         std::size_t n = 0;
-        if (auto list = cap_of<plugin_model_list_fn>(*p, PLUGIN_CAP_MODEL_LIST)) {
+        if (auto list = cap_of<realagent_model_list_fn>(*p, REALAGENT_CAP_MODEL_LIST)) {
             if (const char* text = list.fn(list.self)) // 借阅：读完即用，不释放
                 if (const auto arr2 = json::parse(text); arr2 && arr2->is_array()) n = arr2->size();
         }
@@ -180,9 +180,9 @@ int main(int argc, char** argv) {
     };
 
     fprintf(stderr, "=== 容器 %zu 个 ===\n", mgr.plugins().size());
-    for (const auto& t : mgr.tools())
+    for (const auto& t : tools_of(mgr))
         fprintf(stderr, "  tool: %s (dangerous=%d)\n", t.name.c_str(), t.def->dangerous);
-    for (const auto& c : mgr.commands())
+    for (const auto& c : commands_of(mgr))
         fprintf(stderr, "  command: /%s\n", c.name.c_str());
 
     if (argc > 1 && std::string(argv[1]) == "test-tools") {
@@ -246,7 +246,7 @@ int main(int argc, char** argv) {
             arr.push_back(std::move(cmd));
         }
         // 插件提供的斜杠命令：现问现答（ADR-0012），core 不存表
-        for (const auto& c : mgr.commands()) {
+        for (const auto& c : commands_of(mgr)) {
             json cmd;
             cmd["name"] = c.name;
             cmd["description"] = c.def->description ? c.def->description : "";
@@ -301,7 +301,7 @@ int main(int argc, char** argv) {
             out["command"] = "provider";
             if (!name.empty()) {
                 // 先验候选、再落盘、最后重解析管线：任一步失败则槽位与文件都没动过
-                const auto& cands = mgr.providers_of(PLUGIN_CAP_REQUEST_REFINE);
+                const auto& cands = mgr.providers_of(REALAGENT_CAP_REQUEST_REFINE);
                 if (std::find(cands.begin(), cands.end(), name) == cands.end()) {
                     out["ok"] = false;
                     out["error"] = "unknown provider: " + name;
@@ -388,13 +388,13 @@ int main(int argc, char** argv) {
         }
         // 插件提供的命令（ADR-0012：现问现答 + 按名分发，命令定义里不带函数指针）
         {
-            const auto cmds = mgr.commands();
+            const auto cmds = commands_of(mgr);
             const std::string want = cmd.substr(1); // 去掉 '/'
             const auto it = std::find_if(cmds.begin(), cmds.end(),
                                          [&](const CommandView& c) { return c.name == want; });
             if (it != cmds.end()) {
-                auto exec = cap_of<plugin_command_execute_fn>(*it->owner,
-                                                              PLUGIN_CAP_COMMAND_EXECUTE);
+                auto exec = cap_of<realagent_command_execute_fn>(*it->owner,
+                                                              REALAGENT_CAP_COMMAND_EXECUTE);
                 if (!exec) return std::string("{\"error\":\"command not executable\"}");
                 json args;
                 args["args"] = arg_of();

@@ -1,13 +1,13 @@
 # 首版插件清单（Phase 1）
 
-> 本文档列出第一阶段（core + tui）交付的插件。形态与生命周期见 ADR-0001（C ABI 动态库）、ADR-0005（权限插件化）、ADR-0011（能力槽）、**ADR-0012（能力是一个函数；管线取代嵌套；core 不建注册表）**。
+> 本文档列出第一阶段（core + tui）交付的插件。形态与生命周期见 ADR-0001（C ABI 动态库）、ADR-0005（权限插件化）、ADR-0011（能力槽）、**ADR-0012（能力是一个函数；管线取代嵌套；core 不建注册表）**、ADR-0013 / **ADR-0014（realugin 只留机制，能力词汇归 core；ABI 5）**。
 > 共 5 个容器。**容器没有类型**——下文按能力归类只是给人看的组织方式，core 只看它交出的能力表（ADR-0012）。
 
 ## 插件通用约定
 
 - **形态**：C ABI 动态库（`.so`/`.dylib`），运行时目录扫描 + `dlopen` 加载。
 - **元数据**：容器目录下独立 `plugin.json`（名称/描述/版本/ABI 版本/`deps`；Provider 壳另有 `protocol`）。**无 `type` 键**。容器名须匹配 `^[a-zA-Z0-9-]+$`——禁止下划线，否则命名空间前缀无法无歧义解析。
-- **能力表**：容器经 `capabilities()` 交出一张 `{名字, 函数}` 表，**一个能力 = 一个名字 + 一个函数**。`plugin_api_t` 固定五项（`abi_version`/`name`/`init`/`destroy`/`capabilities`），**新增能力 = 新增一个键**，不动结构体、不破 ABI、不重编无关容器。core 认识的键：`request.build` / `request.refine` / `response.parse` / `usage.meter` / `tool.list` / `tool.execute` / `tool.interrupt` / `command.list` / `command.execute` / `permission.decide` / `model.list` / `event.observe`；不认识的键 core 不解释（容器之间的私约，经 `import` 取用）。
+- **能力表**：容器经 `capabilities()` 交出一张 `{名字, 函数}` 表，**一个能力 = 一个名字 + 一个函数**。`realugin_plugin_api_t` 固定五项（`abi_version`/`name`/`init`/`destroy`/`capabilities`），**新增能力 = 新增一个键**，不动结构体、不破 ABI、不重编无关容器。**能力键与签名是 core 的词汇，不在 realugin 里**（ADR-0014）：见 `core/sdk/realagent/agent_caps.h`。core 认识的键：`request.build` / `request.refine` / `response.parse` / `usage.meter` / `tool.list` / `tool.execute` / `tool.interrupt` / `command.list` / `command.execute` / `permission.decide` / `model.list` / `event.observe`；不认识的键 core 不解释（容器之间的私约，经 `import` 取用）。
 - **管线**：一次 LLM 调用由 core 分段调用，容器互不认识、互不调用：
 
   ```
@@ -19,13 +19,14 @@
   四段的归属由用户选定的 `provider` 一次确定：它提供改请求与计价，它 `plugin.json` 的 `protocol` 字段指名的容器提供生成请求与解析响应。
 - **依赖**：`deps` 声明**容器**（不是能力）。core 按 `deps` 建反图、自入度 0 起 BFS 逐层 init；剩余节点即环，点名失败。禁用一个容器会**级联停用**依赖它的容器（级联者不写入禁用清单）。
 - **命名空间**：容器交出的工具，对外名字为 `<插件名>_<工具名>`、命令为 `<插件名>:<命令名>`（前缀由 core 拼，容器只认自己的本名）。配置 `plugins.unprefixed` 名单内的插件用短名（首版含 `core-tools`）。每个条目恰好一个对外名字，最终名字撞车即加载失败。
-- **内存两条规则**：容器长期持有的（工具清单、模型清单等静态表）走**借阅**——`const` 指针，有效期 = 容器在位时长，两侧都不释放；本次调用现造的（请求 JSON、执行结果）走**转移**——经 `core->api->alloc` 分配、core 释放。
+- **内存两条规则**：容器长期持有的（工具清单、模型清单等静态表）走**借阅**——`const` 指针，有效期 = 容器在位时长，两侧都不释放；本次调用现造的（请求 JSON、执行结果）走**转移**——经 `host->api->alloc` 分配、core 释放。
 - **配置注入**：core 统一收集配置（代码默认树打底 < `settings.json` 覆盖，不读 env），插件初始化时注入合并结果，插件不自行解析。
 - **事件订阅**：能力键 `event.observe`，单入口，插件内按 type 字符串分发。可合并——所有订阅者收到同一份事件流（与推给客户端的完全一致），**旁听不是拦截**，无返回值。同步调用、跑在 emit 的线程上（运行期 = agent 线程），回调里做慢事情会卡住 agent；回调内可以 `emit`，事件照送客户端但不再回灌插件（core 有重入守卫）。
-- **版本校验**：单一接口版本号 `PLUGIN_ABI_VERSION` 强校验，不符则拒绝加载。
-- **SDK 与加载器来自 realugin**（ADR-0013）：头文件 `<realugin/plugin_api.h>`，CMake 用随它安装的 `realugin_add_plugin()`；容器发现、`dlopen`、能力索引、`deps` DAG、启停级联都在 realugin 里。core 只留自己的词汇——管线四段与权限槽的解析（`core/src/extension/slots.cpp`）、配置/禁用清单/免前缀名单（`CoreHost`）。
-- **自动发现目录**：项目级 `.realagent/extensions/` 与全局 `~/.realagent/extensions/`（对齐 CONTEXT.md 配置约定）。
-- **查询**：`core->api->providers(能力名)` 回答"现在有谁提供它"。能力索引在全部 `plugin_create` 之后、任何 `init` 之前建成，因此答案与 init 顺序无关、永远完整——容器据此判断现在有什么，再决定自己怎么做。
+- **版本校验**：单一接口版本号 `REALUGIN_ABI_VERSION`（当前 **5**）强校验，不符则拒绝加载。
+- **加载器来自 realugin，词汇来自 realagent**（ADR-0013 / ADR-0014）：容器只 include `<realagent/agent_caps.h>`（它自己 include `<realugin/plugin_api.h>`），CMake `find_package(realugin)` + `find_package(realagent)`，建库用 `realugin_add_plugin()` 再链 `realagent::sdk`。容器发现、`dlopen`、能力索引、`deps` DAG、启停级联在 realugin；能力键与签名、管线四段与权限槽的解析、工具/命令视图与撞名检查、配置/禁用清单/免前缀名单在 core（`core/sdk/realagent/agent_caps.h` 与 `core/src/extension/slots.cpp`）。realugin 唯一会自己解释的键是 `CoreHost::broadcast_capability()` 报给它的 `event.observe`。
+- **自动发现目录**：`Config::extension_dirs()` 给出，目录顺序即优先级（PATH 语义：先出现的目录赢，同名容器只留第一个，被遮蔽的 WARN 点名）。
+  - 实况注（2026-08-16）：**实际只有全局 `~/.realagent/extensions/` 一个**（`core/src/config.cpp:140`）。项目级 `.realagent/extensions/` 从未实现——settings 也一样只读全局（`config.cpp:20`："唯一的覆盖来源，不看 cwd"）。要加就是在 `extension_dirs()` 里把项目目录排在全局之前，loader 那边的遮蔽与点名已经就位。
+- **查询**：`host->api->providers(能力名)` 回答"现在有谁提供它"。能力索引在全部 `realugin_plugin_create` 之后、任何 `init` 之前建成，因此答案与 init 顺序无关、永远完整——容器据此判断现在有什么，再决定自己怎么做。
 
 ---
 

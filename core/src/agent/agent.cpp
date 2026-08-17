@@ -58,7 +58,7 @@ struct CurlSink {
     CoreContext* ctx;
     const double* base; // 已完成 turn 的累计花费（本次调用的钱加在它上面才是 run 累计）
     const std::atomic<bool>* abort;
-    bool parse_failed = false; // 协议插件报了 PLUGIN_ERR：与用户中断区分开
+    bool parse_failed = false; // 协议插件报了 REALUGIN_ERR：与用户中断区分开
 };
 
 static int curl_progress_cb(void* clientp, curl_off_t, curl_off_t, curl_off_t, curl_off_t) {
@@ -75,11 +75,11 @@ static size_t curl_write_cb(char* ptr, size_t size, size_t nmemb, void* userdata
     memcpy(chunk, ptr, n);
     chunk[n] = '\0';
     const auto& parse = s->slots->parse;
-    const plugin_status_t rc = parse.fn(parse.self, chunk, feed_sink, s);
+    const realugin_status_t rc = parse.fn(parse.self, chunk, feed_sink, s);
     free(chunk);
     // 协议插件解析失败：立刻中止传输。继续读下去只会攒出一个"成功但空"的回答，
     // 那比报错更糟——用户看不出发生了什么。（返回 < n 即令 curl 报 CURLE_WRITE_ERROR）
-    if (rc != PLUGIN_OK) {
+    if (rc != REALUGIN_OK) {
         s->parse_failed = true;
         return 0;
     }
@@ -208,7 +208,7 @@ bool Agent::llm_call(const json& dialog, LlmOutcome& out) {
 
     CURLcode rc = curl_easy_perform(curl);
     // 通知解析段流结束（flush）——sink_ctx 必须与 curl 回调一致
-    if (parse.fn(parse.self, nullptr, feed_sink, &sink) != PLUGIN_OK) sink.parse_failed = true;
+    if (parse.fn(parse.self, nullptr, feed_sink, &sink) != REALUGIN_OK) sink.parse_failed = true;
     curl_easy_cleanup(curl);
     if (hdrs) curl_slist_free_all(hdrs);
 
@@ -235,7 +235,7 @@ json Agent::build_dialog(ModelTier tier) const {
     // 视图里的 name 就是对外名字（带命名空间前缀或短名）——
     // LLM 见到的名字与 executor 查视图用的名字必须是同一个
     json tools = json::array();
-    for (const auto& t : plugins_.tools()) {
+    for (const auto& t : tools_of(plugins_)) {
         json tool;
         tool["name"] = t.name;
         tool["description"] = t.def->description;

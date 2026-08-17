@@ -3,6 +3,8 @@
 - 状态：已采纳（2026-08-16）
 - 相关：ADR-0001（C ABI 插件）、ADR-0011（能力槽）、ADR-0012（能力是一个函数；管线取代嵌套）
 
+> ⚠️ **本文的"机制/词汇"分界已随 ADR-0014 收紧（2026-08-16）。** 下表里「`PLUGIN_CAP_*` 留在 `plugin_api.h` 当默认词汇表」那一条已废止：能力键与签名整体搬到 realagent 的 `core/sdk/realagent/agent_caps.h`，realugin 一个业务词汇都不留；工具/命令视图与撞名检查也从加载器搬回 core（`Host::validate`），事件扇出的键名改由 `Host::broadcast_capability()` 报上去。C ABI 标识符加 `realugin_` 前缀（含入口符号），ABI 4 → 5。其余决策不变。
+
 ## 背景
 
 到 ADR-0012 为止，插件体系已经稳定成两块互不相干的东西，却住在同一个文件里：

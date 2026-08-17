@@ -6,12 +6,15 @@ target_include_directories(test_config PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../in
 target_link_libraries(test_config PRIVATE Boost::json)
 add_test(NAME config COMMAND test_config)
 
-# deepseek-messages 协议插件测试（dlopen 插件，验证 build_request/parse_feed）
+# deepseek-messages 协议插件测试（dlopen 插件，验证 build_request/parse_feed）。
+# 容器编在哪儿由 REALAGENT_PLUGIN_DIR 说了算（默认沿用并排布局），
+# 运行时还可用同名环境变量覆盖——两个仓库不必并排摆放。
+set(REALAGENT_PLUGIN_DIR "${CMAKE_SOURCE_DIR}/../realagent-plugins/build"
+    CACHE PATH "已编好的插件容器目录（供 protocol_plugin 测试 dlopen）")
 add_executable(test_protocol_plugin test_protocol_plugin.cpp)
-target_link_libraries(test_protocol_plugin PRIVATE realugin::sdk Boost::json)
+target_link_libraries(test_protocol_plugin PRIVATE realagent::sdk Boost::json)
+target_compile_definitions(test_protocol_plugin PRIVATE RA_PLUGIN_DIR="${REALAGENT_PLUGIN_DIR}")
 add_test(NAME protocol_plugin COMMAND test_protocol_plugin)
-set_tests_properties(protocol_plugin PROPERTIES
-  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/../realagent-plugins/build)
 
 # 会话持久化测试（JSONL 读写；cwd 指到临时目录，会话目录相对 cwd）
 add_executable(test_session test_session.cpp ../src/agent/session.cpp ../src/config.cpp)
