@@ -11,6 +11,8 @@ endif()
 
 find_package(Boost REQUIRED COMPONENTS json)
 find_package(spdlog REQUIRED)
+# realugin：插件体系（C ABI + 加载器）。装在别处就给 CMAKE_PREFIX_PATH
+find_package(realugin REQUIRED)
 # macOS 的 libcurl 是系统库（SDK 自带头），FindCURL 会把 SDK usr/include 当 include dir
 # 注入为 isystem——与 brew libc++ 头冲突。因此只取库路径，不用 CURL::libcurl target。
 find_package(CURL REQUIRED)
@@ -21,14 +23,16 @@ find_library(QUICHE_LIBRARY NAMES quiche)
 add_executable(realagent-core
   src/main.cpp
   src/config.cpp
-  src/extension/loader.cpp
+  src/extension/slots.cpp
   src/agent/executor.cpp
   src/agent/approval.cpp
   src/agent/agent.cpp
+  src/agent/session.cpp
   src/server/quic_server.cpp
 )
 target_include_directories(realagent-core PRIVATE include ${QUICHE_INCLUDE_DIR})
 target_link_libraries(realagent-core PRIVATE
+  realugin::loader
   Boost::json
   spdlog::spdlog
   ${CURL_LIBRARIES}

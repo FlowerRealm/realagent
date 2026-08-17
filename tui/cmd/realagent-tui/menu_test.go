@@ -2,6 +2,7 @@
 package main
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 
@@ -67,9 +68,10 @@ func TestMenuMatches(t *testing.T) {
 	}{
 		{"", nil},
 		{"hello", nil},
-		{"/", []string{"new", "resume", "statusline"}},
+		{"/", []string{"new", "resume", "statusline", "quit"}},
 		{"/n", []string{"new"}},
 		{"/re", []string{"resume"}},
+		{"/q", []string{"quit"}}, // 本地命令与远端命令在菜单里没有区别
 		{"/xyz", nil},
 		{"/new x", nil}, // 参数模式关闭菜单
 		{"/new ", nil},
@@ -103,14 +105,15 @@ func names(cmds []client.Command) []string {
 	return out
 }
 
-// 远端命令列表为空（core 未启动/拉取失败）时，本地命令 /statusline 仍应可见——
-// 它不经 core，不该被 core 的状态拖累。
+// 远端命令列表为空（core 未启动/拉取失败）时，本地命令仍应可见——
+// 它们不经 core，不该被 core 的状态拖累。
 func TestMenuMatchesEmptyList(t *testing.T) {
 	m := model{}
 	m.ed.set("/")
 	got := names(m.menuMatches())
-	if len(got) != 1 || got[0] != "statusline" {
-		t.Errorf("空远端命令列表应只剩本地命令，got %v", got)
+	want := names(localCmds)
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("空远端命令列表应只剩本地命令 %v，got %v", want, got)
 	}
 }
 
@@ -169,15 +172,14 @@ func TestTabCompletes(t *testing.T) {
 }
 
 func TestUpDownWrap(t *testing.T) {
-	m := typed("/") // 3 项：new, resume, statusline
-	// down: 0 → 1 → 2，再 down 回绕到 0
-	m, _ = m.handleKey(key(tea.KeyDown))
-	if m.menuSel != 1 {
-		t.Errorf("down 应移到 1，got %d", m.menuSel)
-	}
-	m, _ = m.handleKey(key(tea.KeyDown))
-	if m.menuSel != 2 {
-		t.Errorf("down 应移到 2，got %d", m.menuSel)
+	m := typed("/") // testCmds 两条 + 全部本地命令
+	last := len(m.menuMatches()) - 1
+	// down: 0 → 1 → ... → 末项，再 down 回绕到 0
+	for i := 1; i <= last; i++ {
+		m, _ = m.handleKey(key(tea.KeyDown))
+		if m.menuSel != i {
+			t.Fatalf("down 应移到 %d，got %d", i, m.menuSel)
+		}
 	}
 	m, _ = m.handleKey(key(tea.KeyDown))
 	if m.menuSel != 0 {
@@ -185,8 +187,8 @@ func TestUpDownWrap(t *testing.T) {
 	}
 	// up 回绕：0 → 末项
 	m, _ = m.handleKey(key(tea.KeyUp))
-	if m.menuSel != 2 {
-		t.Errorf("up 应回绕到末项 2，got %d", m.menuSel)
+	if m.menuSel != last {
+		t.Errorf("up 应回绕到末项 %d，got %d", last, m.menuSel)
 	}
 }
 

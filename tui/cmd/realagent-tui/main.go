@@ -220,6 +220,10 @@ func (m model) update(msg tea.Msg) (model, tea.Cmd) {
 				text = renderPlugins(v.reply.Data)
 			case "model":
 				text = renderModels(v.reply.Data)
+			case "provider":
+				text = renderProviders(v.reply.Data)
+			case "new", "resume":
+				text = renderSessions(v.reply.Command, v.reply.Data)
 			}
 			m.emit("info", text)
 		case v.reply.Reply != "":
@@ -333,6 +337,13 @@ func (m model) menuOpen() bool {
 	return !m.menuHid && strings.HasPrefix(m.ed.value(), "/")
 }
 
+// localCmds 是**不经 core** 的斜杠命令：合进菜单，但在 submitInput 里就地处理。
+// 判据是"这件事 core 管不着"——展示偏好是客户端状态，退出的是客户端进程。
+var localCmds = []client.Command{
+	statuslineCmd, // statusline.go
+	{Name: "quit", Description: "退出 TUI（core 继续在后台跑）"},
+}
+
 // menuMatches 返回当前输入前缀命中的命令（命令名不带 '/'，前缀匹配）。
 // 输入含空格视为进入参数模式（v1 命令无参数），关闭菜单。
 func (m model) menuMatches() []client.Command {
@@ -343,9 +354,9 @@ func (m model) menuMatches() []client.Command {
 	if strings.ContainsAny(prefix, " \n") {
 		return nil
 	}
-	all := make([]client.Command, 0, len(m.commands)+1)
+	all := make([]client.Command, 0, len(m.commands)+len(localCmds))
 	all = append(all, m.commands...)
-	all = append(all, statuslineCmd) // 本地命令（statusline.go），不经 core
+	all = append(all, localCmds...) // 本地命令，不经 core（见 submitInput）
 
 	var out []client.Command
 	for _, c := range all {
@@ -416,6 +427,12 @@ func (m model) submitInput(fromPanel bool) (model, tea.Cmd) {
 	m.menuSel = 0
 	m.panelWant = panelWantOf(input, fromPanel)
 	m.emit("user", input)
+
+	// /quit 是纯客户端命令：退出的是 TUI 这个进程，core 是常驻服务、还连着别的客户端，
+	// 它没有"退出"这个概念。发给 core 只会换回一个 unknown command。
+	if cmd, _ := splitCommand(input); cmd == "/quit" {
+		return m, tea.Quit
+	}
 
 	// /statusline 是纯客户端命令（statusline.go）：core 不认展示偏好，本地处理，不占用网络往返
 	if cmd, rest := splitCommand(input); cmd == "/statusline" {
@@ -503,6 +520,18 @@ func (m *model) handleEvent(ev client.Event) tea.Cmd {
 		m.awaiting = false
 		m.emit("tool", "🔧 "+d.Name+" …")
 		return m.busy.begin(toolVerb(d.Name), time.Now())
+
+	case "tool_output":
+		// 工具边跑边推的 stdout（PROTOCOL.md）。走 stream 而不是 emit：
+		// 插件按行推，但超长行会被切成几帧、末行可能没有换行符——
+		// 只有"续写开着的行"才能把它们重新拼成用户看到的那一行。
+		// 完整输出稍后仍随 tool_result 回来，这里推的只是"现在长什么样"。
+		var d struct {
+			Text string `json:"text"`
+		}
+		jsonUnmarshal(ev.Payload, &d)
+		m.awaiting = false
+		m.stream("output", d.Text)
 
 	case "tool_execution_end":
 		var d struct {
@@ -639,13 +668,50 @@ func describeCommand(name string, messages int) string {
 	case "new":
 		return "✅ 已新建会话（对话历史已清空）"
 	case "resume":
-		return fmt.Sprintf("📄 当前会话共 %d 条消息", messages)
+		if messages > 0 {
+			return fmt.Sprintf("📄 当前会话共 %d 条消息", messages)
+		}
+		return "📄 会话已切换"
 	}
 	return "✅ 命令已执行: /" + name
 }
 
+// renderSessions 把 /new /resume 的会话清单渲染为多行 info 文本。
+// 当前会话打 ▸，其余只是列出来——真要挑一个走的是面板（panel.go sessionPanel）。
+func renderSessions(command string, data json.RawMessage) string {
+	var list []client.SessionInfo
+	if err := json.Unmarshal(data, &list); err != nil {
+		return describeCommand(command, 0)
+	}
+	var cur client.SessionInfo
+	for _, s := range list {
+		if s.Current {
+			cur = s
+		}
+	}
+	if command == "new" {
+		return "✅ 已新建会话 " + cur.ID + "（对话历史已清空，旧会话留在盘上）"
+	}
+	if len(list) == 0 {
+		return "📄 还没有任何会话"
+	}
+	out := []string{fmt.Sprintf("📄 会话 %d 个（当前 %s，共 %d 条消息）", len(list), cur.ID, cur.Messages)}
+	for _, s := range list {
+		mark := "  "
+		if s.Current {
+			mark = "▸ "
+		}
+		title := s.Title
+		if title == "" {
+			title = "（空会话）"
+		}
+		out = append(out, fmt.Sprintf("%s%s  %s  %d 条", mark, s.ID, title, s.Messages))
+	}
+	return strings.Join(out, "\n")
+}
+
 // renderPlugins 把 /plugins 结果（[]PluginInfo JSON）渲染为多行 info 文本。
-// 每行：名称 v版本 [type] 状态，failed 附加 error。
+// 每行：名称 v版本 [能力] 状态，failed 附加 error。
 func renderPlugins(data json.RawMessage) string {
 	var list []client.PluginInfo
 	if err := json.Unmarshal(data, &list); err != nil {
@@ -660,14 +726,35 @@ func renderPlugins(data json.RawMessage) string {
 		if p.Version != "" {
 			text += " v" + p.Version
 		}
-		if p.Type != "" {
-			text += " [" + p.Type + "]"
+		if len(p.Capabilities) > 0 {
+			text += " [" + strings.Join(p.Capabilities, ",") + "]"
 		}
 		text += "  " + p.Status
 		if p.Status == "failed" && p.Error != "" {
 			text += "  " + p.Error
 		}
 		out = append(out, text)
+	}
+	return strings.Join(out, "\n")
+}
+
+// renderProviders 把 /provider 结果（[]ProviderInfo JSON）渲染为多行 info 文本。
+// 每行：标记 名称 模型数；● 是当前 provider（协议槽占用者）。切换用 /provider <name>。
+func renderProviders(data json.RawMessage) string {
+	var list []client.ProviderInfo
+	if err := json.Unmarshal(data, &list); err != nil {
+		return "✅ 命令已执行: /provider" // 载荷解析失败降级为通用提示
+	}
+	if len(list) == 0 {
+		return "✅ /provider: 无 Provider 壳（协议槽空置）"
+	}
+	var out []string
+	for _, p := range list {
+		mark := "  "
+		if p.Current {
+			mark = "● "
+		}
+		out = append(out, fmt.Sprintf("%s%s  %d 个模型", mark, p.Name, p.Models))
 	}
 	return strings.Join(out, "\n")
 }

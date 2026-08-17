@@ -21,7 +21,7 @@ func modelsJSON() json.RawMessage {
 
 func pluginsJSON() json.RawMessage {
 	data, _ := json.Marshal([]client.PluginInfo{
-		{Name: "deepseek", Version: "0.1", Type: "provider", Status: "loaded"},
+		{Name: "deepseek", Version: "0.1", Capabilities: []string{"protocol", "models"}, Status: "loaded"},
 		{Name: "perm-ask", Status: "disabled"},
 	})
 	return data

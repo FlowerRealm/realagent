@@ -71,6 +71,17 @@ bool write_atomic(const fs::path& target, const std::string& text) {
     return true;
 }
 
+/* 点分路径写入："plugins.disabled" 只改这一个叶子，兄弟键（plugins.unprefixed）不动。
+ * 整个 plugins 对象覆写会把用户配的兄弟键一起抹掉——写一个键就只写那一个键。 */
+void set_path(json& tree, std::string_view key, const json& v) {
+    const std::size_t dot = key.find('.');
+    if (dot == std::string_view::npos) {
+        tree[key] = v;
+        return;
+    }
+    set_path(tree[key.substr(0, dot)], key.substr(dot + 1), v);
+}
+
 } // namespace
 
 std::string getenv_or(std::string_view name, std::string_view fallback) {
@@ -117,12 +128,12 @@ bool Config::persist(std::string_view key, const json& v) {
         return false;
     }
     json tree = file->value_or(json{}); // 文件不存在 → 空对象起头
-    tree[key] = v;
+    set_path(tree, key, v);
     if (!write_atomic(target, tree.dump())) return false;
 
     // 落盘成功才改内存：失败时内存与文件都没变，不会出现"切了档但没写进去"
     std::lock_guard<std::mutex> lk(*mutex_);
-    settings_[key] = v;
+    set_path(settings_, key, v);
     return true;
 }
 
@@ -130,7 +141,7 @@ std::vector<std::string> Config::extension_dirs() const {
     return {(global_dir() / ".realagent" / "extensions").string()};
 }
 
-std::string Config::session_dir() const { return std::string(kSessionDir); }
+std::string Config::session_dir() { return std::string(kSessionDir); }
 
 std::string Config::models_path(std::string_view plugin_name) const {
     return (global_dir() / ".realagent" / "models" / (std::string(plugin_name) + ".json")).string();

@@ -28,17 +28,22 @@
 
 namespace realagent {
 
+/* 一条在途请求。HTTP/3 一条连接上多个流并发，请求状态因此属于**流**，不属于连接：
+ * 挂在连接上就只有一份槽，两个并发请求会互相覆盖方法/路径/正文，响应还会发错流。 */
+struct QuicRequest {
+    std::string method;
+    std::string path;
+    std::string body;
+};
+
 struct QuicConn {
     quiche_conn* conn = nullptr;
     quiche_h3_conn* h3 = nullptr;
     sockaddr_storage peer{};
     socklen_t peer_len = 0;
     uint64_t scid = 0;
-    std::string request_method;
-    std::string request_path;
-    std::string request_body;
-    uint64_t request_stream_id = 0;
-    bool expecting_body = false;
+    /* 在途请求，按流 id 索引：HEADERS 建、DATA 追加、FINISHED 用完即删 */
+    std::map<uint64_t, QuicRequest> requests;
     /* 事件推送流（GET /events 订阅） */
     bool events_subscribed = false;
     int64_t events_stream = -1;
@@ -91,14 +96,17 @@ static bool ensure_cert(const std::string& cert_file, const std::string& key_fil
 
 /* ==================== 响应辅助 ==================== */
 
-/* 发 JSON 响应（200 application/json；事件循环线程内调用） */
-static void send_json(QuicConn& c, const std::string& body) {
+/* 发 JSON 响应（application/json；事件循环线程内调用）。
+ * 流 id 由调用方从当前 h3 事件传入——不存连接上，就不会发错流。 */
+static void send_json(QuicConn& c, uint64_t stream_id, const std::string& body,
+                      const char* status = "200") {
     quiche_h3_header resp_headers[] = {
-        {(uint8_t*)":status", 7, (uint8_t*)"200", 3},
+        {(uint8_t*)":status", 7, (uint8_t*)status, strlen(status)},
         {(uint8_t*)"content-type", 12, (uint8_t*)"application/json", 16},
+        {(uint8_t*)"server", 6, (uint8_t*)"realagent", 9},
     };
-    quiche_h3_send_response(c.h3, c.conn, c.request_stream_id, resp_headers, 2, false);
-    quiche_h3_send_body(c.h3, c.conn, c.request_stream_id,
+    quiche_h3_send_response(c.h3, c.conn, stream_id, resp_headers, 3, false);
+    quiche_h3_send_body(c.h3, c.conn, stream_id,
                         (const uint8_t*)body.data(), body.size(), true);
 }
 
@@ -234,33 +242,33 @@ void QuicServer::run() {
                 while ((stream_id = quiche_h3_conn_poll(c.h3, c.conn, &ev)) >= 0) {
                     auto t = quiche_h3_event_type(ev);
                                         ++poll_count;
+                    const uint64_t sid = (uint64_t)stream_id;
                     if (t == QUICHE_H3_EVENT_HEADERS) {
-                        c.request_stream_id = stream_id;
-                        c.request_method.clear();
-                        c.request_path.clear();
-                        c.request_body.clear();
-                        c.expecting_body = false;
+                        QuicRequest& req = c.requests[sid];
+                        req = QuicRequest{};
                         quiche_h3_event_for_each_header(ev, [](uint8_t* name, size_t namelen,
                             uint8_t* value, size_t valuelen, void* argp) {
-                            auto* c2 = static_cast<QuicConn*>(argp);
+                            auto* r = static_cast<QuicRequest*>(argp);
                             if (namelen == 7 && memcmp(name, ":method", 7) == 0)
-                                c2->request_method.assign((const char*)value, valuelen);
+                                r->method.assign((const char*)value, valuelen);
                             if (namelen == 5 && memcmp(name, ":path", 5) == 0)
-                                c2->request_path.assign((const char*)value, valuelen);
+                                r->path.assign((const char*)value, valuelen);
                             return 0;
-                        }, &c);
+                        }, &req);
                     } else if (t == QUICHE_H3_EVENT_DATA) {
-                        c.expecting_body = true;
-                        // 读取 body
+                        // 读取 body，追加到本流自己的请求上
+                        QuicRequest& req = c.requests[sid];
                         uint8_t body_buf[65536];
                         ssize_t body_n;
                         while ((body_n = quiche_h3_recv_body(c.h3, c.conn, stream_id,
                                 body_buf, sizeof(body_buf))) > 0) {
-                            c.request_body.append((const char*)body_buf, body_n);
+                            req.body.append((const char*)body_buf, body_n);
                         }
                     } else if (t == QUICHE_H3_EVENT_FINISHED) {
+                        const QuicRequest req = std::move(c.requests[sid]);
+                        c.requests.erase(sid); // 请求到此结束，状态不留过夜
                         // 处理请求
-                        if (c.request_method == "GET" && c.request_path == "/events") {
+                        if (req.method == "GET" && req.path == "/events") {
                             // 事件推送流订阅：响应 200（fin=false），持续推送 agent 事件
                             c.events_subscribed = true;
                             c.events_stream = stream_id;
@@ -270,116 +278,71 @@ void QuicServer::run() {
                             };
                             quiche_h3_send_response(c.h3, c.conn, stream_id,
                                                     ev_headers, 2, false);
-                        } else if (c.request_method == "GET" && c.request_path == "/commands") {
+                        } else if (req.method == "GET" && req.path == "/commands") {
                             // 斜杠命令列表（TUI 菜单数据源）。core 持有唯一真相，TUI 只渲染。
-                            std::string resp_body;
-                            if (impl_->cbs.on_commands)
-                                resp_body = impl_->cbs.on_commands();
-                            else
-                                resp_body = "[]";
-                            quiche_h3_header resp_headers[] = {
-                                {(uint8_t*)":status", 7, (uint8_t*)"200", 3},
-                                {(uint8_t*)"content-type", 12, (uint8_t*)"application/json", 16},
-                                {(uint8_t*)"server", 6, (uint8_t*)"realagent", 9},
-                            };
-                            quiche_h3_send_response(c.h3, c.conn, c.request_stream_id,
-                                                    resp_headers, 3, false);
-                            quiche_h3_send_body(c.h3, c.conn, c.request_stream_id,
-                                                (const uint8_t*)resp_body.data(),
-                                                resp_body.size(), true);
-                        } else if (c.request_method == "GET" && c.request_path == "/plugins") {
+                            send_json(c, sid, impl_->cbs.on_commands ? impl_->cbs.on_commands()
+                                                                     : "[]");
+                        } else if (req.method == "GET" && req.path == "/plugins") {
                             // 插件列表（TUI /plugins 数据源）：loaded/disabled/failed + error
-                            std::string resp_body;
-                            if (impl_->cbs.on_plugins)
-                                resp_body = impl_->cbs.on_plugins();
-                            else
-                                resp_body = "[]";
-                            send_json(c, resp_body);
-                        } else if (c.request_method == "GET" && c.request_path == "/statusline") {
+                            send_json(c, sid, impl_->cbs.on_plugins ? impl_->cbs.on_plugins()
+                                                                    : "[]");
+                        } else if (req.method == "GET" && req.path == "/statusline") {
                             // 状态栏数据（TUI 输入框下方那条，见 PROTOCOL.md）
-                            std::string resp_body;
-                            if (impl_->cbs.on_statusline)
-                                resp_body = impl_->cbs.on_statusline();
-                            else
-                                resp_body = "{}";
-                            send_json(c, resp_body);
-                        } else if (c.request_method == "POST" && c.request_path == "/plugins/enable") {
+                            send_json(c, sid, impl_->cbs.on_statusline ? impl_->cbs.on_statusline()
+                                                                       : "{}");
+                        } else if (req.method == "POST" && req.path == "/plugins/enable") {
                             // 启用插件（体 {"name"}）
-                            std::string resp_body;
+                            std::string resp_body = "{\"error\":\"no plugins handler\"}";
                             if (impl_->cbs.on_plugin_enable) {
-                                auto b = json::parse(c.request_body).value_or(json{});
+                                auto b = json::parse(req.body).value_or(json{});
                                 resp_body = impl_->cbs.on_plugin_enable(
                                     b["name"].as_string().value_or(""));
-                            } else {
-                                resp_body = "{\"error\":\"no plugins handler\"}";
                             }
-                            send_json(c, resp_body);
-                        } else if (c.request_method == "POST" && c.request_path == "/plugins/disable") {
+                            send_json(c, sid, resp_body);
+                        } else if (req.method == "POST" && req.path == "/plugins/disable") {
                             // 禁用插件（体 {"name"}）
-                            std::string resp_body;
+                            std::string resp_body = "{\"error\":\"no plugins handler\"}";
                             if (impl_->cbs.on_plugin_disable) {
-                                auto b = json::parse(c.request_body).value_or(json{});
+                                auto b = json::parse(req.body).value_or(json{});
                                 resp_body = impl_->cbs.on_plugin_disable(
                                     b["name"].as_string().value_or(""));
-                            } else {
-                                resp_body = "{\"error\":\"no plugins handler\"}";
                             }
-                            send_json(c, resp_body);
-                        } else if (c.request_method == "POST" && c.request_path == "/interrupt") {
+                            send_json(c, sid, resp_body);
+                        } else if (req.method == "POST" && req.path == "/interrupt") {
                             if (impl_->cbs.on_interrupt) impl_->cbs.on_interrupt();
-                            send_json(c, "{\"status\":\"ok\"}");
-                        } else if (c.request_method == "POST" && c.request_path == "/message") {
-                            std::string resp_body;
-                            if (impl_->cbs.on_message)
-                                resp_body = impl_->cbs.on_message(c.request_body);
-                            else
-                                resp_body = "{\"status\":\"ok\"}";
-                            quiche_h3_header resp_headers[] = {
-                                {(uint8_t*)":status", 7, (uint8_t*)"200", 3},
-                                {(uint8_t*)"content-type", 12, (uint8_t*)"application/json", 16},
-                                {(uint8_t*)"server", 6, (uint8_t*)"realagent", 9},
-                            };
-                            quiche_h3_send_response(c.h3, c.conn, c.request_stream_id,
-                                                    resp_headers, 3, false);
-                            quiche_h3_send_body(c.h3, c.conn, c.request_stream_id,
-                                                (const uint8_t*)resp_body.data(),
-                                                resp_body.size(), true);
-                        } else if (c.request_method == "POST" && c.request_path == "/approval-response") {
+                            send_json(c, sid, "{\"status\":\"ok\"}");
+                        } else if (req.method == "POST" && req.path == "/message") {
+                            send_json(c, sid, impl_->cbs.on_message
+                                                  ? impl_->cbs.on_message(req.body)
+                                                  : "{\"status\":\"ok\"}");
+                        } else if (req.method == "POST" && req.path == "/command") {
+                            // 斜杠命令（体 {"command":"/new"}）。与 /message 的 '/' 前缀
+                            // 分支共用 core 侧同一份实现，两个端点行为一致。
+                            send_json(c, sid, impl_->cbs.on_command
+                                                  ? impl_->cbs.on_command(req.body)
+                                                  : "{\"error\":\"no command handler\"}");
+                        } else if (req.method == "GET" && req.path == "/sessions") {
+                            send_json(c, sid, impl_->cbs.on_sessions ? impl_->cbs.on_sessions()
+                                                                     : "[]");
+                        } else if (req.method == "POST" && req.path == "/session") {
+                            // 体带 id = 恢复，体空 = 新建
+                            send_json(c, sid, impl_->cbs.on_session
+                                                  ? impl_->cbs.on_session(req.body)
+                                                  : "{\"error\":\"no session handler\"}");
+                        } else if (req.method == "POST" && req.path == "/approval-response") {
                             // 审批裁决回传（PROTOCOL.md）→ 审批协调器
-                            std::string resp_body;
+                            std::string resp_body = "{\"error\":\"no approval handler\"}";
                             if (impl_->cbs.on_approval_response) {
-                                auto b = json::parse(c.request_body).value_or(json{});
-                                const std::string id = b["id"].as_string().value_or("");
-                                const bool allow = b["allow"].as_bool().value_or(false);
-                                impl_->cbs.on_approval_response(id, allow);
+                                auto b = json::parse(req.body).value_or(json{});
+                                impl_->cbs.on_approval_response(
+                                    b["id"].as_string().value_or(""),
+                                    b["allow"].as_bool().value_or(false));
                                 resp_body = "{\"status\":\"ok\"}";
-                            } else {
-                                resp_body = "{\"error\":\"no approval handler\"}";
                             }
-                            quiche_h3_header resp_headers[] = {
-                                {(uint8_t*)":status", 7, (uint8_t*)"200", 3},
-                                {(uint8_t*)"content-type", 12, (uint8_t*)"application/json", 16},
-                            };
-                            quiche_h3_send_response(c.h3, c.conn, c.request_stream_id,
-                                                    resp_headers, 2, false);
-                            quiche_h3_send_body(c.h3, c.conn, c.request_stream_id,
-                                                (const uint8_t*)resp_body.data(),
-                                                resp_body.size(), true);
+                            send_json(c, sid, resp_body);
                         } else {
-                            const char* err = "{\"error\":\"not found\"}";
-                            quiche_h3_header resp_headers[] = {
-                                {(uint8_t*)":status", 7, (uint8_t*)"404", 3},
-                                {(uint8_t*)"content-type", 12, (uint8_t*)"application/json", 16},
-                            };
-                            quiche_h3_send_response(c.h3, c.conn, c.request_stream_id,
-                                                    resp_headers, 2, false);
-                            quiche_h3_send_body(c.h3, c.conn, c.request_stream_id,
-                                                (const uint8_t*)err, strlen(err), true);
+                            send_json(c, sid, "{\"error\":\"not found\"}", "404");
                         }
-                        c.request_method.clear();
-                        c.request_path.clear();
-                        c.request_body.clear();
-                        c.expecting_body = false;
                     }
                     quiche_h3_event_free(ev);
                 }

@@ -11,12 +11,12 @@ import (
 
 func TestRenderPlugins(t *testing.T) {
 	data, _ := json.Marshal([]client.PluginInfo{
-		{Name: "core-tools", Version: "1.0", Type: "native", Status: "loaded"},
-		{Name: "session-manager", Version: "0.2", Type: "native", Status: "disabled"},
-		{Name: "broken", Version: "0.1", Type: "native", Status: "failed", Error: "dlopen: not found"},
+		{Name: "core-tools", Version: "1.0", Capabilities: []string{"tool"}, Status: "loaded"},
+		{Name: "session-manager", Version: "0.2", Status: "disabled"},
+		{Name: "broken", Version: "0.1", Capabilities: []string{"protocol", "models"}, Status: "failed", Error: "dlopen: not found"},
 	})
 	got := renderPlugins(data)
-	for _, want := range []string{"core-tools", "v1.0", "[native]", "session-manager", "disabled", "broken", "dlopen: not found"} {
+	for _, want := range []string{"core-tools", "v1.0", "[tool]", "session-manager", "disabled", "broken", "[protocol,models]", "dlopen: not found"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("renderPlugins 应包含 %q，got %q", want, got)
 		}

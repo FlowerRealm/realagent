@@ -19,7 +19,7 @@
 #include <string>
 #include <unordered_map>
 
-#include "../../sdk/plugin_api.h"
+#include <realugin/plugin_api.h>
 
 namespace realagent {
 

@@ -35,14 +35,16 @@ type Reply struct {
 
 // PluginInfo 是一条插件记录（GET /plugins，status: loaded/disabled/failed + error）。
 type PluginInfo struct {
-	Name        string   `json:"name"`
-	Version     string   `json:"version"`
-	Type        string   `json:"type"` // 插件类型（core 的 type_name 映射，契约字段名）
-	Description string   `json:"description"`
-	Dir         string   `json:"dir"`
-	Status      string   `json:"status"`
-	Error       string   `json:"error"`
-	Deps        []string `json:"deps"`
+	Name    string `json:"name"`
+	Version string `json:"version"`
+	// 该插件实际提供的能力（protocol / tool / permission / models），由 core 从
+	// 非空函数指针派生（ADR-0011）。插件没有类型，这里也就不再有 type 字段。
+	Capabilities []string `json:"capabilities"`
+	Description  string   `json:"description"`
+	Dir          string   `json:"dir"`
+	Status       string   `json:"status"`
+	Error        string   `json:"error"`
+	Deps         []string `json:"deps"`
 }
 
 // Command 是一条可用的斜杠命令（GET /commands，core 是唯一真相源）
@@ -185,6 +187,24 @@ type ModelInfo struct {
 	OwnedBy string `json:"owned_by"`
 	Context int64  `json:"context"`
 	Current bool   `json:"current"`
+}
+
+// SessionInfo 是一条会话记录（/new /resume 与 GET /sessions 的 data 载荷）。
+// Title 是第一条 user 消息的正文（core 现取，不另存）；Mtime 是最后写入的 Unix 秒。
+type SessionInfo struct {
+	ID       string `json:"id"`
+	Title    string `json:"title"`
+	Messages int64  `json:"messages"`
+	Mtime    int64  `json:"mtime"`
+	Current  bool   `json:"current"`
+}
+
+// ProviderInfo 是一条 Provider 记录（/provider 命令的 data 载荷）。
+// Models 是该壳报了多少个模型；Current 标出协议槽当前的占用者（ADR-0011）。
+type ProviderInfo struct {
+	Name    string `json:"name"`
+	Current bool   `json:"current"`
+	Models  int    `json:"models"`
 }
 
 // Statusline 是状态栏数据（GET /statusline）：会话身份信息。

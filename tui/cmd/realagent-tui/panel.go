@@ -10,6 +10,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 
 	"realagent/tui/internal/client"
@@ -40,6 +41,10 @@ func makePanel(command string, data json.RawMessage) *panel {
 		return modelPanel(data)
 	case "plugins":
 		return pluginsPanel(data)
+	case "provider":
+		return providerPanel(data)
+	case "resume":
+		return sessionPanel(data)
 	}
 	return nil
 }
@@ -65,6 +70,44 @@ func modelPanel(data json.RawMessage) *panel {
 	return p
 }
 
+// providerPanel 把 /provider 的候选清单做成选择面板：Enter = 切当前 provider
+func providerPanel(data json.RawMessage) *panel {
+	var list []client.ProviderInfo
+	if err := json.Unmarshal(data, &list); err != nil || len(list) == 0 {
+		return nil
+	}
+	p := &panel{title: "选择 Provider"}
+	for _, pi := range list {
+		text := fmt.Sprintf("%s  %d 个模型", pi.Name, pi.Models)
+		p.items = append(p.items, panelItem{label: text, mark: pi.Current, submit: "/provider " + pi.Name})
+	}
+	p.sel = p.markIndex()
+	return p
+}
+
+// sessionPanel 把 /resume 的会话清单做成选择面板：Enter = 恢复那个会话。
+// 清单已按最近写入倒序（core 侧排好），所以第一项就是"上一个会话"。
+func sessionPanel(data json.RawMessage) *panel {
+	var list []client.SessionInfo
+	if err := json.Unmarshal(data, &list); err != nil || len(list) == 0 {
+		return nil
+	}
+	p := &panel{title: "恢复会话"}
+	for _, s := range list {
+		title := s.Title
+		if title == "" {
+			title = "（空会话）"
+		}
+		p.items = append(p.items, panelItem{
+			label:  fmt.Sprintf("%s  %s  %d 条", s.ID, title, s.Messages),
+			mark:   s.Current,
+			submit: "/resume " + s.ID,
+		})
+	}
+	p.sel = p.markIndex()
+	return p
+}
+
 // pluginsPanel 把 /plugins 的插件清单做成启停面板：Enter = 反转当前状态。
 // loaded 之外（disabled / failed）一律按「可启用」处理——failed 的重载一次
 // 正是用户想干的事，让他试。
@@ -84,8 +127,8 @@ func pluginsPanel(data json.RawMessage) *panel {
 		if pl.Version != "" {
 			text += " v" + pl.Version
 		}
-		if pl.Type != "" {
-			text += " [" + pl.Type + "]"
+		if len(pl.Capabilities) > 0 {
+			text += " [" + strings.Join(pl.Capabilities, ",") + "]"
 		}
 		text += "  " + pl.Status
 		if pl.Status == "failed" && pl.Error != "" {
@@ -111,6 +154,7 @@ func (p *panel) markIndex() int {
 // 确认出来的（启停类操作改完接着操作，面板不该自己跑掉）。
 //
 //	/model            列清单 → 开面板选；/model <name> 是明确指令，选完即走
+//	/provider         同 /model：列候选 → 开面板选
 //	/plugins [...]    列表与启停回的是同一份全量清单 → 面板里连续启停不用重打命令
 //	/statusline       同上，纯本地
 func panelWantOf(input string, fromPanel bool) string {
@@ -120,9 +164,17 @@ func panelWantOf(input string, fromPanel bool) string {
 		if args == "" {
 			return "model"
 		}
+	case "/provider":
+		if args == "" {
+			return "provider"
+		}
 	case "/plugins":
 		if args == "" || fromPanel {
 			return "plugins"
+		}
+	case "/resume":
+		if args == "" {
+			return "resume"
 		}
 	case "/statusline":
 		if args == "" || fromPanel {

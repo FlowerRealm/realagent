@@ -33,6 +33,11 @@ QUIC 服务架构（ADR-0006）使 TUI 语言不受 C++ 约束。用户："因�
 
 参考 **claude code / codex 客户端**外观，**无状态栏**（用户明确）。核心界面元素：消息流（LLM 回复 + 工具执行展示）+ 底部输入框 + 审批对话框。流式打字效果由推送流帧到达驱动（全可靠，见 PROTOCOL.md）。
 
+> **实况注（2026-08-16）：「无状态栏」这条已被推翻，状态栏是现实。**
+> 输入框下方有常驻状态栏（`🤖 model | 📁 dir | 🌿 git`），core 侧有 `GET /statusline` 端点与 `statusline` 推送帧，TUI 侧有 statusline.go 与 `/statusline` 配置命令，CONTEXT.md 也有完整的 [[Statusline]] 词条。它不是顺手加的，是一条被完整设计过的特性。
+> 推翻发生在何时、因何推翻，**没有任何记录**——本 ADR 没改，也没有后继 ADR 声明取代它。这条注只陈述事实，不追补理由：编一个当时的理由出来，比留着这个缺口更糟。
+> 另外状态栏与**状态行**（读秒行，`status_update` 帧）是两个东西，见 PROTOCOL.md。
+
 ## 后果
 
 - 项目变为**双语言**：C++（core 服务）+ Go（TUI 客户端），边界是 QUIC/HTTP3 + JSON 协议（PROTOCOL.md）。

@@ -2,11 +2,10 @@
  * agent.hpp — agent loop（M3 核心）
  *
  * 形态（ADR-0002/ADR-0007）：while(1)——
- *   调 LLM（协议插件构造请求 + libcurl 流式 + parse_feed 解析）→ 广播事件
+ *   调 LLM（管线：生成请求 → 改请求 → core 发出 → 解析响应 → 计价）→ 广播事件
  *   → 有 tool_use 则顺序执行工具、结果入会话、继续循环；否则完成
  *
- * 协议无关：core 持有抽象对话（JSON），协议插件在 build_request
- * 时转具体协议格式。
+ * 协议无关：core 持有抽象对话（JSON），"生成请求"那一段负责转成具体协议格式。
  */
 #pragma once
 
@@ -16,7 +15,8 @@
 #include <vector>
 
 #include "agent/executor.hpp"
-#include "extension/loader.hpp"
+#include "agent/session.hpp"
+#include "extension/slots.hpp"
 #include "json.hpp"
 
 namespace realagent {
@@ -40,7 +40,7 @@ struct LlmOutcome {
 
 class Agent {
 public:
-  Agent(CoreContext &ctx, Executor &exe);
+  Agent(CoreContext &ctx, PluginManager &plugins, Executor &exe);
 
   /* 一次用户输入 → 完整 loop（阻塞至 LLM 完成或工具链结束） */
   void run(const std::string &user_input);
@@ -51,10 +51,23 @@ public:
   /* 会话消息（抽象格式，供持久化/构建 dialog） */
   json &messages() { return messages_; }
 
-  /* 清空会话（/new 命令：新建会话） */
+  /* 新建会话（/new 命令）：清空历史 + 换一个会话文件。
+   * 旧文件不动——它是记录，不是缓存。 */
   void reset();
 
+  /* 恢复会话（/resume <id>）：JSONL 读回历史，后续追加写进该文件。
+   * 读不到返回 false，此时当前会话**原样不动**（宁可恢复失败，也不能把人扔进空白）。*/
+  bool resume(const std::string &id);
+
+  /* 当前会话 id（GET /sessions 标出 current，客户端据此知道自己在哪儿） */
+  const std::string &session_id() const { return session_.id(); }
+
 private:
+  /* 消息入账的唯一入口：进内存，同时落盘。
+   * run() 里有六处产生消息，全都走这里——散着写 push_back 迟早漏掉一处，
+   * 而漏掉的那条恢复会话时就凭空消失了。 */
+  void record(json msg);
+
   /* 构建抽象对话（system/messages/tools），tier 决定 dialog["model"] 取哪一档
    */
   json build_dialog(ModelTier tier) const;
@@ -64,8 +77,10 @@ private:
   void broadcast(const std::string &type, const json &payload);
 
   CoreContext &ctx_;
+  PluginManager &plugins_;
   Executor &exe_;
   json messages_;
+  Session session_;     // 当前会话的落盘去处（JSONL，append-only）
   double run_cost_ = 0; // 本次 run 累计花费（USD），一次用户输入起算清零
   std::atomic<bool> abort_{false};
 };

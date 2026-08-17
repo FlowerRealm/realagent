@@ -41,7 +41,7 @@ var (
 
 // line 是渲染的最小单位：一行原始文本 + 决定样式的角色。
 type line struct {
-	role string // user / assistant / thinking / tool / error / info
+	role string // user / assistant / thinking / tool / output / error / info
 	text string
 }
 
@@ -59,7 +59,7 @@ func styleOf(role string) lipgloss.Style {
 	case "thinking":
 		return thinkingStyle
 	}
-	return dimStyle // info / 未知
+	return dimStyle // info / output（工具原始 stdout，压暗与工具行区分）/ 未知
 }
 
 // prefixOf 返回角色前缀。前缀只出现在首折行，续行用等宽空格挂起缩进对齐。
@@ -127,7 +127,7 @@ func render(l line, width int) []string {
 
 // emit 追加若干整行（自带 \n 则拆开）。整行天生是定型的。
 func (m *model) emit(role, text string) {
-	m.open = false
+	m.closeLine()
 	for _, s := range strings.Split(text, "\n") {
 		m.pend = append(m.pend, line{role: role, text: s})
 	}
@@ -136,6 +136,7 @@ func (m *model) emit(role, text string) {
 // stream 把流式增量续写到开着的行；遇 \n 起新行，角色变了先收尾再另起。
 func (m *model) stream(role, delta string) {
 	if !m.open || len(m.pend) == 0 || m.pend[len(m.pend)-1].role != role {
+		m.closeLine() // 换角色时也丢掉上一条的空尾行（理由同 closeLine）
 		m.pend = append(m.pend, line{role: role})
 		m.open = true
 	}
@@ -147,7 +148,16 @@ func (m *model) stream(role, delta string) {
 }
 
 // closeLine 给开着的行收尾：它不再增长，下一次 freeze 即可进 scrollback。
-func (m *model) closeLine() { m.open = false }
+//
+// 空的开着的行是"光标停在行首"，不是内容——增量以 \n 结尾时必然留下一个。
+// 流还开着时它无害（就是光标位置），一旦定型就成了 scrollback 里的一条空行，
+// 所以收尾时丢掉。emit 出来的空行不受影响：那种行从来不是 open 的。
+func (m *model) closeLine() {
+	if m.open && len(m.pend) > 0 && m.pend[len(m.pend)-1].text == "" {
+		m.pend = m.pend[:len(m.pend)-1]
+	}
+	m.open = false
+}
 
 // freeze 取出所有已定型的渲染行（交给 outbox 打进 scrollback），
 // 未定型的留在 m.pend 里继续由活动区重绘。

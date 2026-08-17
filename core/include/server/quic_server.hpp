@@ -1,10 +1,10 @@
 /*
  * quic_server.hpp — QUIC/HTTP3 服务端（M5）
  *
- * 基于 ngtcp2 + nghttp3 + OpenSSL 的最小实现：
+ * 基于 Cloudflare quiche（QUIC + HTTP/3 一体）的最小实现：
  *  - 接受 QUIC 连接
- *  - 解析 HTTP/3 请求（POST /message / POST /command 等）
- *  - 事件推送流（占位，M6 接入 agent 事件）
+ *  - 解析 HTTP/3 请求（端点全表见 docs/PROTOCOL.md）
+ *  - 事件推送流（GET /events，一条长生命周期可靠流，SSE 语义）
  *
  * 生命周期：单线程事件循环（poll-based），通过回调与 agent 线程交互。
  */
@@ -32,6 +32,13 @@ struct QuicServerConfig {
 struct QuicCallbacks {
     /* 收到用户消息 → 投递 agent 线程。返回 JSON 响应字符串。 */
     std::function<std::string(const std::string& body)> on_message;
+    /* 执行斜杠命令（POST /command，体 {"command":"/new"}）→ 响应 JSON 字符串。
+     * 与 on_message 的 `/` 前缀分支是同一份实现，不是两套行为。 */
+    std::function<std::string(const std::string& body)> on_command;
+    /* 会话清单（GET /sessions）→ JSON 数组字符串 */
+    std::function<std::string()> on_sessions;
+    /* 新建 / 恢复会话（POST /session，体 {"id"} 恢复、体空则新建）→ 响应 JSON 字符串 */
+    std::function<std::string(const std::string& body)> on_session;
     /* 收到审批裁决（POST /approval-response）→ 交给审批协调器 */
     std::function<void(const std::string& id, bool allow)> on_approval_response;
     /* 斜杠命令列表（GET /commands）→ JSON 数组 [{name,description},...]。core 是唯一真相源。 */

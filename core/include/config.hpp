@@ -58,6 +58,7 @@ public:
     std::string model(ModelTier tier) const;
 
     // 点对点写回：改内存树 + 只改 settings.json 里的这一个键，文件其余部分原样不碰。
+    // key 支持点分路径（"plugins.disabled"）：只落到那个叶子，兄弟键不受影响。
     // 先落盘成功才改内存——失败时内存与文件都没变，不会出现"切了档但没写进去"。
     // 文件不存在按空对象起头；文件是坏 JSON 则拒绝写入并返回 false：
     // 宁可这次改动不生效，也不能拿内存树盖掉读不懂的用户数据（里面有 api_key）。
@@ -66,8 +67,10 @@ public:
     // 插件发现目录（全局 ~/.realagent/extensions，唯一来源）
     std::vector<std::string> extension_dirs() const;
 
-    // 会话存储目录（core 常量，不可配置）
-    std::string session_dir() const;
+    // 会话存储目录（core 常量，不可配置）。相对 cwd —— 会话按项目分家，
+    // 与插件目录（全局 ~/.realagent）不同层。
+    // static：它不读任何配置，Session 的清单扫描是静态的也照样能问到它。
+    static std::string session_dir();
 
     // 模型数据表的运行时落点（用户接管版）：~/.realagent/models/<插件名>.json。
     // 内容是插件的数据（含单价），core 只认路径不认内容（ADR-0009）

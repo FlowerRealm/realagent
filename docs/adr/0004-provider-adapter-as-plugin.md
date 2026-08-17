@@ -72,6 +72,8 @@ DeepSeek Anthropic 兼容端点（`api.deepseek.com/anthropic`）**完整支持�
 
 core 按依赖序加载（协议层先，壳后），agent 选"未被其他协议插件依赖者"为链入口（`find_protocol_plugin`）。新增第二个供应商只写新壳、复用协议层；core 据依赖自动选入口。这与"core 不内置任何具体协议/供应商知识"一脉相承。
 
+> ⚠️ **"core 据依赖自动选入口"已被 ADR-0011 取代（2026-08-15）。** 依赖图推导出的归属取决于目录扫描顺序与图形状，是静默仲裁；`find_protocol_plugin` 还是 O(n²)。现改为：壳在 init 中 `claim(内层名)` 显式接管（被接管者退出候选集），**哪个壳进协议槽由配置 `provider` 显式指定**。多个壳互为兄弟而非层叠——各自 claim 同一个协议层。本节其余内容（嵌套结构、壳只兜底不改写、协议/供应商拆分）不变。
+
 ## 组装机制的实际落地（2026-08-10）
 
 `get_dependency(name, &api, &inst)` 落入 core API：插件 init 中取前置插件接口表，链内包裹由插件自行完成（壳调内层）。core 只暴露查表能力，不替插件做调用编排。"声明驱动 + core 注入"落地为：插件声明 `deps`→core 按拓扑序加载→`get_dependency` 注入内层。
