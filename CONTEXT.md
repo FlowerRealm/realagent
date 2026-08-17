@@ -404,10 +404,11 @@ realagent/                  # 主仓库（core + tui + docs）
 ├── CONTEXT.md
 └── OPENCODE_RESEARCH.md    # （未重建）
 
-realugin/                   # 独立 git 仓库（插件体系，ADR-0013 / ADR-0014；MIT）
+realugin/                   # 独立 git 仓库（插件体系，ADR-0013 / ADR-0014 / ADR-0015；MIT）
 ├── include/realugin/       #   plugin_api.h（C ABI，**只有机制**，无业务词汇）+ host.hpp / loader.hpp
 ├── src/loader.cpp          #   发现 / dlopen / ABI 校验 / 能力索引 / deps DAG / 启停级联
-├── tests/                  #   14 个用例：拓扑 init、缺依赖、环、暗边、级联、扇出重入守卫
+│                           #   一个容器一个 Plugin 节点，状态即字段（ADR-0015）
+├── tests/                  #   19 个用例：拓扑 init、缺依赖、环、暗边、级联、扇出重入守卫
 └── cmake/AddPlugin.cmake   #   realugin_add_plugin() —— 插件工程的建库助手
 
 realagent-plugins/          # 独立 git 仓库（插件单开）
@@ -421,6 +422,6 @@ realagent-plugins/          # 独立 git 仓库（插件单开）
 共 5 个容器。`session-manager/` 已于 2026-08-16 删除：它交出的 `/new` `/resume` 与 core 内置的同名命令重复且只是空壳，两个命令现由 core 直接处理（`core/src/main.cpp:242/246`）。
 
 `core/src/` 下 `ai/` `tools/` `permission/` 三个目录**不存在，也不再规划**（2026-08-16 核实）：
-- `ai/`——Provider 抽象整体外移到插件，core 只按[[管线]]依次调四段能力，没有留给"AI 层"的职责（`core/include/ai/` 确实存在但是**空目录**，是早期骨架的残留）。
+- `ai/`——Provider 抽象整体外移到插件，core 只按[[管线]]依次调四段能力，没有留给"AI 层"的职责（`core/include/ai/` 那个空目录是早期骨架的残留，已删）。
 - `tools/`——工具注册表随 ADR-0012 删除，工具清单向容器现问现答；执行调度在 `agent/executor.cpp`。
 - `permission/`——权限裁决是插件（ADR-0005），core 侧只剩审批协调器，在 `agent/approval.cpp`（`AwaitApproval` 状态机 + `permission_request` 帧）。

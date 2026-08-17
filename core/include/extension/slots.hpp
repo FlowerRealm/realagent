@@ -28,24 +28,21 @@ namespace realagent {
 /* 借用 realugin 的名字：调用点关心的是"容器/能力"，不是它住在哪个命名空间 */
 using realugin::Cap;
 using realugin::cap_of;
-using realugin::capabilities_of;
 using realugin::Plugin;
-using realugin::PluginInfo;
 using realugin::PluginManager;
 
-/* 具名条目的对外视图：现问现答，不存副本。
- * 前缀怎么拼是 core 的词汇——工具用 '_'（LLM 那边的函数名不许有 ':'），
+/* 具名条目的对外视图：现问现答，不存副本。工具与命令只差条目类型，
+ * 视图与取法都是同一份。 */
+template <class Def>
+struct EntryView {
+    std::string name;  // 对外名字（带命名空间前缀或短名）
+    const Def* def;    // 借阅自插件
+    Plugin* owner;
+};
+/* 前缀怎么拼是 core 的词汇——工具用 '_'（LLM 那边的函数名不许有 ':'），
  * 命令用 ':'（斜杠命令的习惯写法）。realugin 只算出 Plugin::prefix 摆在那儿。 */
-struct ToolView {
-    std::string name;              // 对外名字（带命名空间前缀或短名）
-    const realagent_tool_t* def;   // 借阅自插件
-    Plugin* owner;
-};
-struct CommandView {
-    std::string name;
-    const realagent_command_t* def;
-    Plugin* owner;
-};
+using ToolView = EntryView<realagent_tool_t>;
+using CommandView = EntryView<realagent_command_t>;
 
 std::vector<ToolView> tools_of(const PluginManager& mgr);
 std::vector<CommandView> commands_of(const PluginManager& mgr);
@@ -85,7 +82,7 @@ public:
     std::vector<std::string> disabled() const override;
     bool set_disabled(const std::vector<std::string>& list) override;
     bool unprefixed(const std::string& plugin_name) const override;
-    std::vector<std::string> extra_deps(const realugin::Manifest& m) const override;
+    std::vector<std::string> extra_deps(const realugin::Plugin& p) const override;
     bool knows_capability(const char* cap) const override;
     const char* broadcast_capability() const override { return REALAGENT_CAP_EVENT_OBSERVE; }
     std::string validate(const Plugin& p, PluginManager& mgr) const override;
@@ -107,6 +104,6 @@ std::string models_json(const PluginManager& mgr, const Config& cfg);
 void resolve_slots(CoreContext& ctx, const PluginManager& mgr);
 
 /* 容器清单 → JSON（GET /plugins 的响应契约：字段名与顺序都在这儿定） */
-json plugins_json(const std::vector<PluginInfo>& list);
+json plugins_json(const std::vector<const Plugin*>& list);
 
 } // namespace realagent

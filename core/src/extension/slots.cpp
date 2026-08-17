@@ -20,66 +20,60 @@ constexpr const char* kKnownCaps[] = {
     REALAGENT_CAP_PERMISSION,    REALAGENT_CAP_MODEL_LIST,      REALAGENT_CAP_EVENT_OBSERVE,
 };
 
-/* GET /plugins 的响应契约：字段名与顺序就是这张结构体声明。
- * 它住在 core 这边——realugin 的 PluginInfo 是加载器的内部快照，不该替宿主定响应格式。 */
-struct PluginWire {
-    std::string name;
-    std::string version;
-    std::vector<std::string> capabilities;
-    std::string description;
-    std::string dir;
-    std::string status;
-    std::string error;
-    std::vector<std::string> deps;
-};
-BOOST_DESCRIBE_STRUCT(PluginWire, (),
-                      (name, version, capabilities, description, dir, status, error, deps))
-
 } // namespace
 
 /* —— 具名条目的对外视图：现问现答，不留副本 —— */
 
+namespace {
+/* 工具与命令的取法是同一件事：问每个容器要清单，给每条加上容器前缀。
+ * 差异只有三处，全在调用点的三个实参上：能力键、条目类型、前缀分隔符。 */
+template <class Def, class ListFn>
+std::vector<EntryView<Def>> entries_of(const PluginManager& mgr, const char* cap, char sep) {
+    std::vector<EntryView<Def>> out;
+    for (Plugin* p : mgr.plugins()) {
+        auto list = cap_of<ListFn>(*p, cap);
+        if (!list) continue;
+        const Def* defs = nullptr;
+        const size_t n = list.fn(list.self, &defs);
+        for (size_t i = 0; i < n && defs; ++i) {
+            const std::string base = defs[i].name ? defs[i].name : "";
+            out.push_back({p->prefix.empty() ? base : p->prefix + sep + base, &defs[i], p});
+        }
+    }
+    return out;
+}
+} // namespace
+
+// 工具名要能进 LLM 的函数名位，分隔符只能用 '_'
 std::vector<ToolView> tools_of(const PluginManager& mgr) {
-    std::vector<ToolView> out;
-    for (const auto& p : mgr.plugins()) {
-        auto list = cap_of<realagent_tool_list_fn>(*p, REALAGENT_CAP_TOOL_LIST);
-        if (!list) continue;
-        const realagent_tool_t* defs = nullptr;
-        const size_t n = list.fn(list.self, &defs);
-        for (size_t i = 0; i < n && defs; ++i) {
-            const std::string base = defs[i].name ? defs[i].name : "";
-            // 工具名要能进 LLM 的函数名位，分隔符只能用 '_'
-            out.push_back(
-                ToolView{p->prefix.empty() ? base : p->prefix + "_" + base, &defs[i], p.get()});
-        }
-    }
-    return out;
+    return entries_of<realagent_tool_t, realagent_tool_list_fn>(mgr, REALAGENT_CAP_TOOL_LIST, '_');
 }
 
+// 斜杠命令的习惯写法是 <容器>:<命令>
 std::vector<CommandView> commands_of(const PluginManager& mgr) {
-    std::vector<CommandView> out;
-    for (const auto& p : mgr.plugins()) {
-        auto list = cap_of<realagent_command_list_fn>(*p, REALAGENT_CAP_COMMAND_LIST);
-        if (!list) continue;
-        const realagent_command_t* defs = nullptr;
-        const size_t n = list.fn(list.self, &defs);
-        for (size_t i = 0; i < n && defs; ++i) {
-            const std::string base = defs[i].name ? defs[i].name : "";
-            // 斜杠命令的习惯写法是 <容器>:<命令>
-            out.push_back(
-                CommandView{p->prefix.empty() ? base : p->prefix + ":" + base, &defs[i], p.get()});
-        }
-    }
-    return out;
+    return entries_of<realagent_command_t, realagent_command_list_fn>(
+        mgr, REALAGENT_CAP_COMMAND_LIST, ':');
 }
 
-json plugins_json(const std::vector<PluginInfo>& list) {
-    std::vector<PluginWire> wire;
-    wire.reserve(list.size());
-    for (const auto& i : list)
-        wire.push_back(PluginWire{i.name, i.version, i.capabilities, i.description, i.dir,
-                                  realugin::to_string(i.status), i.error, i.deps});
-    return json(to_json(wire));
+/* GET /plugins 的响应契约：字段名、顺序、每个值从哪儿来，全在这一处。
+ * 它住在 core 这边——realugin 的 Plugin 是加载器的内部节点，不该替宿主定响应格式
+ * （ADR-0014 决策 4）。中间不摆一层 wire 结构体：那层的字段名与顺序确实是声明式的，
+ * 但值还是要手写逐个搬（status 还得手工 to_string），于是只剩一个类型和一趟拷贝。 */
+json plugins_json(const std::vector<const Plugin*>& list) {
+    boost::json::array out;
+    out.reserve(list.size());
+    for (const auto* p : list)
+        out.push_back(boost::json::object{
+            {"name", p->name},
+            {"version", p->version},
+            {"capabilities", boost::json::value_from(p->capabilities)},
+            {"description", p->description},
+            {"dir", p->dir},
+            {"status", realugin::to_string(p->status)},
+            {"error", p->error},
+            {"deps", boost::json::value_from(p->deps)},
+        });
+    return json(boost::json::value(std::move(out)));
 }
 
 /* —— CoreHost：realugin 问，core 答 —— */
@@ -134,12 +128,12 @@ bool CoreHost::unprefixed(const std::string& plugin_name) const {
     return false;
 }
 
-std::vector<std::string> CoreHost::extra_deps(const realugin::Manifest& m) const {
+std::vector<std::string> CoreHost::extra_deps(const realugin::Plugin& p) const {
     // protocol 是 Provider 壳专有的可选键：它绑定哪个协议容器，自带一条依赖边。
     // 交给 realugin 当普通 deps 用，图上就不留暗边。
-    const auto it = m.extra.find("protocol");
-    if (it == m.extra.end() || it->second.empty()) return {};
-    return {it->second};
+    const auto proto = p.meta("protocol");
+    if (proto.empty()) return {};
+    return {proto};
 }
 
 bool CoreHost::knows_capability(const char* cap) const {

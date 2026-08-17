@@ -59,6 +59,10 @@ realagent 的词汇搬进自己的 SDK 头 `core/sdk/realagent/agent_caps.h`：�
 （附 `to_string`）。`GET /plugins` 的字段名与顺序落在 `slots.cpp` 的 `PluginWire`
 上——描述宏跟着契约走，不跟着加载器的内部快照走。realugin 因此不再依赖 Boost.Describe。
 
+- 实况注（2026-08-16）：**`PluginInfo` 与 `PluginWire` 均已删除**（ADR-0015）。
+  "响应契约归 core、realugin 不依赖 Boost.Describe"这一条不变，落点变了：
+  契约现在就是 `plugins_json` 里那串 `boost::json::object` 字面量，不再有中间结构体。
+
 **5. C ABI 公开标识符一律 `realugin_` / `REALUGIN_`，含入口符号。**
 
 `plugin_create` → `realugin_plugin_create`。它是唯一真住在动态符号表里的名字，

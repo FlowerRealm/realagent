@@ -52,10 +52,6 @@ static int run_tool_test(CoreContext& ctx, PluginManager& mgr) {
     return 0;
 }
 
-/* GET /plugins 响应：字段名与顺序在 extension/slots.cpp 的 PluginWire 上（ADR-0013：
- * 响应契约是 core 的词汇，realugin 的 PluginInfo 只是加载器的内部快照）。 */
-static json plugins_payload(const std::vector<PluginInfo>& list) { return plugins_json(list); }
-
 /* /model 响应：当前 provider 的模型清单（现问现答，core 不存表——ADR-0012）。
  * current 标出配置里当前那档。没有 provider 就没有清单可谈。 */
 static json models_payload(const CoreContext& ctx, const PluginManager& mgr) {
@@ -383,7 +379,7 @@ int main(int argc, char** argv) {
             json out;
             out["ok"] = true;
             out["command"] = "plugins";
-            out["data"] = plugins_payload(mgr.list());
+            out["data"] = plugins_json(mgr.list());
             return out.dump();
         }
         // 插件提供的命令（ADR-0012：现问现答 + 按名分发，命令定义里不带函数指针）
@@ -467,7 +463,7 @@ int main(int argc, char** argv) {
     };
     // —— 插件管理端点（TUI /plugins 命令的数据源） ——
     // 写操作锁 agent_mtx（对齐 /new 线程纪律：与 agent 运行互斥，避免执行中装卸容器）
-    cbs.on_plugins = [&mgr]() { return plugins_payload(mgr.list()).dump(); };
+    cbs.on_plugins = [&mgr]() { return plugins_json(mgr.list()).dump(); };
     // 状态栏数据（GET /statusline）：客户端启动时拉一次，之后由 statusline 帧推更新
     cbs.on_statusline = [&ctx, &mgr]() { return statusline_payload(ctx, mgr).dump(); };
     cbs.on_plugin_enable = [&mgr, &agent_mtx](const std::string& name) {
