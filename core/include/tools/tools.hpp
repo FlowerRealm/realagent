@@ -1,0 +1,49 @@
+/*
+ * tools.hpp — 内置工具：read / edit / bash
+ *
+ * edit 的 +x-0（文件不存在则创建，old_string 为空则追加）= 创建语义，
+ * 所以没有独立的 write 工具。
+ *
+ * 中止（ADR-0002 R8）：只有 bash 需要——它是唯一会跑很久的那个。
+ * 中止请求从事件循环线程进来，读循环在 agent 线程；单 agent 内工具严格顺序执行，
+ * 同时至多一个子进程，一个 pid 就记得住，不需要表。
+ */
+#pragma once
+
+#include <span>
+#include <string>
+
+#include "context.hpp"
+#include "json.hpp"
+
+namespace realagent {
+
+/* 工具定义。dangerous = 执行前触发权限检查点 */
+struct ToolDef {
+    std::string name;
+    std::string label;       // UI 显示名
+    std::string description; // 发给 LLM 的描述
+    std::string parameters;  // 参数 JSON Schema
+    bool dangerous = false;
+};
+
+/* 工具清单（静态表，寿命 = 进程） */
+std::span<const ToolDef> tool_defs();
+
+/* 按名查定义；没有返回 nullptr */
+const ToolDef* find_tool(std::string_view name);
+
+struct ToolResult {
+    int status = 0;       // 0 = 成功
+    std::string messages; // JSON 文本
+};
+
+/* 执行。call_id 透传进实时输出帧（tool_output），客户端靠它认领是哪次调用。 */
+ToolResult run_tool(const std::string& call_id, const std::string& name,
+                    const std::string& params_json, const EmitFn& emit);
+
+/* 中止在跑的 bash（任意线程）。手上没有在跑的就什么都不做——
+ * "下一次调用该不该拒"是 executor 的账，记在这里只会变成一个迟早过期的标志位。 */
+void interrupt_tool();
+
+} // namespace realagent

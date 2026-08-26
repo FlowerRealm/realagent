@@ -4,10 +4,10 @@
  * 直接编译 src/config.cpp，不起服务、不碰网络。验证（ADR-0010）：
  *   - 默认树打底：文件不存在 / 空对象 / 只配一部分，都不是错，没配的取默认值
  *   - settings.json 坏了 → load 失败（不静默跳过，读不懂就别往下跑）
- *   - 覆盖生效、两档模型各取各的；small_model 空就是空串（core 不回落主模型）
+ *   - 覆盖生效、两档模型各取各的（不做档位回落）
  *   - 唯一来源：全局 ~/.realagent/settings.json，不看 cwd
  *   - session_dir 是 core 常量：settings.json 写什么都不生效
- *   - 合并粒度：对象递归合并（嵌套默认值不被顶层替换带走），数组整个替换
+ *   - 合并粒度：文件里的键覆盖默认，未提及的默认原样保留
  *   - persist 点对点：只改目标键，用户文件其余原样，默认值不渗进文件
  *   - persist 的两个边界：文件不存在按空对象起头；文件坏了拒绝写入
  *
@@ -63,7 +63,7 @@ static std::string read_settings_raw(const fs::path& home) {
     return std::string((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
 }
 
-/* 四个协议链配置齐活的一份配置 */
+/* 端点配置齐活的一份配置 */
 static const char* k_full =
     R"({"api_key":"sk-test","base_url":"https://example.test/anthropic",)"
     R"("model":"m-main","small_model":"m-small"})";
@@ -78,19 +78,26 @@ int main() {
         // 文件不存在与空对象是两条不同的读取路径（nullopt vs 空树），都该取到默认
         remove_settings(home);
         const auto none = Config::load();
-        CHECK(none.has_value() && none->get("model").empty(), "文件不存在 → 成功，取默认空串");
+        CHECK(none.has_value(), "文件不存在 → load 成功（缺配置不是 load 的错）");
+        CHECK(none.has_value() && none->get("permission") == "ask",
+              "有默认值的键取到默认");
+        CHECK(none.has_value() && none->get("model").empty(),
+              "端点那一束没有默认值（ADR-0017）：model 是空的，不替用户猜一个");
+        CHECK(none.has_value() && none->get("base_url").empty(), "base_url 同上");
+        CHECK(none.has_value() && none->get("protocol").empty(), "protocol 同上");
 
         write_settings(home, "{}");
         const auto empty = Config::load();
-        CHECK(empty.has_value() && empty->has("plugins"), "空对象 → 成功，默认树的 plugins 节在");
+        CHECK(empty.has_value() && empty->get("permission") == "ask",
+              "空对象 → 成功，默认树在（权限默认 ask，不是 allow）");
 
         write_settings(home, R"({"api_key":"sk-only"})");
         const auto partial = Config::load();
-        CHECK(partial.has_value(), "只配一个键 → 成功（没有必需键这回事）");
+        CHECK(partial.has_value(), "只配一个键 → load 成功（必填键的检查不在 load 这一层）");
         if (partial) {
             CHECK(partial->get("api_key") == "sk-only", "配了的用文件里的值");
-            CHECK(partial->get("base_url").empty(),
-                  "没配的取默认空串（不带供应商身份，也不用假 URL 占位）");
+            CHECK(partial->get("small_model").empty(), "没配的取默认（这个默认就是空串）");
+            CHECK(partial->get("permission") == "ask", "没配的取默认（这个默认有值）");
         }
     }
 
@@ -115,12 +122,13 @@ int main() {
         }
     }
 
-    printf("== core 不做档位回落：small_model 空就是空串 ==\n");
+    printf("== 不做档位回落：小模型是独立一档 ==\n");
     {
+        // 只配主模型：小模型取默认树里的那个，不是"跟着主模型走"
         write_settings(home, R"({"model":"m-main"})");
         const auto r = Config::load();
-        CHECK(r.has_value() && r->model(ModelTier::Small).empty(),
-              "缺 small_model → 空串下传，core 不替它填主模型");
+        CHECK(r.has_value() && r->model(ModelTier::Small) != "m-main",
+              "缺 small_model → 取默认档，不替它填主模型");
     }
 
     printf("== cwd 不参与配置：换个目录结果不变 ==\n");
@@ -142,23 +150,19 @@ int main() {
               "settings.json 写它不生效");
     }
 
-    printf("== 合并粒度：对象递归合并，数组整个替换 ==\n");
+    printf("== 合并粒度：文件里的键覆盖默认，未提及的默认原样保留 ==\n");
     {
-        // 默认树里 plugins 下有 disabled；文件只写 plugins.extra，
-        // 顶层整键替换会带走 disabled，递归合并不会
-        write_settings(home, R"({"plugins":{"extra":1}})");
+        // 默认树是平的（ADR-0016 删掉 plugins 那一节之后没有嵌套配置项），
+        // 所以合并就是逐键覆盖，没有递归那回事。
+        write_settings(home, R"({"model":"m-only"})");
         const auto r = Config::load();
         CHECK(r.has_value(), "load 成功");
         if (r) {
-            const json p = r->to_json()["plugins"];
-            CHECK(p["disabled"].is_array(), "嵌套默认值没被顶层替换带走");
-            CHECK(p["extra"].as_int64().value_or(0) == 1, "文件里的嵌套键生效");
+            CHECK(r->model(ModelTier::Main) == "m-only", "文件里的键生效");
+            CHECK(r->get("permission") == "ask", "没提及的默认键原样在，不被顶层替换带走");
+            CHECK(r->get("base_url").empty(),
+                  "没提及、也没有默认值的键就是空——不是丢了默认，是本来就没有");
         }
-
-        write_settings(home, R"({"plugins":{"disabled":["perm-ask"]}})");
-        const auto r2 = Config::load();
-        CHECK(r2.has_value() && r2->to_json()["plugins"]["disabled"].size() == 1,
-              "数组整个替换，不与默认空数组做追加");
     }
 
     printf("== persist 点对点：只改目标键，默认值不渗进文件 ==\n");
@@ -176,7 +180,7 @@ int main() {
                 CHECK((*on_disk)["model"].as_string().value_or("") == "m-new", "目标键写进去了");
                 CHECK((*on_disk)["api_key"].as_string().value_or("") == "sk-test",
                       "用户原有的键原样保留");
-                // size==2 一并覆盖了 small_model / plugins 等默认值没被写进来
+                // size==2 一并覆盖了 small_model / permission 等默认值没被写进来
                 CHECK(on_disk->size() == 2, "文件里只有用户配过的两个键，默认值没渗进去");
             }
         }

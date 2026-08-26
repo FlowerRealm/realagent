@@ -4,7 +4,7 @@
 // 要发的整条命令（submit）。确认 = 把 submit 写进输入框走 submitInput——
 // 和用户自己打出来那条路一模一样，没有第二套提交逻辑，也就没有第二套 bug。
 //
-// 面板数据不新增端点：core 的 /model /plugins 回包本来就带 data 载荷，
+// 面板数据不新增端点：core 的 /model /resume 回包本来就带 data 载荷，
 // 原先拿它渲染文本，现在拿它渲染可选项。
 package main
 
@@ -39,10 +39,6 @@ func makePanel(command string, data json.RawMessage) *panel {
 	switch command {
 	case "model":
 		return modelPanel(data)
-	case "plugins":
-		return pluginsPanel(data)
-	case "provider":
-		return providerPanel(data)
 	case "resume":
 		return sessionPanel(data)
 	}
@@ -65,21 +61,6 @@ func modelPanel(data json.RawMessage) *panel {
 			text += "  " + c
 		}
 		p.items = append(p.items, panelItem{label: text, mark: mi.Current, submit: "/model " + mi.Name})
-	}
-	p.sel = p.markIndex()
-	return p
-}
-
-// providerPanel 把 /provider 的候选清单做成选择面板：Enter = 切当前 provider
-func providerPanel(data json.RawMessage) *panel {
-	var list []client.ProviderInfo
-	if err := json.Unmarshal(data, &list); err != nil || len(list) == 0 {
-		return nil
-	}
-	p := &panel{title: "选择 Provider"}
-	for _, pi := range list {
-		text := fmt.Sprintf("%s  %d 个模型", pi.Name, pi.Models)
-		p.items = append(p.items, panelItem{label: text, mark: pi.Current, submit: "/provider " + pi.Name})
 	}
 	p.sel = p.markIndex()
 	return p
@@ -108,38 +89,6 @@ func sessionPanel(data json.RawMessage) *panel {
 	return p
 }
 
-// pluginsPanel 把 /plugins 的插件清单做成启停面板：Enter = 反转当前状态。
-// loaded 之外（disabled / failed）一律按「可启用」处理——failed 的重载一次
-// 正是用户想干的事，让他试。
-func pluginsPanel(data json.RawMessage) *panel {
-	var list []client.PluginInfo
-	if err := json.Unmarshal(data, &list); err != nil || len(list) == 0 {
-		return nil
-	}
-	p := &panel{title: "插件启停（Enter 切换）"}
-	for _, pl := range list {
-		on := pl.Status == "loaded"
-		action := "enable"
-		if on {
-			action = "disable"
-		}
-		text := pl.Name
-		if pl.Version != "" {
-			text += " v" + pl.Version
-		}
-		if len(pl.Capabilities) > 0 {
-			text += " [" + strings.Join(pl.Capabilities, ",") + "]"
-		}
-		text += "  " + pl.Status
-		if pl.Status == "failed" && pl.Error != "" {
-			text += "  " + pl.Error
-		}
-		p.items = append(p.items, panelItem{label: text, mark: on, submit: "/plugins " + action + " " + pl.Name})
-	}
-	p.sel = p.markIndex()
-	return p
-}
-
 // markIndex 返回当前生效项的下标（没有则 0）：打开面板时光标就落在那儿
 func (p *panel) markIndex() int {
 	for i, it := range p.items {
@@ -153,24 +102,15 @@ func (p *panel) markIndex() int {
 // panelWantOf 判断一条输入的结果该不该开面板。fromPanel = 这条输入是面板里
 // 确认出来的（启停类操作改完接着操作，面板不该自己跑掉）。
 //
-//	/model            列清单 → 开面板选；/model <name> 是明确指令，选完即走
-//	/provider         同 /model：列候选 → 开面板选
-//	/plugins [...]    列表与启停回的是同一份全量清单 → 面板里连续启停不用重打命令
-//	/statusline       同上，纯本地
+//	/model      列清单 → 开面板选；/model <name> 是明确指令，选完即走
+//	/resume     列会话 → 开面板选
+//	/statusline 纯本地，列表与切换回的是同一份清单 → 面板里连续操作不用重打命令
 func panelWantOf(input string, fromPanel bool) string {
 	cmd, args := splitCommand(input)
 	switch cmd {
 	case "/model":
 		if args == "" {
 			return "model"
-		}
-	case "/provider":
-		if args == "" {
-			return "provider"
-		}
-	case "/plugins":
-		if args == "" || fromPanel {
-			return "plugins"
 		}
 	case "/resume":
 		if args == "" {

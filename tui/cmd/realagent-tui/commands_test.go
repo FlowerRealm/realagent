@@ -1,4 +1,4 @@
-// /plugins 命令结果的渲染测试：Data 载荷 → info 消息、失败 → error 消息。
+// 斜杠命令结果的渲染测试：Data 载荷 → info 消息、失败 → error 消息。
 package main
 
 import (
@@ -9,52 +9,48 @@ import (
 	"realagent/tui/internal/client"
 )
 
-func TestRenderPlugins(t *testing.T) {
-	data, _ := json.Marshal([]client.PluginInfo{
-		{Name: "core-tools", Version: "1.0", Capabilities: []string{"tool"}, Status: "loaded"},
-		{Name: "session-manager", Version: "0.2", Status: "disabled"},
-		{Name: "broken", Version: "0.1", Capabilities: []string{"protocol", "models"}, Status: "failed", Error: "dlopen: not found"},
+func TestRenderModels(t *testing.T) {
+	data, _ := json.Marshal([]client.ModelInfo{
+		{Name: "deepseek-v4-flash", OwnedBy: "deepseek", Context: 1048576, Current: true},
+		{Name: "deepseek-v4-pro", OwnedBy: "deepseek", Context: 1048576},
 	})
-	got := renderPlugins(data)
-	for _, want := range []string{"core-tools", "v1.0", "[tool]", "session-manager", "disabled", "broken", "[protocol,models]", "dlopen: not found"} {
+	got := renderModels(data)
+	for _, want := range []string{"deepseek-v4-flash", "deepseek-v4-pro", "deepseek", "●"} {
 		if !strings.Contains(got, want) {
-			t.Errorf("renderPlugins 应包含 %q，got %q", want, got)
+			t.Errorf("renderModels 应包含 %q，got %q", want, got)
 		}
 	}
 }
 
-func TestRenderPluginsEmpty(t *testing.T) {
-	got := renderPlugins(json.RawMessage(`[]`))
-	if !strings.Contains(got, "未发现") {
-		t.Errorf("空列表应提示未发现，got %q", got)
+func TestRenderModelsBadPayload(t *testing.T) {
+	got := renderModels(json.RawMessage(`{`))
+	if got == "" {
+		t.Error("载荷解析失败应降级为通用提示，而不是空串")
 	}
 }
 
-// /plugins 失败（ok:false + error）应渲染为 error 行
-func TestPluginsErrorRendered(t *testing.T) {
+// 命令带 command 名失败（ok:false + error）应渲染为 error 行，不去渲染空的 data
+func TestNamedCommandErrorRendered(t *testing.T) {
 	m := testModel()
 	m.awaiting = true
-	nm, _ := m.Update(sendMsg{reply: client.Reply{Ok: false, Command: "plugins", Error: "plugin enable failed: x"}})
+	nm, _ := m.Update(sendMsg{reply: client.Reply{Ok: false, Command: "model", Error: "unknown model: x"}})
 	m = nm.(model)
 	if len(m.pend) != 1 || m.pend[0].role != "error" {
-		t.Fatalf("plugins 失败应为 error 行，got %+v", m.pend)
+		t.Fatalf("命令失败应为 error 行，got %+v", m.pend)
 	}
-	if !strings.Contains(m.pend[0].text, "plugin enable failed") {
+	if !strings.Contains(m.pend[0].text, "unknown model") {
 		t.Errorf("error 应透传 core 错误，got %q", m.pend[0].text)
 	}
 }
 
-// 多插件列表拆成多行进行流（一行一个插件，各自独立折行）
-func TestPluginsListSplitsLines(t *testing.T) {
+// 多条清单拆成多行进行流（一行一条，各自独立折行）
+func TestModelListSplitsLines(t *testing.T) {
 	m := testModel()
 	m.awaiting = true
-	data, _ := json.Marshal([]client.PluginInfo{
-		{Name: "a", Status: "loaded"},
-		{Name: "b", Status: "loaded"},
-	})
-	nm, _ := m.Update(sendMsg{reply: client.Reply{Ok: true, Command: "plugins", Data: data}})
+	data, _ := json.Marshal([]client.ModelInfo{{Name: "a"}, {Name: "b"}})
+	nm, _ := m.Update(sendMsg{reply: client.Reply{Ok: true, Command: "model", Data: data}})
 	m = nm.(model)
 	if len(m.pend) != 2 {
-		t.Fatalf("两个插件应占 2 行，got %v", pendTexts(m))
+		t.Fatalf("两个模型应占 2 行，got %v", pendTexts(m))
 	}
 }

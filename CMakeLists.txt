@@ -8,9 +8,6 @@ endif()
 
 project(realagent CXX)
 
-# realugin（插件体系）默认装在 ~/.local。装到别处就自己给 -DCMAKE_PREFIX_PATH=...
-list(APPEND CMAKE_PREFIX_PATH "$ENV{HOME}/.local")
-
 enable_testing()
 
 add_subdirectory(core)

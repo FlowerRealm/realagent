@@ -10,11 +10,11 @@ import (
 )
 
 func outputEvent(text string) client.Event {
-	b, _ := json.Marshal(map[string]string{"call_id": "t1", "stream": "stdout", "text": text})
+	b, _ := json.Marshal(map[string]string{"call_id": "t1", "stream": "output", "text": text})
 	return client.Event{Type: "tool_output", Payload: string(b)}
 }
 
-// 插件按行推，超长行会被切成几帧：客户端要把它们拼回用户看到的那一行。
+// core 按行推，超长行会被切成几帧：客户端要把它们拼回用户看到的那一行。
 func TestToolOutputJoinsSplitFrames(t *testing.T) {
 	m := testModel()
 	feedEvents(&m,

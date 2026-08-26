@@ -1,33 +1,35 @@
 /*
  * approval.hpp — 审批协调器（权限检查点 ASK 状态机）
  *
- * ADR-0005：core 永远是审批发起方。权限插件返回 ASK 时，agent 线程阻塞
- * 等待用户裁决（绝不按 allow 放行），事件循环线程收 POST /approval-response 后唤醒。
+ * ADR-0005：core 永远是审批发起方。裁决为 ASK 时，agent 线程阻塞等待用户裁决
+ * （绝不按 allow 放行），事件循环线程收 POST /approval-response 后唤醒。
  *
- * 流程（ADR-0005 审批等待实现）：
- *   executor 检查点 → 权限插件 ASK → ApprovalCoordinator::await
+ * 流程：
+ *   executor 检查点 → 裁决 ASK → ApprovalCoordinator::await
  *     → 发 permission_request（入事件队列 → 推送流）→ 阻塞（条件变量，30s 超时 deny）
  *     → 事件循环收 /approval-response → respond() 设置裁决 + notify
- *     → agent 线程继续，裁决交给权限插件语义
+ *     → agent 线程继续
  */
 #pragma once
 
 #include <condition_variable>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <unordered_map>
 
-#include <realagent/agent_caps.h>
-
 namespace realagent {
 
+/* 权限裁决。ASK 不是第三种结论，是"这一条得问人"——问完仍然只有放行与拒绝。 */
+enum class Verdict { Allow, Deny, Ask };
+
 struct PendingApproval {
-    std::string id;        // 请求 ID（permission_request / approval-response 关联）
+    std::string id; // 请求 ID（permission_request / approval-response 关联）
     std::string tool_name;
     std::string params;
-    realagent_permission_t verdict = REALAGENT_PERM_DENY;
+    Verdict verdict = Verdict::Deny;
     bool responded = false;
     std::mutex mtx;
     std::condition_variable cv;
@@ -44,7 +46,7 @@ public:
     }
 
     /* agent 线程：请求审批，阻塞直到裁决。30s 超时按 deny（危险工具默认拒绝）。 */
-    realagent_permission_t await(const std::string& tool_name, const std::string& params);
+    Verdict await(const std::string& tool_name, const std::string& params);
 
     /* 事件循环线程：收到 /approval-response 裁决 */
     void respond(const std::string& id, bool allow);

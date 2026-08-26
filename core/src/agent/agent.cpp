@@ -4,13 +4,16 @@
 
 #include <cstdio>
 #include <cstdlib>
-#include <algorithm>
 
 namespace realagent {
 
-Agent::Agent(CoreContext& ctx, PluginManager& plugins, Executor& exe)
-    : ctx_(ctx), plugins_(plugins), exe_(exe) {
+Agent::Agent(CoreContext& ctx, Executor& exe) : ctx_(ctx), exe_(exe) {
     messages_ = json::array();
+    // 模型数据表读一次。读不动就报出来，之后照常跑——没有表只是不算钱，
+    // 不是"不能对话"，为它拒绝启动是把一个次要功能提成了必需品
+    std::string err;
+    pricing_ = Pricing::load(*ctx_.config, &err);
+    if (!err.empty()) fprintf(stderr, "[llm] %s（本次运行不计价）\n", err.c_str());
 }
 
 void Agent::reset() {
@@ -47,18 +50,17 @@ void Agent::broadcast(const std::string& type, const json& payload) {
     if (ctx_.emit_fn) ctx_.emit_fn(type, payload.dump());
 }
 
-/* parse_feed 事件接收器（协议插件 → agent）——前向声明 */
-static void feed_sink(void* sink_ctx, const char* type, const char* payload);
-
-/* —— curl 写回调：把响应体 chunk feed 给协议插件 parse_feed —— */
-
-struct CurlSink {
-    const CapabilitySlots* slots; // 管线的解析段与计价段
+/* 一次 LLM 调用期间的流式状态：解析器 + 落点。
+ * 解析器按调用建、按调用扔——上一轮的半截 SSE 缓冲绝不该漏进下一轮。 */
+struct StreamCtx {
+    Agent* self;
+    CURL* curl = nullptr;   // 写回调里问状态码要用（头已经收完了，问得到）
+    SseParser parser;       // 协议决定怎么解，一次调用一个实例
     LlmOutcome* out;
-    CoreContext* ctx;
-    const double* base; // 已完成 turn 的累计花费（本次调用的钱加在它上面才是 run 累计）
-    const std::atomic<bool>* abort;
-    bool parse_failed = false; // 协议插件报了 REALUGIN_ERR：与用户中断区分开
+    std::string model;      // 本次调用的模型名（计价按它查单价）
+    bool parse_failed = false; // 解析报错：与用户中断区分开
+    long status = 0;         // 首次拿到响应体时问一次 HTTP 状态码
+    std::string error_body;  // 状态码不是 2xx 时，响应体不是流，攒起来给人看
 };
 
 static int curl_progress_cb(void* clientp, curl_off_t, curl_off_t, curl_off_t, curl_off_t) {
@@ -67,80 +69,68 @@ static int curl_progress_cb(void* clientp, curl_off_t, curl_off_t, curl_off_t, c
 }
 
 static size_t curl_write_cb(char* ptr, size_t size, size_t nmemb, void* userdata) {
-    auto* s = static_cast<CurlSink*>(userdata);
-    if (s->abort && s->abort->load()) return 0;
+    auto* s = static_cast<StreamCtx*>(userdata);
     const size_t n = size * nmemb;
-    char* chunk = static_cast<char*>(malloc(n + 1));
-    if (!chunk) return 0;
-    memcpy(chunk, ptr, n);
-    chunk[n] = '\0';
-    const auto& parse = s->slots->parse;
-    const realugin_status_t rc = parse.fn(parse.self, chunk, feed_sink, s);
-    free(chunk);
-    // 协议插件解析失败：立刻中止传输。继续读下去只会攒出一个"成功但空"的回答，
+
+    /* 先看状态码，再谈解析（ADR-0017）。curl 对 401/500 一律返回 CURLE_OK——
+     * HTTP 层的失败不是传输层的失败。错误体不是 SSE：喂给解析器切不出事件块，
+     * 最后攒出一个"成功但空"的回答，用户看不出发生了什么，会话里还留下一条空消息。 */
+    if (s->status == 0) curl_easy_getinfo(s->curl, CURLINFO_RESPONSE_CODE, &s->status);
+    if (s->status >= 400) {
+        // 攒错误体给人看，别喂解析器。攒够 8KB 就够说明问题了
+        if (s->error_body.size() < 8192) s->error_body.append(ptr, n);
+        return n;
+    }
+
+    const bool ok = s->parser.feed(std::string_view(ptr, n), [s](std::string_view t, const json& ev) {
+        s->self->on_llm_event(t, ev, *s->out, s->model);
+    });
+    // 解析失败：立刻中止传输。继续读下去只会攒出一个"成功但空"的回答，
     // 那比报错更糟——用户看不出发生了什么。（返回 < n 即令 curl 报 CURLE_WRITE_ERROR）
-    if (rc != REALUGIN_OK) {
+    if (!ok) {
         s->parse_failed = true;
         return 0;
     }
     return n;
 }
 
-/* parse_feed 事件接收器（协议插件 → agent） */
-static void feed_sink(void* sink_ctx, const char* type, const char* payload) {
-    auto* s = static_cast<CurlSink*>(sink_ctx);
-    auto* out = s->out;
-    const json ev = json::parse(payload).value_or(json{});
-    const std::string t(type ? type : "");
-    if (t == "message_update") {
-        out->text += ev["delta"].as_string().value_or("");
-        // 实时广播增量（推送流 → TUI 打字效果）
-        if (s->ctx->emit_fn) s->ctx->emit_fn("message_update", payload);
-    } else if (t == "thinking_start") {
-        out->thinking_signature = ev["signature"].as_string().value_or("");
-        // 实时广播（推送流 → TUI 思考块生命周期：开始）
-        if (s->ctx->emit_fn) s->ctx->emit_fn("thinking_start", payload);
-    } else if (t == "thinking_update") {
-        out->thinking += ev["delta"].as_string().value_or("");
-        // 实时广播增量（推送流 → TUI 思考块打字效果）
-        if (s->ctx->emit_fn) s->ctx->emit_fn("thinking_update", payload);
-    } else if (t == "thinking_stop") {
-        // 思考块结束：thinking 已累积；广播收尾帧
-        if (s->ctx->emit_fn) s->ctx->emit_fn("thinking_stop", payload);
-    } else if (t == "usage") {
-        // 计价段（ADR-0009/0012）：token 用量换成钱，**usage 事件本身不再上传**——
-        // core 不认识 token。算不出（无计价段 / 表里没这个模型）就什么都不发，不发 0
-        const auto& meter = s->slots->meter;
-        if (!meter) return;
-        const double cost = meter.fn(meter.self, payload);
+void Agent::on_llm_event(std::string_view type, const json& ev, LlmOutcome& out,
+                         const std::string& model) {
+    if (type == "message_update") {
+        out.text += ev["delta"].as_string().value_or("");
+        broadcast("message_update", ev); // 实时增量 → TUI 打字效果
+    } else if (type == "thinking_start") {
+        out.thinking_signature = ev["signature"].as_string().value_or("");
+        broadcast("thinking_start", ev);
+    } else if (type == "thinking_update") {
+        out.thinking += ev["delta"].as_string().value_or("");
+        broadcast("thinking_update", ev);
+    } else if (type == "thinking_stop") {
+        broadcast("thinking_stop", ev);
+    } else if (type == "usage") {
+        // 计价（ADR-0009）：token 用量换成钱，**usage 事件本身不再上传**——
+        // 客户端不认识 token。算不出（表里没这个模型）就什么都不发，不发 0。
+        //
+        // 本次用的是哪个模型，调用方自己知道（就是 dialog["model"]）——
+        // 从前这条信息要靠 provider 壳在改请求时偷偷记一笔，现在直接传进来
+        const double cost = pricing_.cost(model, ev);
         if (cost <= 0) return;
-        out->cost = cost;
+        out.cost = cost;
         json fwd;
-        fwd["cost"] = *s->base + cost; // 推送流里的花费一律是"本次 run 累计"
-        if (s->ctx->emit_fn) s->ctx->emit_fn("status_update", fwd.dump());
-    } else if (t == "tool_use") {
+        fwd["cost"] = run_cost_ + cost; // 推送流里的花费一律是"本次 run 累计"
+        broadcast("status_update", fwd);
+    } else if (type == "tool_use") {
         LlmOutcome::ToolUse tu;
         tu.id = ev["id"].as_string().value_or("");
         tu.name = ev["name"].as_string().value_or("");
         tu.input = ev["input"].is_null() ? "{}" : json(ev["input"]).dump();
-        out->tool_uses.push_back(std::move(tu));
-    } else if (t == "status_update") {
-        // 运行态帧（ADR-0009）：开放键集，core 只认识 cost（要跨 turn 累加），
-        // 其余键原样转发——插件报什么客户端渲染什么，core 不解释、不校验。
-        json fwd = ev;
-        if (ev.contains("cost")) {
-            // 插件给的是本次调用的绝对值（后到覆盖先到），累加只在 Agent 跨 turn 做一次
-            out->cost = ev["cost"].as_double().value_or(0);
-            // 推送流里的花费一律是"本次 run 累计"：已完成 turn + 当前 turn
-            fwd["cost"] = *s->base + out->cost;
-        }
-        if (s->ctx->emit_fn) s->ctx->emit_fn("status_update", fwd.dump());
-    } else if (t == "stop") {
-        out->stop_reason = ev["reason"].as_string().value_or("stop");
+        out.tool_uses.push_back(std::move(tu));
+    } else if (type == "stop") {
+        out.stop_reason = ev["reason"].as_string().value_or("stop");
     }
 }
 
-/* 把 thinking 块追加进 assistant content（Anthropic 格式：thinking + signature）。
+/* 把 thinking 块追加进 assistant content（thinking + signature）。
  * 思考块恒在正文/tool_use 块之前（协议约定顺序）。 */
 static void append_thinking(json& content, const LlmOutcome& out) {
     if (out.thinking.empty()) return;
@@ -152,68 +142,49 @@ static void append_thinking(json& content, const LlmOutcome& out) {
 }
 
 bool Agent::llm_call(const json& dialog, LlmOutcome& out) {
-    // 管线（ADR-0012）：生成请求 → 改请求 →（core 发出）→ 解析响应 → 计价。
-    // 每段一个函数，插件互不认识；agent 只知道"有个东西能干这一段"。
-    const auto& build = ctx_.slots.build;
-    const auto& parse = ctx_.slots.parse;
-    if (!build || !parse) {
-        fprintf(stderr, "[agent] 管线不完整（生成请求 / 解析响应 缺一），无法调用 LLM\n");
+    const HttpRequest req = build_request(*ctx_.config, dialog);
+    if (req.url.rfind("http", 0) != 0) {
+        // base_url 没配全，拼出来的是个相对路径。libcurl 会报一句难懂的错，
+        // 不如在这儿说人话
+        out.error = "base_url 未配置（当前请求 URL: " + req.url + "）";
+        fprintf(stderr, "[agent] %s\n", out.error.c_str());
         return false;
     }
 
-    // 第一段：对话 → 粗请求（转移：core 释放）
-    const std::string dialog_json = dialog.dump();
-    const char* raw = build.fn(build.self, dialog_json.c_str());
-    if (!raw) {
-        fprintf(stderr, "[agent] 生成请求失败\n");
-        return false;
-    }
-    std::string request(raw);
-    std::free(const_cast<char*>(raw));
-
-    // 第二段：粗请求 → 精请求（补端点/模型/凭证）。没有 provider 就原样发出——
-    // 那是"裸协议直连"，端点与凭证得用户自己在配置里写全
-    if (const auto& refine = ctx_.slots.refine) {
-        const char* fine = refine.fn(refine.self, request.c_str());
-        if (!fine) {
-            fprintf(stderr, "[agent] 改请求失败（不拿粗请求硬发）\n");
-            return false;
-        }
-        request.assign(fine);
-        std::free(const_cast<char*>(fine));
-    }
-
-    const auto req = json::parse(request).value_or(json{});
-    const std::string url = req["url"].as_string().value_or("");
-    const std::string body = req["body"].is_null() ? "{}" : json(req["body"]).dump();
-
-    // 第三段：core 发出（网络归 core：超时、中断、证书都只有这一处）
     CURL* curl = curl_easy_init();
     if (!curl) return false;
-    CurlSink sink{&ctx_.slots, &out, &ctx_, &run_cost_, &abort_};
-    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+    // 协议在这一层就定下来：解析器建出来那一刻就知道自己要解哪套帧
+    StreamCtx s{.self = this,
+                .curl = curl,
+                .parser = SseParser(*protocol_from(ctx_.config->get("protocol"))),
+                .out = &out,
+                .model = dialog["model"].as_string().value_or("")};
+    curl_easy_setopt(curl, CURLOPT_URL, req.url.c_str());
     curl_easy_setopt(curl, CURLOPT_POST, 1L);
-    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body.c_str());
+    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, req.body.c_str());
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_write_cb);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &sink);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &s);
     curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
     curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, curl_progress_cb);
     curl_easy_setopt(curl, CURLOPT_XFERINFODATA, &abort_);
     struct curl_slist* hdrs = nullptr;
-    for (const auto& [k, v] : req["headers"].as_object()) {
-        const std::string line = std::string(k) + ": " + json(v).as_string().value_or("");
-        hdrs = curl_slist_append(hdrs, line.c_str());
-    }
+    for (const auto& h : req.headers) hdrs = curl_slist_append(hdrs, h.c_str());
     if (hdrs) curl_easy_setopt(curl, CURLOPT_HTTPHEADER, hdrs);
 
-    CURLcode rc = curl_easy_perform(curl);
-    // 通知解析段流结束（flush）——sink_ctx 必须与 curl 回调一致
-    if (parse.fn(parse.self, nullptr, feed_sink, &sink) != REALUGIN_OK) sink.parse_failed = true;
+    const CURLcode rc = curl_easy_perform(curl);
+    s.parser.flush([](std::string_view, const json&) {});
     curl_easy_cleanup(curl);
     if (hdrs) curl_slist_free_all(hdrs);
 
-    // 解析失败优先报：curl 的 CURLE_WRITE_ERROR 只是我们主动中止的副作用，不是真因
-    if (sink.parse_failed) {
+    // HTTP 状态码优先报：它是最上游的真因。401 的错误体不是流，
+    // 解析器切不出事件也算"没解析失败"——只看 parse_failed 会把认证失败说成成功
+    if (const std::string he = http_status_error(s.status, s.error_body); !he.empty()) {
+        out.error = he;
+        fprintf(stderr, "[agent] %s\n", out.error.c_str());
+        return false;
+    }
+    // 解析失败次之：curl 的 CURLE_WRITE_ERROR 只是我们主动中止的副作用，不是真因
+    if (s.parse_failed) {
         out.error = "解析响应失败（见 core 日志）";
         fprintf(stderr, "[agent] %s\n", out.error.c_str());
         return false;
@@ -228,22 +199,15 @@ bool Agent::llm_call(const json& dialog, LlmOutcome& out) {
 
 json Agent::build_dialog(ModelTier tier) const {
     json dialog;
-    // model 不设供应商默认值——外层 provider 壳插件负责兜底
     dialog["model"] = ctx_.config->model(tier);
     dialog["system"] = "You are a helpful coding agent.";
-    // 工具定义：现问现答（ADR-0012），core 不存表。
-    // 视图里的 name 就是对外名字（带命名空间前缀或短名）——
-    // LLM 见到的名字与 executor 查视图用的名字必须是同一个
+    // 工具定义：静态表，LLM 见到的名字与 executor 查表用的名字是同一个
     json tools = json::array();
-    for (const auto& t : tools_of(plugins_)) {
+    for (const auto& t : tool_defs()) {
         json tool;
         tool["name"] = t.name;
-        tool["description"] = t.def->description;
-        if (const auto schema = json::parse(t.def->parameters ? t.def->parameters : "{}")) {
-            tool["input_schema"] = *schema;
-        } else {
-            tool["input_schema"] = json{};
-        }
+        tool["description"] = t.description;
+        tool["input_schema"] = json::parse(t.parameters).value_or(json{});
         tools.push_back(tool);
     }
     dialog["tools"] = tools;
@@ -363,14 +327,24 @@ void Agent::run(const std::string& user_input) {
             continue;
         }
 
+        // 一个字都没有：这不是一次"内容为空的成功"。空 text 块写进会话就是一块砖——
+        // 下一轮原样回传，而端点拒收空 text 块，那个会话从此每轮都 400。
+        // 报错、不落盘（ADR-0017）
+        if (out.text.empty() && out.thinking.empty()) {
+            broadcast("turn_end", json{{"error", "端点没有返回任何内容（HTTP 2xx 但流里一个事件都没有）"}});
+            fprintf(stderr, "[agent] 空回答：不写入会话\n");
+            break;
+        }
         json am;
         am["role"] = "assistant";
         am["content"] = json::array();
         append_thinking(am["content"], out);
-        json b;
-        b["type"] = "text";
-        b["text"] = out.text;
-        am["content"].push_back(b);
+        if (!out.text.empty()) {
+            json b;
+            b["type"] = "text";
+            b["text"] = out.text;
+            am["content"].push_back(b);
+        }
         record(am);
         broadcast("turn_end", json{{"stop_reason", out.stop_reason}});
         break;

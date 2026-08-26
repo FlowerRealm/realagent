@@ -29,22 +29,8 @@ type Reply struct {
 	Error    string          `json:"error,omitempty"`
 	Ok       bool            `json:"ok,omitempty"`
 	Command  string          `json:"command,omitempty"`
-	Data     json.RawMessage `json:"data,omitempty"` // 斜杠命令结果载荷（/plugins 的 []PluginInfo JSON）
+	Data     json.RawMessage `json:"data,omitempty"` // 斜杠命令结果载荷（如 /model 的 []ModelInfo JSON）
 	Messages int             `json:"messages,omitempty"`
-}
-
-// PluginInfo 是一条插件记录（GET /plugins，status: loaded/disabled/failed + error）。
-type PluginInfo struct {
-	Name    string `json:"name"`
-	Version string `json:"version"`
-	// 该插件实际提供的能力（protocol / tool / permission / models），由 core 从
-	// 非空函数指针派生（ADR-0011）。插件没有类型，这里也就不再有 type 字段。
-	Capabilities []string `json:"capabilities"`
-	Description  string   `json:"description"`
-	Dir          string   `json:"dir"`
-	Status       string   `json:"status"`
-	Error        string   `json:"error"`
-	Deps         []string `json:"deps"`
 }
 
 // Command 是一条可用的斜杠命令（GET /commands，core 是唯一真相源）
@@ -171,17 +157,8 @@ func (c *Client) postJSON(path string, body any) (Reply, error) {
 	return r, nil
 }
 
-// FetchPlugins 拉取插件列表（GET /plugins，含 loaded/disabled/failed 全部状态）。
-func (c *Client) FetchPlugins() ([]PluginInfo, error) {
-	var list []PluginInfo
-	if err := c.getJSON("/plugins", &list); err != nil {
-		return nil, err
-	}
-	return list, nil
-}
-
 // ModelInfo 是一条模型记录（/model 命令的 data 载荷）。
-// 无单价——计价全在插件侧，core 与 TUI 都看不到（ADR-0009）。
+// 无单价——单价留在 core 的模型数据表里，客户端看不到（ADR-0009）。
 type ModelInfo struct {
 	Name    string `json:"name"`
 	OwnedBy string `json:"owned_by"`
@@ -199,16 +176,8 @@ type SessionInfo struct {
 	Current  bool   `json:"current"`
 }
 
-// ProviderInfo 是一条 Provider 记录（/provider 命令的 data 载荷）。
-// Models 是该壳报了多少个模型；Current 标出协议槽当前的占用者（ADR-0011）。
-type ProviderInfo struct {
-	Name    string `json:"name"`
-	Current bool   `json:"current"`
-	Models  int    `json:"models"`
-}
-
 // Statusline 是状态栏数据（GET /statusline）：会话身份信息。
-// OwnedBy/Context 来自 core 的模型注册表（插件声明），配了表外的模型时为空——
+// OwnedBy/Context 来自 core 的模型数据表，配了表外的模型时为空——
 // 那不是错误，模型表是参考资料不是白名单（ADR-0009）。
 type Statusline struct {
 	Model   string `json:"model"`
@@ -223,30 +192,6 @@ func (c *Client) FetchStatusline() (Statusline, error) {
 		return Statusline{}, err
 	}
 	return s, nil
-}
-
-// EnablePlugin 启用插件（POST /plugins/enable，core 从 known dir 重载）。
-func (c *Client) EnablePlugin(name string) error {
-	r, err := c.postJSON("/plugins/enable", map[string]string{"name": name})
-	if err != nil {
-		return err
-	}
-	if r.Error != "" {
-		return fmt.Errorf("启用插件失败: %s", r.Error)
-	}
-	return nil
-}
-
-// DisablePlugin 禁用插件（POST /plugins/disable，core 卸载并持久化禁用清单）。
-func (c *Client) DisablePlugin(name string) error {
-	r, err := c.postJSON("/plugins/disable", map[string]string{"name": name})
-	if err != nil {
-		return err
-	}
-	if r.Error != "" {
-		return fmt.Errorf("禁用插件失败: %s", r.Error)
-	}
-	return nil
 }
 
 // Close 关闭传输层

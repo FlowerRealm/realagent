@@ -30,8 +30,8 @@ type activity struct {
 }
 
 // cost 是 status_update 帧的载荷（PROTOCOL.md：本次 run 累计、绝对值）。
-// 钱由供应商壳插件算好报上来，core 与 TUI 都不碰单价（ADR-0009）。
-// 零 = 没数据（插件没模型表或端点不报用量），渲染时整段隐藏，绝不显示 $0。
+// 钱由 core 按模型数据表算好报上来，TUI 不碰单价（ADR-0009）。
+// 零 = 没数据（表里没这个模型或端点不报用量），渲染时整段隐藏，绝不显示 $0。
 type cost struct {
 	USD float64 `json:"cost"`
 }

@@ -1,42 +1,41 @@
 /*
  * executor.hpp — 工具执行器（agent 模块）
  *
- * 链路（ADR-0002 / ADR-0005 / ADR-0012）：
- *   现问现答拉工具视图 → 权限检查（dangerous 工具 → 权限槽裁决）→ 调该容器的 tool.execute
- * core 不存工具表：每次执行前向各容器拉一遍（ADR-0012）。单 agent 内工具严格顺序执行。
+ * 链路（ADR-0002 / ADR-0005）：
+ *   查工具定义 → dangerous 则按 permission 配置裁决（ASK 走审批协调器）→ 执行
+ * 单 agent 内工具严格顺序执行。
  *
- * 中止（ADR-0002 R8 的后一半）：execute 卡在插件里时，interrupt() 从事件循环线程进来，
- * 找到在跑的那个容器、调它的 tool.interrupt。**不开线程**——顺序执行的语义正好意味着
- * "在跑的工具"至多一个，一个指针就记得住。
+ * 中止（ADR-0002 R8 的后一半）：execute 卡在 bash 里时，interrupt() 从事件循环线程
+ * 进来把子进程组打掉。顺序执行的语义正好意味着"在跑的工具"至多一个，
+ * 连指针都不必记——工具那边一个 pid 就够。
  */
 #pragma once
 
 #include <mutex>
 #include <string>
-#include <vector>
 
-#include "extension/slots.hpp"
 #include "agent/approval.hpp"
+#include "context.hpp"
+#include "tools/tools.hpp"
 
 namespace realagent {
 
-/* 工具执行结果（包装插件返回） */
+/* 工具执行结果 */
 struct ExecResult {
-    int status;
-    std::string messages; // JSON
-    bool interrupted = false; // core 在本次执行期间提过中止：与"工具自己失败了"不是一回事
+    int status = 0;
+    std::string messages;
+    bool interrupted = false; // 本次执行期间 core 提过中止：与"工具自己失败了"不是一回事
 };
 
 class Executor {
 public:
-    Executor(CoreContext& ctx, PluginManager& plugins, ApprovalCoordinator& approval);
+    Executor(CoreContext& ctx, ApprovalCoordinator& approval);
 
-    /* 权限检查：dangerous 工具经权限槽裁决。ASK → 协调器真等用户裁决（ADR-0005）。 */
-    bool check_permission(const ToolView& tool, const std::string& params_json,
+    /* 权限检查：dangerous 工具按 permission 配置裁决。ASK → 真等用户裁决（ADR-0005）。 */
+    bool check_permission(const ToolDef& tool, const std::string& params_json,
                           std::string* denied_reason);
 
-    /* 执行工具（按对外名字查视图；顺序执行语义由调用方保证）。
-     * call_id 透传给插件：实时输出帧（tool_output）要靠它认领是哪次调用。 */
+    /* 执行工具。call_id 透传给工具：实时输出帧（tool_output）要靠它认领是哪次调用。 */
     ExecResult execute(const std::string& call_id, const std::string& name,
                        const std::string& params_json);
 
@@ -49,14 +48,10 @@ public:
 
 private:
     CoreContext& ctx_;
-    PluginManager& plugins_;
     ApprovalCoordinator& approval_;
 
-    // 在跑的那次调用。锁只护"登记/摘牌"这几行，不覆盖 tool.execute 本身——
-    // 覆盖了 interrupt() 就得排在它后面，那正是它要打断的东西
     std::mutex inflight_mtx_;
-    const Plugin* inflight_owner_ = nullptr;
-    std::string inflight_call_id_;
+    bool inflight_ = false;
     bool interrupted_ = false;
 };
 

@@ -282,32 +282,10 @@ void QuicServer::run() {
                             // 斜杠命令列表（TUI 菜单数据源）。core 持有唯一真相，TUI 只渲染。
                             send_json(c, sid, impl_->cbs.on_commands ? impl_->cbs.on_commands()
                                                                      : "[]");
-                        } else if (req.method == "GET" && req.path == "/plugins") {
-                            // 插件列表（TUI /plugins 数据源）：loaded/disabled/failed + error
-                            send_json(c, sid, impl_->cbs.on_plugins ? impl_->cbs.on_plugins()
-                                                                    : "[]");
                         } else if (req.method == "GET" && req.path == "/statusline") {
                             // 状态栏数据（TUI 输入框下方那条，见 PROTOCOL.md）
                             send_json(c, sid, impl_->cbs.on_statusline ? impl_->cbs.on_statusline()
                                                                        : "{}");
-                        } else if (req.method == "POST" && req.path == "/plugins/enable") {
-                            // 启用插件（体 {"name"}）
-                            std::string resp_body = "{\"error\":\"no plugins handler\"}";
-                            if (impl_->cbs.on_plugin_enable) {
-                                auto b = json::parse(req.body).value_or(json{});
-                                resp_body = impl_->cbs.on_plugin_enable(
-                                    b["name"].as_string().value_or(""));
-                            }
-                            send_json(c, sid, resp_body);
-                        } else if (req.method == "POST" && req.path == "/plugins/disable") {
-                            // 禁用插件（体 {"name"}）
-                            std::string resp_body = "{\"error\":\"no plugins handler\"}";
-                            if (impl_->cbs.on_plugin_disable) {
-                                auto b = json::parse(req.body).value_or(json{});
-                                resp_body = impl_->cbs.on_plugin_disable(
-                                    b["name"].as_string().value_or(""));
-                            }
-                            send_json(c, sid, resp_body);
                         } else if (req.method == "POST" && req.path == "/interrupt") {
                             if (impl_->cbs.on_interrupt) impl_->cbs.on_interrupt();
                             send_json(c, sid, "{\"status\":\"ok\"}");

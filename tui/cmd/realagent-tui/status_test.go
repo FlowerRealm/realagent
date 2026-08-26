@@ -179,7 +179,7 @@ func TestStatusRenderCost(t *testing.T) {
 	if narrow := a.render(16); strings.Contains(narrow, "$") || !strings.Contains(narrow, "5s") {
 		t.Errorf("width=16 应丢花费保读秒，实际 %q", narrow)
 	}
-	// 无花费数据（插件没模型表 / 端点不报用量）：整段隐藏，绝不显示 $0
+	// 无花费数据（表里没这个模型 / 端点不报用量）：整段隐藏，绝不显示 $0
 	a.cost = cost{}
 	if s := a.render(80); strings.Contains(s, "$") {
 		t.Errorf("无花费数据时不应渲染花费段，实际 %q", s)

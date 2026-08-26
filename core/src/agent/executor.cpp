@@ -1,53 +1,55 @@
 #include "agent/executor.hpp"
 
 #include <cstdio>
-#include <cstdlib>
 
 #include "json.hpp"
 
 namespace realagent {
 
-Executor::Executor(CoreContext& ctx, PluginManager& plugins, ApprovalCoordinator& approval)
-    : ctx_(ctx), plugins_(plugins), approval_(approval) {}
+Executor::Executor(CoreContext& ctx, ApprovalCoordinator& approval)
+    : ctx_(ctx), approval_(approval) {}
 
-bool Executor::check_permission(const ToolView& tool, const std::string& params_json,
+namespace {
+/* 权限策略：一个配置键，一个 switch（ADR-0016）。
+ *   ask       —— 危险工具一律问用户（默认）
+ *   allow-all —— 一律放行。打通链路用，不是安全策略
+ *   deny      —— 一律拒绝
+ * 认不出的值按 ask：配置写错时该多问一句，不该多放一次行。 */
+Verdict decide(const Config& cfg) {
+    const std::string mode = cfg.get("permission");
+    if (mode == "allow-all") return Verdict::Allow;
+    if (mode == "deny") return Verdict::Deny;
+    if (mode != "ask" && !mode.empty())
+        fprintf(stderr, "[perm] 未知 permission=%s，按 ask 处理\n", mode.c_str());
+    return Verdict::Ask;
+}
+} // namespace
+
+bool Executor::check_permission(const ToolDef& tool, const std::string& params_json,
                                 std::string* denied_reason) {
-    if (!tool.def->dangerous) return true; // 只读工具不触发
-    // 权限槽（ADR-0012）：一个裁决者，一次调用。不遍历、不投票——
-    // 槽位独占之后 ALLOW 就是字面意义的放行，不存在覆盖他人裁决的单调性问题
-    const auto& perm = ctx_.slots.permission;
-    if (!perm) {
-        fprintf(stderr, "[perm] 权限槽空置，dangerous 工具 %s 默认拒绝\n", tool.name.c_str());
-        if (denied_reason) *denied_reason = "no permission plugin";
-        return false;
-    }
-    // 传**对外名**（core-tools_bash），不是本名（bash）。裁决者只有一个、面对全世界的
-    // 工具，它需要全局唯一的名字才能分辨"哪个容器的 bash"。这与 execute 传本名不矛盾：
-    // 插件只认识自己的名字，裁决者只认得全局的名字，两边要的本来就是不同的那一个。
-    const auto verdict = perm.fn(perm.self, tool.name.c_str(), params_json.c_str());
-    if (verdict == REALAGENT_PERM_DENY) {
-        if (denied_reason) *denied_reason = "denied by permission plugin";
-        return false;
-    }
-    if (verdict == REALAGENT_PERM_ASK) {
-        // 审批链路（ADR-0005）：core 发 permission_request → 用户界面裁决 → 回传
-        // agent 线程真等裁决（30s 超时 deny），事件循环线程收 /approval-response 唤醒
-        // 同理传对外名：审批框是给用户看的，"core-tools_bash" 才说明是谁要跑
-        if (approval_.await(tool.name, params_json) != REALAGENT_PERM_ALLOW) {
-            if (denied_reason) *denied_reason = "denied by user";
+    if (!tool.dangerous) return true; // 只读工具不触发
+    switch (decide(*ctx_.config)) {
+        case Verdict::Allow:
+            return true;
+        case Verdict::Deny:
+            if (denied_reason) *denied_reason = "denied by permission policy";
             return false;
-        }
+        case Verdict::Ask:
+            // 审批链路（ADR-0005）：core 发 permission_request → 用户裁决 → 回传。
+            // agent 线程真等裁决（30s 超时 deny），事件循环线程收 /approval-response 唤醒
+            if (approval_.await(tool.name, params_json) != Verdict::Allow) {
+                if (denied_reason) *denied_reason = "denied by user";
+                return false;
+            }
+            return true;
     }
-    return true;
+    return false;
 }
 
 void Executor::interrupt() {
     std::lock_guard<std::mutex> lk(inflight_mtx_);
     interrupted_ = true;
-    if (!inflight_owner_) return; // 手上没有在跑的：标记留给下一次 execute 撞上
-    // 容器不具备这项能力就是不可中断——照实等它跑完，不假装成功
-    auto itr = cap_of<realagent_tool_interrupt_fn>(*inflight_owner_, REALAGENT_CAP_TOOL_INTERRUPT);
-    if (itr) itr.fn(itr.self, inflight_call_id_.c_str());
+    if (inflight_) interrupt_tool(); // 手上没有在跑的：标记留给下一次 execute 撞上
 }
 
 void Executor::reset() {
@@ -57,50 +59,30 @@ void Executor::reset() {
 
 ExecResult Executor::execute(const std::string& call_id, const std::string& name,
                              const std::string& params_json) {
-    ExecResult bad{.status = 1, .messages = "{\"error\":\"unknown tool\"}"};
-    // 现问现答（ADR-0012）：core 不存工具表，用时向各容器拉一遍
-    const auto views = tools_of(plugins_);
-    const auto it = std::find_if(views.begin(), views.end(),
-                                 [&](const ToolView& v) { return v.name == name; });
-    if (it == views.end()) return bad;
+    const ToolDef* tool = find_tool(name);
+    if (!tool) return {1, R"({"error":"unknown tool"})", false};
 
-    auto exec = cap_of<realagent_tool_execute_fn>(*it->owner, REALAGENT_CAP_TOOL_EXECUTE);
-    if (!exec) {
-        bad.messages = "{\"error\":\"tool not executable\"}";
-        return bad;
-    }
     std::string reason;
-    if (!check_permission(*it, params_json, &reason)) {
+    if (!check_permission(*tool, params_json, &reason)) {
         json err;
         err["error"] = reason;
-        bad.messages = err.dump();
-        return bad;
+        return {1, err.dump(), false};
     }
     // 登记在先、执行在后：这个顺序才让 interrupt() 要么打断得到它、要么撞上 interrupted_，
     // 不存在"检查完了才开始跑"的缝
     {
         std::lock_guard<std::mutex> lk(inflight_mtx_);
-        if (interrupted_) {
-            bad.messages = "interrupted by user";
-            bad.interrupted = true;
-            return bad;
-        }
-        inflight_owner_ = it->owner;
-        inflight_call_id_ = call_id;
+        if (interrupted_) return {1, "interrupted by user", true};
+        inflight_ = true;
     }
-    // 传插件侧本名（def->name），不是对外名字——前缀是 core 加的，插件不认识
-    const auto r = exec.fn(exec.self, call_id.c_str(), it->def->name, params_json.c_str());
-    ExecResult out;
-    out.status = r.status;
-    out.messages = r.messages ? r.messages : "";
+    const auto r = run_tool(call_id, name, params_json, ctx_.emit_fn);
+    ExecResult out{r.status, r.messages, false};
     {
         std::lock_guard<std::mutex> lk(inflight_mtx_);
-        // "算不算被中断"由 core 判——中止是 core 提的，插件不必编造状态码
+        // "算不算被中断"由 core 判——中止是 core 提的，工具不必编造状态码
         out.interrupted = interrupted_;
-        inflight_owner_ = nullptr;
+        inflight_ = false;
     }
-    // 结果是本次调用现造的 → 转移：core 释放（ADR-0012）
-    std::free(const_cast<char*>(r.messages));
     return out;
 }
 

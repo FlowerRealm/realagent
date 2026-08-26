@@ -19,10 +19,10 @@ func modelsJSON() json.RawMessage {
 	return data
 }
 
-func pluginsJSON() json.RawMessage {
-	data, _ := json.Marshal([]client.PluginInfo{
-		{Name: "deepseek", Version: "0.1", Capabilities: []string{"protocol", "models"}, Status: "loaded"},
-		{Name: "perm-ask", Status: "disabled"},
+func sessionsJSON() json.RawMessage {
+	data, _ := json.Marshal([]client.SessionInfo{
+		{ID: "s-002", Title: "改一个 bug", Messages: 12, Current: true},
+		{ID: "s-001", Title: "读代码", Messages: 4},
 	})
 	return data
 }
@@ -36,9 +36,8 @@ func TestPanelWantOf(t *testing.T) {
 		{"/model", false, "model"},
 		{"/model deepseek-chat", false, ""},     // 带名 = 明确指令，选完即走
 		{"/model deepseek-chat", true, ""},      // 面板里选中模型同样收工
-		{"/plugins", false, "plugins"},          //
-		{"/plugins disable x", false, ""},       // 手打的启停不劫持界面
-		{"/plugins disable x", true, "plugins"}, // 面板里的启停，改完接着改
+		{"/resume", false, "resume"},
+		{"/resume s-001", false, ""}, // 带 id = 明确指令，恢复完即走
 		{"/statusline", false, "statusline"},
 		{"/statusline icons nerd", false, ""},
 		{"/statusline icons nerd", true, "statusline"},
@@ -56,7 +55,7 @@ func TestSplitCommand(t *testing.T) {
 	cases := []struct{ in, cmd, args string }{
 		{"/model", "/model", ""},
 		{"/model  gpt ", "/model", "gpt"},
-		{"/plugins enable x", "/plugins", "enable x"},
+		{"/resume s-001", "/resume", "s-001"},
 		{"", "", ""},
 	}
 	for _, c := range cases {
@@ -87,17 +86,20 @@ func TestModelPanel(t *testing.T) {
 	}
 }
 
-// 插件面板的确认项是「反转当前状态」
-func TestPluginsPanelToggle(t *testing.T) {
-	p := pluginsPanel(pluginsJSON())
+// 会话面板：高亮落在当前会话上，确认项发的是完整命令
+func TestSessionPanel(t *testing.T) {
+	p := sessionPanel(sessionsJSON())
 	if p == nil {
-		t.Fatal("pluginsPanel 返回 nil")
+		t.Fatal("sessionPanel 返回 nil")
 	}
-	if got := p.items[0].submit; got != "/plugins disable deepseek" {
-		t.Errorf("loaded 项 submit = %q, want disable", got)
+	if p.sel != 0 {
+		t.Errorf("sel = %d, want 0（current 项）", p.sel)
 	}
-	if got := p.items[1].submit; got != "/plugins enable perm-ask" {
-		t.Errorf("disabled 项 submit = %q, want enable", got)
+	if got := p.items[1].submit; got != "/resume s-001" {
+		t.Errorf("submit = %q", got)
+	}
+	if !strings.Contains(p.items[0].label, "改一个 bug") {
+		t.Errorf("label 少了会话标题: %q", p.items[0].label)
 	}
 }
 
@@ -106,7 +108,7 @@ func TestMakePanelEmpty(t *testing.T) {
 	if p := makePanel("model", json.RawMessage(`[]`)); p != nil {
 		t.Error("空清单不该开面板")
 	}
-	if p := makePanel("plugins", json.RawMessage(`{`)); p != nil {
+	if p := makePanel("resume", json.RawMessage(`{`)); p != nil {
 		t.Error("坏载荷不该开面板")
 	}
 	if p := makePanel("new", nil); p != nil {
@@ -161,8 +163,8 @@ func TestPanelNav(t *testing.T) {
 // Enter 确认 = 把 submit 当成用户输入发出去（复用 submitInput，没有第二条路）
 func TestPanelEnterSubmits(t *testing.T) {
 	m := testModel()
-	m.panel = pluginsPanel(pluginsJSON())
-	m.panel.sel = 1 // perm-ask（disabled）
+	m.panel = sessionPanel(sessionsJSON())
+	m.panel.sel = 1 // s-001
 	m, cmd := m.panelKey("enter")
 	if m.panel != nil {
 		t.Error("确认后面板应先关闭，等结果回来再开")
@@ -170,11 +172,11 @@ func TestPanelEnterSubmits(t *testing.T) {
 	if cmd == nil {
 		t.Error("确认应发出请求")
 	}
-	if got := pendTexts(m); len(got) == 0 || got[len(got)-1] != "/plugins enable perm-ask" {
+	if got := pendTexts(m); len(got) == 0 || got[len(got)-1] != "/resume s-001" {
 		t.Errorf("提交的输入 = %v", got)
 	}
-	if m.panelWant != "plugins" {
-		t.Errorf("panelWant = %q, want plugins（启停完回到面板）", m.panelWant)
+	if m.panelWant != "" {
+		t.Errorf("panelWant = %q, want 空（恢复完即走）", m.panelWant)
 	}
 }
 

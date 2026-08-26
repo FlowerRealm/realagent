@@ -32,17 +32,11 @@ std::expected<std::optional<json>, std::string> read_settings(const fs::path& pa
     return std::optional<json>{std::move(*j)};
 }
 
-// 对象递归合并，数组与标量整个替换。
-// 数组不合并是刻意的：disabled: ["x"] 的意思是"就禁这一个"，不是"在默认基础上再加一个"。
-// 顶层整键替换会静默丢掉嵌套默认值（只写 plugins.disabled 就会带走 plugins 下的其他默认），
-// 而且丢的方式很隐蔽——不报错，值变成类型默认值。
+// 逐键覆盖：用户配了哪个键就换哪个键，没提的保留默认值。
+// 配置树是平的（ADR-0016 删掉 plugins 那一节之后再没有嵌套键），所以不必递归——
+// 需要嵌套的那天连着默认树一起加，不提前留机械。
 void merge_into(json& dst, const json& src) {
-    for (const auto& k : src.keys()) {
-        const json v = src[k];
-        // 先 contains 再取 dst[k]：非 const operator[] 会给缺失键插 null，污染配置树
-        if (v.is_object() && dst.contains(k) && dst[k].is_object()) merge_into(dst[k], v);
-        else dst[k] = v;
-    }
+    for (const auto& k : src.keys()) dst[k] = src[k];
 }
 
 // tmp + rename 原子写。断电或进程被杀只会留下临时文件，不会留半截的 settings.json
@@ -69,17 +63,6 @@ bool write_atomic(const fs::path& target, const std::string& text) {
         return false;
     }
     return true;
-}
-
-/* 点分路径写入："plugins.disabled" 只改这一个叶子，兄弟键（plugins.unprefixed）不动。
- * 整个 plugins 对象覆写会把用户配的兄弟键一起抹掉——写一个键就只写那一个键。 */
-void set_path(json& tree, std::string_view key, const json& v) {
-    const std::size_t dot = key.find('.');
-    if (dot == std::string_view::npos) {
-        tree[key] = v;
-        return;
-    }
-    set_path(tree[key.substr(0, dot)], key.substr(dot + 1), v);
 }
 
 } // namespace
@@ -112,7 +95,8 @@ bool Config::has(std::string_view key) const {
     return settings_.contains(key);
 }
 
-// core 不做档位间回落：small_model 空就是空串，原样下传给 Provider 壳去兜底
+// 不做档位间回落：small_model 空就是空串。回落会让"我明明配了小模型"与
+// "我没配所以用了主模型"长得一模一样，出账单时才发现区别
 std::string Config::model(ModelTier tier) const {
     return get(tier == ModelTier::Small ? "small_model" : "model");
 }
@@ -128,23 +112,19 @@ bool Config::persist(std::string_view key, const json& v) {
         return false;
     }
     json tree = file->value_or(json{}); // 文件不存在 → 空对象起头
-    set_path(tree, key, v);
+    tree[key] = v; // 只动这一个键，用户配的其余键原样留在文件里
     if (!write_atomic(target, tree.dump())) return false;
 
     // 落盘成功才改内存：失败时内存与文件都没变，不会出现"切了档但没写进去"
     std::lock_guard<std::mutex> lk(*mutex_);
-    set_path(settings_, key, v);
+    settings_[key] = v;
     return true;
-}
-
-std::vector<std::string> Config::extension_dirs() const {
-    return {(global_dir() / ".realagent" / "extensions").string()};
 }
 
 std::string Config::session_dir() { return std::string(kSessionDir); }
 
-std::string Config::models_path(std::string_view plugin_name) const {
-    return (global_dir() / ".realagent" / "models" / (std::string(plugin_name) + ".json")).string();
+std::string Config::models_path() const {
+    return (global_dir() / ".realagent" / "models.json").string();
 }
 
 json Config::to_json() const {

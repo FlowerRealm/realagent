@@ -1,7 +1,12 @@
 # 实现规划（Phase 1）
 
 > 里程碑拆解 + 技术风险清单 + 调研发现。规划中发现的问题在此暴露，逐项拷问后回填。
-> 架构决策见 CONTEXT.md 与 docs/adr/（0001-0013）。
+> 架构决策见 CONTEXT.md 与 docs/adr/（0001-0016）。
+>
+> **实况注（2026-08-25）：M1「插件加载链」整条已作废**（[[ADR-0016]]）。插件系统于本日废除，
+> 5 个容器并入 core。M2 / M4 里凡以"插件"为形态的交付物，交付的能力都还在，只是不再隔着
+> C ABI——协议与计价在 `core/src/llm/llm.cpp`，工具在 `core/src/tools/tools.cpp`，
+> 权限是一个配置键。本文按惯例**不改写历史**，只在各处补注。
 
 ## 里程碑总览
 
@@ -49,6 +54,10 @@ M6 TUI              → M7 集成与测试
 
 ## M1：插件加载链
 
+> **实况注（2026-08-25）：本里程碑的交付物已整体删除**（[[ADR-0016]]）。dlopen、ABI 校验、
+> 能力表、能力槽、deps DAG、启停级联、`plugin.json`——全部不再存在。它服务过的第三方容器数是 **0**。
+> 下方内容保留为设计史：这套机制是对的，只是没有用户。
+
 **交付物**
 - plugin.json 解析（名称/描述/版本/ABI 版本/前置依赖）——**无 type**（ADR-0011）
 - dlopen 加载 + ABI 版本强校验（PI_ABI_VERSION，不等则拒绝并提示重编）
@@ -57,6 +66,7 @@ M6 TUI              → M7 集成与测试
   - 实况注（2026-08-16）：以上两条的 ADR-0011 机制**均已被 ADR-0012 取代**。①「能力由非空函数指针决定」→ 容器经 `capabilities()` 交出 `{名字, 函数}` 表，core 按名查（`find_capability`）；`plugin_api_t` 固定五项，新增能力不破 ABI。②「槽位冲突点名双方」→ 冲突时**空置该槽并点名**，不再卸载插件（决策 11）。③「`claim` 接管内层」→ **整套接管机制已删除**，改为[[管线]]分段：插件互不认识、互不调用，跨容器取用走 `import`（决策 1/12）。槽位独占与依赖声明解析两条不变。
 - perm-allow-all、session-manager 两个插件骨架
   - 实况注（2026-08-16）：`session-manager` 已删除（其 `/new` `/resume` 与 core 内置重复且只是空壳，两命令现由 core 直接处理，core/src/main.cpp:242/246）。实际交付的权限插件是 **perm-allow-all + perm-ask 两个**（二选一占权限槽），perm-ask 从未在本清单里出现过。插件仓现共 5 个容器，见 docs/plugins.md。
+  - 实况注（2026-08-25）：整条作废（[[ADR-0016]]）。`docs/plugins.md` 已改为 `docs/capabilities.md`（core 内置能力清单），权限从两个动态库变成配置键 `permission` 的三个值。
 
 **技术要点**
 - 插件加载链是第一阶段的**交付关键路径**（core 零内置工具，一切能力来自插件）。
@@ -66,10 +76,10 @@ M6 TUI              → M7 集成与测试
 **风险**
 - **R3: 插件事件订阅接口**
   - 决策：已定（2026-08-09）——单入口 + 插件内按 type 字符串分发（ADR-0001）。
-  - 实现：已实现——能力键 `event.observe`（realugin `include/realugin/plugin_api.h`），扇出在 realugin 的 `PluginManager::emit`，挂点在 core/src/main.cpp（推送流与插件同一个出口）。
+  - 实现：曾实现为能力键 `event.observe`（扇出在 realugin 的 `PluginManager::emit`）。**2026-08-25 随 [[ADR-0016]] 删除**：没有订阅者了，事件的去处只有客户端——agent 线程 `emit` 入队、事件循环 flush 到推送流，一条路（core/src/main.cpp）。
 - **R4: 嵌套组装时机**
   - 决策：已定——加载序静态定，跨容器引用运行时按名取。
-  - 实现：已实施（2026-08-10）——按 `deps` 反图、自入度 0 起 BFS 逐层 init（realugin `src/loader.cpp` 的 `PluginManager::load_all`），跨容器取用走 `core->api->import` + `core->api->providers`（realugin `src/loader.cpp` 的 `api_import` / `api_providers`）。ADR-0012 已废除嵌套与 `claim`。
+  - 实现：曾实施（2026-08-10）——按 `deps` 反图、自入度 0 起 BFS 逐层 init。**2026-08-25 随 [[ADR-0016]] 删除**：没有容器，也就没有加载序。
 
 ## M2：工具注册与执行
 
@@ -89,10 +99,10 @@ M6 TUI              → M7 集成与测试
 **风险**
 - **R5: edit 的 +x-0（write）语义**
   - 决策：已定（2026-08-09）——创建语义写进工具描述。
-  - 实现：已实现——描述文案在 realagent-plugins/core-tools/core_tools.c:197（「目标文件不存在时创建新文件；old_string 可为空表示创建/追加」），空 `old_string` 追加分支在同文件 :127。
+  - 实现：已实现——描述文案与空 `old_string` 追加分支现在 core/src/tools/tools.cpp（2026-08-25 前在 realagent-plugins/core-tools/core_tools.c）。
 - **R6: bash 流式输出**
   - 决策：已定（2026-08-09）——stdout 走 `tool_output` 帧（推送流，全可靠），`tool_result` 帧回传完整输出。
-  - 实现：**已实现**（2026-08-16）——帧由工具容器自己经 `core_api->emit` 推出（realagent-plugins/core-tools/core_tools.c:201 `emit_output`，读循环里逐行调用于 :266），core 只转发；TUI 在 `tool_output` 分支按"续写开着的行"渲染（tui/cmd/realagent-tui/main.go），因为超长行会被切成几帧、末段可能无换行符。载荷 `{call_id, stream, text}` 见 docs/PROTOCOL.md。端到端实测：bash 循环输出边跑边到帧。
+  - 实现：**已实现**（2026-08-16）——帧由工具自己推出（`emit_output`，bash 读循环里逐行调用，现在 core/src/tools/tools.cpp）；TUI 在 `tool_output` 分支按"续写开着的行"渲染（tui/cmd/realagent-tui/main.go），因为超长行会被切成几帧、末段可能无换行符。载荷 `{call_id, stream, text}` 见 docs/PROTOCOL.md。端到端实测：bash 循环输出边跑边到帧。
 
 ## M3：Agent Loop + 事件流
 
@@ -112,12 +122,13 @@ M6 TUI              → M7 集成与测试
 **风险**
 - **R7: 事件流实现形态**
   - 决策：已定（2026-08-09）——while(1) + 事件广播 fan-out（ADR-0002）。
-  - 实现：已实现——`Agent::run` 的 turn 循环在 core/src/agent/agent.cpp，`broadcast` 经 `emit_fn` 同时喂推送流与 `event.observe` 插件。
+  - 实现：已实现——`Agent::run` 的 turn 循环在 core/src/agent/agent.cpp，`broadcast` 经 `emit_fn` 入事件队列，事件循环 flush 到推送流（2026-08-25 起只此一个去处，见 R3）。
 - **R8: 中止传播**
   - 决策：已定——LLM 流式中断 + 工具执行中断共用一个信号。
   - 实现：**已实现**（2026-08-16），决策要的「一个信号同时停住两侧」完整落地。
     - LLM 侧：`abort_` 原子量（core/include/agent/agent.hpp）、curl `XFERINFOFUNCTION` 回调、`Agent::run` 循环里的四个检查点、`POST /interrupt`（core/src/server/quic_server.cpp → core/src/main.cpp 的 `on_interrupt` 调 `agent.interrupt()` + `approval.cancel_all()`）。
-    - 工具侧：`Agent::interrupt()` 顺手调 `Executor::interrupt()`（core/src/agent/executor.cpp:44）。executor 登记在跑的容器与 call_id（登记在先、执行在后，杜绝"检查完了才开始跑"的缝），中止时调该容器的新能力 `tool.interrupt`（realugin `plugin_api.h` 的 `PLUGIN_CAP_TOOL_INTERRUPT`）。core-tools 的实现打的是**进程组**（core_tools.c:302）：首次 SIGTERM，再按一次 SIGKILL，命令拉起的整棵子孙树一起收掉。
+    - 工具侧：`Agent::interrupt()` 顺手调 `Executor::interrupt()`（core/src/agent/executor.cpp）。executor 记下"手上有没有在跑的"（登记在先、执行在后，杜绝"检查完了才开始跑"的缝），中止时调 `interrupt_tool()`，打的是 bash 子进程**进程组**（core/src/tools/tools.cpp）：首次 SIGTERM，再按一次 SIGKILL，命令拉起的整棵子孙树一起收掉。
+      - 实况注（2026-08-25）：从前这里要按 call_id 找到"在跑的那个容器"再调它的可选能力 `tool.interrupt`，不提供该能力的容器就不可中断。[[ADR-0016]] 之后只有 bash 会跑很久，一个 pid 就记得住。
     - **不具备该能力 = 不可中断**，core 照实等它跑完，不假装成功。这一条是刻意的：假报成功会让上层以为后台已经干净。
     - 「算不算被中断」由 core 判（是 core 提的），结果经 `tool_execution_end` 的 `interrupted` 字段与 `tool_result` 的 `[interrupted by user]` 一并交代——模型对"被打断"与"命令失败"的反应完全不同。
     - 端到端实测：bash 死循环执行中 `POST /interrupt` → 子进程组被收、`status=143`、`interrupted=true`、`interrupted` 帧到达，无孤儿进程残留。
@@ -134,6 +145,18 @@ M6 TUI              → M7 集成与测试
     - 测试 core/tests/test_session.cpp（`ctest -R session`）；端到端实测：说一句话 → `/new` → `/resume <id>` → 追问"我刚才让你做什么"，模型据恢复的历史答对。
 
 ## M4：Provider 插件
+
+> **实况注（2026-08-26）：本节整条作废**（[[ADR-0017]]）。「Provider 插件」这个形态在
+> [[ADR-0016]] 就没了；ADR-0017 进一步把 LLM 那一块摊成「方向 × 协议」六个文件
+> （`llm/upstream/` 与 `llm/downstream/` 各三个），协议由用户在配置里明选，
+> 没有默认值也不从 `base_url` 猜。本节交付的能力都还在，形态全变了。
+
+> **实况注（2026-08-25）**：协议构造、SSE 解析、计价三件事都还在，形态从"两个容器 + 一条 dep 边"
+> 变成 `core/src/llm/llm.cpp` 里三个函数（[[ADR-0016]]）。**"改请求"那一段整段消失**——
+> 它存在的唯一理由是协议层与供应商壳住在两个动态库里，中间必须留一道缝让后者补前者的空。
+> 现在 `build_request` 直接读配置里的端点与凭证，一次造出能发的请求。
+> 连带消失的还有"本次用的是哪个模型"那笔暗账：从前壳在 refine 时偷偷记下、计价时读出，
+> 现在计价直接收模型名参数。
 
 **交付物**
 - v1-messages 插件（协议层）：`/v1/messages` 构造 + SSE 解析（成对，供应商中立，无默认端点/模型）
@@ -154,7 +177,7 @@ M6 TUI              → M7 集成与测试
   - 实现：调研结论，无独立实现物。
 - **R11: 流式解析增量 → 事件流 message_update 的对接**
   - 决策：已定——增量与 thinking 同语义，都走推送流。
-  - 实现：已完成（2026-08-10）——`response.parse` 发 `thinking_start/update/stop`（realagent-plugins/v1-messages/v1_messages.cpp:233/240/256），core 侧接收器在 core/src/agent/agent.cpp:75-89。注意 ADR-0012 之后已无「经壳透传」一说：协议层与供应商壳互不认识，各占管线一段。
+  - 实现：已完成（2026-08-10）——SSE 解析发 `thinking_start/update/stop`（core/src/llm/llm.cpp，2026-08-25 前在 realagent-plugins/v1-messages/v1_messages.cpp），接收器是 `Agent::on_llm_event`（core/src/agent/agent.cpp）。
 
 ## M5：QUIC 通信
 

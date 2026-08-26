@@ -204,7 +204,7 @@ func (m model) update(msg tea.Msg) (model, tea.Cmd) {
 		case v.reply.Ok:
 			m.awaiting = false
 			m.busy.stop() // 命令不启动 agent turn，收到结果即收工
-			// 无参的 /model /plugins 求的是「选一个」，不是「看一坨文本」：
+			// 无参的 /model /resume 求的是「选一个」，不是「看一坨文本」：
 			// 同一份 data 载荷直接做成子面板（panel.go）。造不出面板才退回文本。
 			if m.panelWant == v.reply.Command {
 				if p := makePanel(v.reply.Command, v.reply.Data); p != nil {
@@ -213,15 +213,10 @@ func (m model) update(msg tea.Msg) (model, tea.Cmd) {
 				}
 			}
 			// 斜杠命令结果（core 返回 {"ok":true,"command":...}），渲染为 info 行。
-			// plugins 命令携带 data 载荷（[]PluginInfo），可直接展示。
 			text := describeCommand(v.reply.Command, v.reply.Messages)
 			switch v.reply.Command {
-			case "plugins":
-				text = renderPlugins(v.reply.Data)
 			case "model":
 				text = renderModels(v.reply.Data)
-			case "provider":
-				text = renderProviders(v.reply.Data)
 			case "new", "resume":
 				text = renderSessions(v.reply.Command, v.reply.Data)
 			}
@@ -523,7 +518,7 @@ func (m *model) handleEvent(ev client.Event) tea.Cmd {
 
 	case "tool_output":
 		// 工具边跑边推的 stdout（PROTOCOL.md）。走 stream 而不是 emit：
-		// 插件按行推，但超长行会被切成几帧、末行可能没有换行符——
+		// core 按行推，但超长行会被切成几帧、末行可能没有换行符——
 		// 只有"续写开着的行"才能把它们重新拼成用户看到的那一行。
 		// 完整输出稍后仍随 tool_result 回来，这里推的只是"现在长什么样"。
 		var d struct {
@@ -710,55 +705,6 @@ func renderSessions(command string, data json.RawMessage) string {
 	return strings.Join(out, "\n")
 }
 
-// renderPlugins 把 /plugins 结果（[]PluginInfo JSON）渲染为多行 info 文本。
-// 每行：名称 v版本 [能力] 状态，failed 附加 error。
-func renderPlugins(data json.RawMessage) string {
-	var list []client.PluginInfo
-	if err := json.Unmarshal(data, &list); err != nil {
-		return "✅ 命令已执行: /plugins" // 载荷解析失败降级为通用提示
-	}
-	if len(list) == 0 {
-		return "✅ /plugins: 未发现插件"
-	}
-	var out []string
-	for _, p := range list {
-		text := p.Name
-		if p.Version != "" {
-			text += " v" + p.Version
-		}
-		if len(p.Capabilities) > 0 {
-			text += " [" + strings.Join(p.Capabilities, ",") + "]"
-		}
-		text += "  " + p.Status
-		if p.Status == "failed" && p.Error != "" {
-			text += "  " + p.Error
-		}
-		out = append(out, text)
-	}
-	return strings.Join(out, "\n")
-}
-
-// renderProviders 把 /provider 结果（[]ProviderInfo JSON）渲染为多行 info 文本。
-// 每行：标记 名称 模型数；● 是当前 provider（协议槽占用者）。切换用 /provider <name>。
-func renderProviders(data json.RawMessage) string {
-	var list []client.ProviderInfo
-	if err := json.Unmarshal(data, &list); err != nil {
-		return "✅ 命令已执行: /provider" // 载荷解析失败降级为通用提示
-	}
-	if len(list) == 0 {
-		return "✅ /provider: 无 Provider 壳（协议槽空置）"
-	}
-	var out []string
-	for _, p := range list {
-		mark := "  "
-		if p.Current {
-			mark = "● "
-		}
-		out = append(out, fmt.Sprintf("%s%s  %d 个模型", mark, p.Name, p.Models))
-	}
-	return strings.Join(out, "\n")
-}
-
 // renderModels 把 /model 结果（[]ModelInfo JSON）渲染为多行 info 文本。
 // 每行：标记 名称 [供应商] 上下文；● 是当前主模型。切换用 /model <name>。
 func renderModels(data json.RawMessage) string {
@@ -767,7 +713,7 @@ func renderModels(data json.RawMessage) string {
 		return "✅ 命令已执行: /model" // 载荷解析失败降级为通用提示
 	}
 	if len(list) == 0 {
-		return "✅ /model: 无模型清单（插件没有模型数据表）"
+		return "✅ /model: 无模型清单（模型数据表是空的）"
 	}
 	var out []string
 	for _, m := range list {

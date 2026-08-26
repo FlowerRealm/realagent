@@ -36,7 +36,11 @@ dev: all             ## 开发模式：后台起 core + 前台跑 TUI，TUI 退�
 	wait $$core_pid 2>/dev/null; \
 	exit $$rc
 
-test: $(NINJA)       ## 运行 CTest
+# 先构建全部目标（含测试可执行文件）再跑 ctest。只 configure 不构建的话，
+# 干净的 build 目录里根本没有测试二进制，ctest 会把四个用例全报 "Not Run"——
+# 那是"没跑"，不是"通过"，而退出码长得跟真失败一样。
+test: $(NINJA)       ## 构建全部目标（含测试）并运行 CTest
+	cmake --build $(BUILD_DIR)
 	ctest --test-dir $(BUILD_DIR) --output-on-failure
 
 run: core            ## 启动 core 服务（127.0.0.1:12345）

@@ -11,8 +11,6 @@ endif()
 
 find_package(Boost REQUIRED COMPONENTS json)
 find_package(spdlog REQUIRED)
-# realugin：插件体系（C ABI + 加载器）。装在别处就给 CMAKE_PREFIX_PATH
-find_package(realugin REQUIRED)
 # macOS 的 libcurl 是系统库（SDK 自带头），FindCURL 会把 SDK usr/include 当 include dir
 # 注入为 isystem——与 brew libc++ 头冲突。因此只取库路径，不用 CURL::libcurl target。
 find_package(CURL REQUIRED)
@@ -20,51 +18,37 @@ find_package(CURL REQUIRED)
 find_path(QUICHE_INCLUDE_DIR quiche.h)
 find_library(QUICHE_LIBRARY NAMES quiche)
 
-# —— realagent::sdk —— realagent 的插件词汇表（agent_caps.h）。
-# realugin 只给机制，能力键叫什么、什么签名是这边的事；插件工程 find_package(realagent)
-# 拿到它。纯 C 头，零依赖（只 include realugin/plugin_api.h）。
-add_library(realagent_sdk INTERFACE)
-add_library(realagent::sdk ALIAS realagent_sdk)
-set_target_properties(realagent_sdk PROPERTIES EXPORT_NAME sdk)
-target_link_libraries(realagent_sdk INTERFACE realugin::sdk)
-target_include_directories(realagent_sdk INTERFACE
-  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/sdk>
-  $<INSTALL_INTERFACE:include>)
-
-add_executable(realagent-core
-  src/main.cpp
+# —— core 源码。三套协议各占 upstream/ 与 downstream/ 各一个文件（ADR-0017），
+# llm.cpp 只放派发与共有部分；内置工具在 tools（ADR-0016：从前是 5 个动态库容器）——
+add_library(realagent_core_lib STATIC
   src/config.cpp
-  src/extension/slots.cpp
+  src/llm/llm.cpp
+  src/llm/upstream/anthropic_messages.cpp
+  src/llm/upstream/openai_chat.cpp
+  src/llm/upstream/openai_responses.cpp
+  src/llm/downstream/anthropic_messages.cpp
+  src/llm/downstream/openai_chat.cpp
+  src/llm/downstream/openai_responses.cpp
+  src/tools/tools.cpp
   src/agent/executor.cpp
   src/agent/approval.cpp
   src/agent/agent.cpp
   src/agent/session.cpp
+)
+target_include_directories(realagent_core_lib PUBLIC include)
+target_link_libraries(realagent_core_lib PUBLIC Boost::json PRIVATE ${CURL_LIBRARIES})
+
+add_executable(realagent-core
+  src/main.cpp
   src/server/quic_server.cpp
 )
 target_include_directories(realagent-core PRIVATE include ${QUICHE_INCLUDE_DIR})
 target_link_libraries(realagent-core PRIVATE
-  realagent::sdk
-  realugin::loader
-  Boost::json
+  realagent_core_lib
   spdlog::spdlog
   ${CURL_LIBRARIES}
   ${QUICHE_LIBRARY}
 )
-
-# —— 安装：只装 SDK（core 自己是可执行文件，另说） ——
-include(GNUInstallDirs)
-include(CMakePackageConfigHelpers)
-install(TARGETS realagent_sdk EXPORT realagent-targets)
-install(DIRECTORY sdk/realagent DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
-install(EXPORT realagent-targets
-  FILE realagent-targets.cmake
-  NAMESPACE realagent::
-  DESTINATION ${CMAKE_INSTALL_DATADIR}/realagent/cmake)
-configure_package_config_file(${CMAKE_CURRENT_SOURCE_DIR}/../cmake/realagent-config.cmake.in
-  ${CMAKE_CURRENT_BINARY_DIR}/realagent-config.cmake
-  INSTALL_DESTINATION ${CMAKE_INSTALL_DATADIR}/realagent/cmake)
-install(FILES ${CMAKE_CURRENT_BINARY_DIR}/realagent-config.cmake
-  DESTINATION ${CMAKE_INSTALL_DATADIR}/realagent/cmake)
 
 enable_testing()
 add_subdirectory(tests)

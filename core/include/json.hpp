@@ -6,18 +6,16 @@
  *  - 链式 operator[]：读缺键返回 null 不抛异常；写自动构造对象/数组
  *  - 宽容 parse：全文解析失败后截取首尾 {} 之间重试（LLM 输出带额外文本）
  *  - optional 提取器：as_string/as_int64 等返回 optional 不抛异常
- *  - struct ⇄ JSON：BOOST_DESCRIBE_STRUCT 描述过的类型走 to_json / strict_from，
+ *  - struct → JSON：BOOST_DESCRIBE_STRUCT 描述过的类型走 to_json，
  *    字段表由 describe 生成，core 不手写逐字段搬运
  */
 #pragma once
 
 #include <boost/describe.hpp>
 #include <boost/json.hpp>
-#include <boost/mp11.hpp>
 
 #include <cstddef>
 #include <cstdint>
-#include <expected>
 #include <initializer_list>
 #include <limits>
 #include <optional>
@@ -142,44 +140,15 @@ public:
 
 inline std::string serialize(const json& v) { return v.dump(); }
 
-/* —— struct ⇄ JSON（BOOST_DESCRIBE_STRUCT 描述过的类型） —— */
+/* —— struct → JSON（BOOST_DESCRIBE_STRUCT 描述过的类型） ——
+ *
+ * 只有出站一个方向。入站的 strict_from（严格解构、缺字段一次报全）随 plugin.json
+ * 一起删除（ADR-0016）——它唯一的读者是那份人手写的插件清单。 */
 
-/* 出站：struct → JSON。字段名与顺序取自 describe 的字段表，与结构体声明逐字一致。 */
+/* 字段名与顺序取自 describe 的字段表，与结构体声明逐字一致。 */
 template <class T>
 json to_json(const T& v) {
     return json(boost::json::value_from(v));
-}
-
-/* 入站：JSON → struct，严格解构——描述的字段缺一即失败，绝不静默补默认值。
- * 空串/0 混进结构体会一路传下去，等发现时早已离案发现场十万八千里。
- *
- * 用于人手写的数据（plugin.json 一类：手改、装一半、打错字都是常态）。
- * 插件在运行时吐出的事件不走这里——那是插件自己的契约，core 不替它把关。
- *
- * 失败以返回值给出（try_value_to 不抛）：调用方要拿错误原文报给用户，
- * 而不是让异常穿过一路 C ABI 边界（ADR-0001）。
- *
- * boost 原生错误只有一句 "source composite size does not match target size"，
- * 不说缺谁。字段表既然是现成的，就自己比一遍、一次报全（对齐 Config::load）。 */
-template <class T>
-std::expected<T, std::string> strict_from(const json& v, std::string_view what) {
-    if (auto r = boost::json::try_value_to<T>(static_cast<const boost::json::value&>(v)))
-        return std::move(*r);
-    std::vector<std::string> missing;
-    if (v.is_object()) {
-        using members = boost::describe::describe_members<T, boost::describe::mod_public>;
-        boost::mp11::mp_for_each<members>([&](auto D) {
-            if (!v.as_object().if_contains(D.name)) missing.emplace_back(D.name);
-        });
-    }
-    std::string msg(what);
-    if (missing.empty()) return std::unexpected(msg + ": 字段类型不符 — " + v.dump());
-    msg += ": 缺必需键 [";
-    for (std::size_t i = 0; i < missing.size(); ++i) {
-        if (i != 0) msg += ", ";
-        msg += missing[i];
-    }
-    return std::unexpected(msg + "]");
 }
 
 } // namespace realagent
