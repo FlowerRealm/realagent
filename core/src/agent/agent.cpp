@@ -284,11 +284,14 @@ void Agent::run(const std::string& user_input) {
             for (const auto& tu : out.tool_uses) {
                 if (abort_.load()) break;
                 broadcast("tool_execution_start", json{{"name", tu.name}, {"id", tu.id}});
-                const auto r = exe_.execute(tu.id, tu.name, tu.input);
+                const json r = exe_.execute(tu.id, tu.name, tu.input);
+                const int status = static_cast<int>(r["status"].as_int64().value_or(0));
+                const bool interrupted = r["interrupted"].as_bool().value_or(false);
+                const std::string output = r["output"].as_string().value_or("");
                 broadcast("tool_execution_end", json{{"name", tu.name},
                                                      {"id", tu.id},
-                                                     {"status", r.status},
-                                                     {"interrupted", r.interrupted}});
+                                                     {"status", status},
+                                                     {"interrupted", interrupted}});
                 json tr;
                 tr["role"] = "user";
                 tr["content"] = json::array();
@@ -297,15 +300,15 @@ void Agent::run(const std::string& user_input) {
                 tb["tool_use_id"] = tu.id;
                 // 被中断的结果照实说，别混进"命令失败了"里——模型据此判断该不该重试，
                 // 这两件事它的反应完全不同。手上那截输出仍然给它，那是真跑出来的
-                tb["content"] = r.interrupted
-                    ? (r.messages.empty() ? std::string("interrupted by user")
-                                          : r.messages + "\n[interrupted by user]")
-                    : r.messages;
-                if (r.status != 0 || r.interrupted) tb["is_error"] = true;
+                tb["content"] = interrupted
+                    ? (output.empty() ? std::string("interrupted by user")
+                                      : output + "\n[interrupted by user]")
+                    : output;
+                if (status != 0 || interrupted) tb["is_error"] = true;
                 tr["content"].push_back(tb);
                 record(tr);
                 ++executed;
-                if (r.interrupted) break;
+                if (interrupted) break;
             }
             if (abort_.load()) {
                 for (size_t i = executed; i < out.tool_uses.size(); ++i) {

@@ -9,7 +9,6 @@
 #include <cstdio>
 #include <fstream>
 #include <mutex>
-#include <sstream>
 
 namespace realagent {
 
@@ -17,18 +16,12 @@ namespace {
 
 constexpr size_t kMaxOut = 50000; // 工具输出截断：50KB
 
-/* 错误结果的唯一写法（JSON 由 json 类拼，不手写字符串） */
-ToolResult fail(const std::string& msg) {
-    json e;
-    e["error"] = msg;
-    return {1, e.dump()};
+/* 结果只有一种形状：{"status", "output"}。status 非零即错，output 是给模型看的文本。 */
+json result(int status, std::string output) {
+    return json{{"status", status}, {"output", std::move(output)}};
 }
-
-ToolResult ok(const std::string& what) {
-    json e;
-    e["ok"] = what;
-    return {0, e.dump()};
-}
+json fail(const std::string& msg) { return result(1, msg); }
+json ok(const std::string& what) { return result(0, what); }
 
 /* 取一个字符串参数；缺失/非字符串返回 nullopt */
 std::optional<std::string> arg(const json& params, std::string_view key) {
@@ -37,7 +30,7 @@ std::optional<std::string> arg(const json& params, std::string_view key) {
 
 /* ==================== read ==================== */
 
-ToolResult do_read(const json& params) {
+json do_read(const json& params) {
     const auto path = arg(params, "file_path");
     if (!path) return fail("missing file_path");
 
@@ -54,12 +47,12 @@ ToolResult do_read(const json& params) {
         buf.resize(kMaxOut);
         buf.replace(buf.size() - 3, 3, "...");
     }
-    return {0, buf};
+    return result(0, std::move(buf));
 }
 
 /* ==================== edit（+x-0 = 创建） ==================== */
 
-ToolResult do_edit(const json& params) {
+json do_edit(const json& params) {
     const auto path = arg(params, "file_path");
     if (!path) return fail("missing file_path");
     const auto new_s = arg(params, "new_string");
@@ -114,7 +107,7 @@ void emit_output(const EmitFn& emit, const std::string& call_id, const std::stri
     emit("tool_output", ev.dump());
 }
 
-ToolResult do_bash(const std::string& call_id, const json& params, const EmitFn& emit) {
+json do_bash(const std::string& call_id, const json& params, const EmitFn& emit) {
     const auto cmd = arg(params, "command");
     if (!cmd) return fail("missing command");
 
@@ -199,7 +192,7 @@ ToolResult do_bash(const std::string& call_id, const json& params, const EmitFn&
     if (!reaped) waitpid(pid, &st, 0);
 
     const int rc = WIFEXITED(st) ? WEXITSTATUS(st) : 128 + WTERMSIG(st);
-    return {rc, out}; // 非零退出码视为错误
+    return result(rc, std::move(out)); // 非零退出码视为错误
 }
 
 /* ==================== 工具清单 ==================== */
@@ -228,8 +221,8 @@ const ToolDef* find_tool(std::string_view name) {
     return it == std::end(k_tools) ? nullptr : it;
 }
 
-ToolResult run_tool(const std::string& call_id, const std::string& name,
-                    const std::string& params_json, const EmitFn& emit) {
+json run_tool(const std::string& call_id, const std::string& name,
+              const std::string& params_json, const EmitFn& emit) {
     const json params = json::parse(params_json).value_or(json{});
     if (name == "read") return do_read(params);
     if (name == "edit") return do_edit(params);

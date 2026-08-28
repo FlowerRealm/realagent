@@ -275,7 +275,7 @@ _Avoid_: `finalize`（原指把 streaming 消息收进列表，行模型下已�
 - 架构：core 为常驻服务，客户端（TUI/未来 gui）通过 **QUIC/HTTP3** 连接（ADR-0006）。REST 语义（POST /message、POST /approval-response 等）；推送流为 HTTP/3 长生命周期单向流（SSE 语义），**全可靠**（增量与事件无差别，QUIC 可靠流原生保证，无自建确认机制）。0-RTT 快握手。支持公网部署。
 - QUIC 库：core 用 **Cloudflare quiche**（QUIC + HTTP/3 一体，`core/CMakeLists.txt:17-19`）；TUI 用 quic-go。msquic 于 2026-08-09 被弃（纯传输层无 H3 语义），ADR-0006 当时记的替代品是 ngtcp2 + nghttp3，但落地的是 quiche——**此次换库无 ADR 记录，理由未知**（ADR-0006 与本条原文均未更新，ADR-0002 已在用"quiche 非线程安全"作论据）。
 - 出站 Provider 请求：core 用 libcurl（HTTP/1.1 客户端，请求 DeepSeek）；入站客户端通信走 QUIC。
-- 工具结果：JSON 回传，结构为 `status + messages`。
+- 工具结果：一个 json，形状 `{"status": <int, 0=成功>, "output": <string, 给模型看的文本>}`；`Executor::execute` 再加一个 `"interrupted"` 键（core 本次执行期间提没提过中止）。没有 `ToolResult`/`ExecResult` 结构体——工具本来就在拼 json，两个字段的信封是多余的。
 - JSON 实现：参考 `~/revlm/backend/include/util/json.hpp`（boost::json 封装：默认 `{}`、链式 operator[]、宽容 parse、optional 提取器）。
 - DeepSeek 接入：端点 `https://api.deepseek.com/anthropic`，模型 `deepseek-v4-flash`（或 `deepseek-v4-pro`），API key 见 platform.deepseek.com。工具调用与流式完整支持；`cache_control` 被忽略（验证首版无需 vendor 层）。
 - 参考资料：`OPENCODE_RESEARCH.md`（OpenCode 架构调研）。

@@ -33,26 +33,15 @@ static int run_tool_test(CoreContext& ctx) {
     // 这条验证从第二次运行起就不再验证它声称验证的东西
     std::remove("/tmp/ra_edit_test.txt");
 
-    {
-        const auto r = exe.execute("t1", "read", "{\"file_path\":\"" __FILE__ "\"}");
-        printf("read: status=%d messages=%.80s...\n\n", r.status, r.messages.c_str());
-    }
-    {
-        const auto r = exe.execute("t2", "edit", "{\"file_path\":\"/tmp/ra_edit_test.txt\",\"new_string\":\"hello realagent\\n\"}");
-        printf("edit(create): status=%d messages=%s\n", r.status, r.messages.c_str());
-    }
-    {
-        const auto r = exe.execute("t2", "edit", "{\"file_path\":\"/tmp/ra_edit_test.txt\",\"old_string\":\"\",\"new_string\":\"line2\\n\"}");
-        printf("edit(append): status=%d messages=%s\n", r.status, r.messages.c_str());
-    }
-    {
-        const auto r = exe.execute("t1", "read", "{\"file_path\":\"/tmp/ra_edit_test.txt\"}");
-        printf("read(verify): status=%d messages=%s\n", r.status, r.messages.c_str());
-    }
-    {
-        const auto r = exe.execute("t3", "bash", "{\"command\":\"echo tools-ok && ls /tmp/ra_edit_test.txt\"}");
-        printf("bash: status=%d messages=%s\n", r.status, r.messages.c_str());
-    }
+    const auto show = [](const char* tag, const json& r) {
+        printf("%s: status=%lld output=%.80s\n", tag, r["status"].as_int64().value_or(-1),
+               r["output"].as_string().value_or("").c_str());
+    };
+    show("read", exe.execute("t1", "read", "{\"file_path\":\"" __FILE__ "\"}"));
+    show("edit(create)", exe.execute("t2", "edit", "{\"file_path\":\"/tmp/ra_edit_test.txt\",\"new_string\":\"hello realagent\\n\"}"));
+    show("edit(append)", exe.execute("t2", "edit", "{\"file_path\":\"/tmp/ra_edit_test.txt\",\"old_string\":\"\",\"new_string\":\"line2\\n\"}"));
+    show("read(verify)", exe.execute("t1", "read", "{\"file_path\":\"/tmp/ra_edit_test.txt\"}"));
+    show("bash", exe.execute("t3", "bash", "{\"command\":\"echo tools-ok && ls /tmp/ra_edit_test.txt\"}"));
     return 0;
 }
 
