@@ -5,3 +5,5 @@ build/
 *.so
 .cache/
 .vscode/
+.claude/RESUME.md
+.claude/settings.local.json

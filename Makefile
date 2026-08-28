@@ -10,7 +10,7 @@ TUI       := $(BUILD_DIR)/realagent-tui
 $(NINJA):
 	cmake -S . -B $(BUILD_DIR) -G Ninja
 
-.PHONY: all core tui tool-test test run tui-run clean help
+.PHONY: all core tui tool-test test run tui-run fmt fmt-check clean help
 
 all: core tui        ## 构建全部（core + TUI），默认目标
 
@@ -48,6 +48,14 @@ run: core            ## 启动 core 服务（127.0.0.1:12345）
 
 tui-run: tui         ## 启动 TUI 客户端
 	$(TUI)
+
+# 格式化的单一真相是 .clang-format。Ctrl+S(clangd)、AI 改动后的 hook、
+# pre-commit 校验全读同一份，三处不会打架。
+fmt:                              ## 按 .clang-format 就地格式化 core 的 C++ 源码
+	scripts/fmt.sh
+
+fmt-check:           ## 只校验格式，不改文件（pre-commit 走的也是这条）
+	scripts/fmt.sh --check
 
 clean:               ## 清空构建产物
 	rm -rf $(BUILD_DIR)
