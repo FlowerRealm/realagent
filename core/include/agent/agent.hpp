@@ -49,7 +49,7 @@ public:
     void interrupt();
 
     /* 会话消息（抽象格式，供持久化/构建 dialog） */
-    json& messages() { return messages_; }
+    nlohmann::json& messages() { return messages_; }
 
     /* 新建会话（/new 命令）：清空历史 + 换一个会话文件。
      * 旧文件不动——它是记录，不是缓存。 */
@@ -67,26 +67,26 @@ public:
 
     /* SseParser 产出的事件落在这里：累积进 out，该实时广播的顺手广播。
      * public 只因为 libcurl 的写回调是个自由函数，进不来私有区。 */
-    void on_llm_event(std::string_view type, const json& ev, LlmOutcome& out,
+    void on_llm_event(std::string_view type, const nlohmann::json& ev, LlmOutcome& out,
                       const std::string& model);
 
 private:
     /* 消息入账的唯一入口：进内存，同时落盘。
      * run() 里有六处产生消息，全都走这里——散着写 push_back 迟早漏掉一处，
      * 而漏掉的那条恢复会话时就凭空消失了。 */
-    void record(json msg);
+    void record(nlohmann::json msg);
 
     /* 构建抽象对话（system/messages/tools），tier 决定 dialog["model"] 取哪一档 */
-    json build_dialog(ModelTier tier) const;
+    nlohmann::json build_dialog(ModelTier tier) const;
     /* 一次 LLM 调用：build_request → libcurl → SseParser → LlmOutcome */
-    bool llm_call(const json& dialog, LlmOutcome& out);
+    bool llm_call(const nlohmann::json& dialog, LlmOutcome& out);
     /* 广播事件（走 CoreContext::emit_fn） */
-    void broadcast(const std::string& type, const json& payload);
+    void broadcast(const std::string& type, const nlohmann::json& payload);
 
     CoreContext& ctx_;
     Executor& exe_;
     Pricing pricing_;     // 启动时读一次（配置不热重载，ADR-0010）
-    json messages_;
+    nlohmann::json messages_;
     Session session_;     // 当前会话的落盘去处（JSONL，append-only）
     double run_cost_ = 0; // 本次 run 累计花费（USD），一次用户输入起算清零
     std::atomic<bool> abort_{false};

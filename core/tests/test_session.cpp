@@ -21,7 +21,7 @@
 #include "agent/session.hpp"
 
 namespace fs = std::filesystem;
-using realagent::json;
+using nlohmann::json;
 using realagent::Session;
 
 static int failures = 0;
@@ -37,14 +37,8 @@ static int failures = 0;
 
 /* 造一条 user 消息（与 Agent::run 产出的形状一致） */
 static json user_msg(const std::string& text) {
-    json m;
-    m["role"] = "user";
-    m["content"] = json::array();
-    json b;
-    b["type"] = "text";
-    b["text"] = text;
-    m["content"].push_back(b);
-    return m;
+    return json{{"role", "user"},
+                {"content", json::array({json{{"type", "text"}, {"text", text}}})}};
 }
 
 int main() {
@@ -68,25 +62,19 @@ int main() {
         first_id = s.id();
         s.append(user_msg("第一句"));
         // thinking 块带 signature：转换层最容易丢的就是这种字段，同形存储不存在这个问题
-        json am;
-        am["role"] = "assistant";
-        am["content"] = json::array();
-        json th;
-        th["type"] = "thinking";
-        th["thinking"] = "想一想";
-        th["signature"] = "sig-1";
-        am["content"].push_back(th);
-        json tb;
-        tb["type"] = "text";
-        tb["text"] = "答";
-        am["content"].push_back(tb);
+        const json am{
+            {"role", "assistant"},
+            {"content", json::array({json{{"type", "thinking"},
+                                          {"thinking", "想一想"},
+                                          {"signature", "sig-1"}},
+                                     json{{"type", "text"}, {"text", "答"}}})}};
         s.append(am);
 
         Session r;
         json loaded;
         CHECK(r.resume(first_id, loaded), "resume 成功");
         CHECK(loaded.is_array() && loaded.size() == 2, "读回 2 条");
-        CHECK(json(loaded[1]).dump() == am.dump(), "assistant 消息逐字节相同（含 signature）");
+        CHECK(loaded[1].dump() == am.dump(), "assistant 消息逐字节相同（含 signature）");
         CHECK(r.id() == first_id, "resume 后 id 切到目标会话");
     }
 
@@ -103,9 +91,7 @@ int main() {
         Session r;
         json loaded;
         r.resume(s.id(), loaded);
-        CHECK(loaded.size() == 1 &&
-                  json(loaded[0])["content"][0]["text"].as_string().value_or("") ==
-                      "上一行\n下一行",
+        CHECK(loaded.size() == 1 && loaded[0]["content"][0]["text"] == "上一行\n下一行",
               "换行原样读回");
     }
 

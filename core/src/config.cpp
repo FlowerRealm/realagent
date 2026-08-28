@@ -22,21 +22,23 @@ fs::path global_dir() { return fs::path(getenv_or("HOME", ".")); }
 
 // 读一份 settings.json。文件不存在 → nullopt（不是错误，用默认树就行）；
 // 打不开 / 解析不了 → 错误（读不懂就别猜）
-std::expected<std::optional<json>, std::string> read_settings(const fs::path& path) {
-    if (!fs::exists(path)) return std::optional<json>{};
+std::expected<std::optional<nlohmann::json>, std::string> read_settings(const fs::path& path) {
+    if (!fs::exists(path)) return std::optional<nlohmann::json>{};
     std::ifstream f(path);
     if (!f) return std::unexpected(path.string() + " 打不开");
     std::string text((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
-    auto j = json::parse(text);
-    if (!j) return std::unexpected(path.string() + " 不是合法 JSON");
-    return std::optional<json>{std::move(*j)};
+    // 第三个参数 false = 解析失败不抛，返回一个 discarded 值
+    nlohmann::json j = nlohmann::json::parse(text, nullptr, false);
+    if (j.is_discarded()) return std::unexpected(path.string() + " 不是合法 JSON");
+    return std::optional<nlohmann::json>{std::move(j)};
 }
 
 // 逐键覆盖：用户配了哪个键就换哪个键，没提的保留默认值。
 // 配置树是平的（ADR-0016 删掉 plugins 那一节之后再没有嵌套键），所以不必递归——
 // 需要嵌套的那天连着默认树一起加，不提前留机械。
-void merge_into(json& dst, const json& src) {
-    for (const auto& k : src.keys()) dst[k] = src[k];
+void merge_into(nlohmann::json& dst, const nlohmann::json& src) {
+    if (!src.is_object()) return; // settings.json 是合法 JSON 但不是对象：当没配
+    for (const auto& [k, v] : src.items()) dst[k] = v;
 }
 
 // tmp + rename 原子写。断电或进程被杀只会留下临时文件，不会留半截的 settings.json
@@ -87,12 +89,12 @@ std::expected<Config, std::string> Config::load() {
 
 std::string Config::get(std::string_view key) const {
     std::lock_guard<std::mutex> lk(*mutex_);
-    return settings_[key].as_string().value_or("");
+    return settings_.value(std::string(key), std::string());
 }
 
 bool Config::has(std::string_view key) const {
     std::lock_guard<std::mutex> lk(*mutex_);
-    return settings_.contains(key);
+    return settings_.contains(std::string(key));
 }
 
 // 不做档位间回落：small_model 空就是空串。回落会让"我明明配了小模型"与
@@ -101,7 +103,7 @@ std::string Config::model(ModelTier tier) const {
     return get(tier == ModelTier::Small ? "small_model" : "model");
 }
 
-bool Config::persist(std::string_view key, const json& v) {
+bool Config::persist(std::string_view key, const nlohmann::json& v) {
     const fs::path target = settings_path(global_dir());
 
     // 点对点：读出文件原样，只改这一个键。不 dump 内存树——默认值不进用户的文件。
@@ -111,13 +113,13 @@ bool Config::persist(std::string_view key, const json& v) {
         fprintf(stderr, "[config] persist 放弃：%s\n", file.error().c_str());
         return false;
     }
-    json tree = file->value_or(json{}); // 文件不存在 → 空对象起头
-    tree[key] = v; // 只动这一个键，用户配的其余键原样留在文件里
+    nlohmann::json tree = file->value_or(nlohmann::json::object()); // 文件不存在 → 空对象起头
+    tree[std::string(key)] = v; // 只动这一个键，用户配的其余键原样留在文件里
     if (!write_atomic(target, tree.dump())) return false;
 
     // 落盘成功才改内存：失败时内存与文件都没变，不会出现"切了档但没写进去"
     std::lock_guard<std::mutex> lk(*mutex_);
-    settings_[key] = v;
+    settings_[std::string(key)] = v;
     return true;
 }
 
@@ -127,7 +129,7 @@ std::string Config::models_path() const {
     return (global_dir() / ".realagent" / "models.json").string();
 }
 
-json Config::to_json() const {
+nlohmann::json Config::to_json() const {
     std::lock_guard<std::mutex> lk(*mutex_);
     return settings_;
 }

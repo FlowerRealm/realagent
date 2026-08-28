@@ -8,7 +8,7 @@
 namespace realagent {
 
 Agent::Agent(CoreContext& ctx, Executor& exe) : ctx_(ctx), exe_(exe) {
-    messages_ = json::array();
+    messages_ = nlohmann::json::array();
     // 模型数据表读一次。读不动就报出来，之后照常跑——没有表只是不算钱，
     // 不是"不能对话"，为它拒绝启动是把一个次要功能提成了必需品
     std::string err;
@@ -17,14 +17,14 @@ Agent::Agent(CoreContext& ctx, Executor& exe) : ctx_(ctx), exe_(exe) {
 }
 
 void Agent::reset() {
-    messages_ = json::array();
+    messages_ = nlohmann::json::array();
     session_ = Session(); // 换个新会话文件；旧的留在盘上，它是记录不是缓存
     run_cost_ = 0;
     abort_.store(false);
 }
 
 bool Agent::resume(const std::string& id) {
-    json loaded;
+    nlohmann::json loaded;
     Session s;
     if (!s.resume(id, loaded)) return false; // 先在副本上试，成了才动自己
     session_ = std::move(s);
@@ -34,7 +34,7 @@ bool Agent::resume(const std::string& id) {
     return true;
 }
 
-void Agent::record(json msg) {
+void Agent::record(nlohmann::json msg) {
     session_.append(msg); // 先落盘：进了内存却没进文件，恢复时就是一条凭空消失的消息
     messages_.push_back(std::move(msg));
 }
@@ -46,7 +46,7 @@ void Agent::interrupt() {
     exe_.interrupt();
 }
 
-void Agent::broadcast(const std::string& type, const json& payload) {
+void Agent::broadcast(const std::string& type, const nlohmann::json& payload) {
     if (ctx_.emit_fn) ctx_.emit_fn(type, payload.dump());
 }
 
@@ -82,7 +82,7 @@ static size_t curl_write_cb(char* ptr, size_t size, size_t nmemb, void* userdata
         return n;
     }
 
-    const bool ok = s->parser.feed(std::string_view(ptr, n), [s](std::string_view t, const json& ev) {
+    const bool ok = s->parser.feed(std::string_view(ptr, n), [s](std::string_view t, const nlohmann::json& ev) {
         s->self->on_llm_event(t, ev, *s->out, s->model);
     });
     // 解析失败：立刻中止传输。继续读下去只会攒出一个"成功但空"的回答，
@@ -94,16 +94,16 @@ static size_t curl_write_cb(char* ptr, size_t size, size_t nmemb, void* userdata
     return n;
 }
 
-void Agent::on_llm_event(std::string_view type, const json& ev, LlmOutcome& out,
+void Agent::on_llm_event(std::string_view type, const nlohmann::json& ev, LlmOutcome& out,
                          const std::string& model) {
     if (type == "message_update") {
-        out.text += ev["delta"].as_string().value_or("");
+        out.text += ev["delta"].get<std::string>();
         broadcast("message_update", ev); // 实时增量 → TUI 打字效果
     } else if (type == "thinking_start") {
-        out.thinking_signature = ev["signature"].as_string().value_or("");
+        out.thinking_signature = ev["signature"];
         broadcast("thinking_start", ev);
     } else if (type == "thinking_update") {
-        out.thinking += ev["delta"].as_string().value_or("");
+        out.thinking += ev["delta"].get<std::string>();
         broadcast("thinking_update", ev);
     } else if (type == "thinking_stop") {
         broadcast("thinking_stop", ev);
@@ -116,32 +116,31 @@ void Agent::on_llm_event(std::string_view type, const json& ev, LlmOutcome& out,
         const double cost = pricing_.cost(model, ev);
         if (cost <= 0) return;
         out.cost = cost;
-        json fwd;
-        fwd["cost"] = run_cost_ + cost; // 推送流里的花费一律是"本次 run 累计"
-        broadcast("status_update", fwd);
+        // 推送流里的花费一律是"本次 run 累计"
+        broadcast("status_update", nlohmann::json{{"cost", run_cost_ + cost}});
     } else if (type == "tool_use") {
         LlmOutcome::ToolUse tu;
-        tu.id = ev["id"].as_string().value_or("");
-        tu.name = ev["name"].as_string().value_or("");
-        tu.input = ev["input"].is_null() ? "{}" : json(ev["input"]).dump();
+        tu.id = ev["id"];
+        tu.name = ev["name"];
+        tu.input = ev["input"].is_null() ? "{}" : ev["input"].dump();
         out.tool_uses.push_back(std::move(tu));
     } else if (type == "stop") {
-        out.stop_reason = ev["reason"].as_string().value_or("stop");
+        out.stop_reason = ev["reason"];
     }
 }
 
 /* 把 thinking 块追加进 assistant content（thinking + signature）。
  * 思考块恒在正文/tool_use 块之前（协议约定顺序）。 */
-static void append_thinking(json& content, const LlmOutcome& out) {
+static void append_thinking(nlohmann::json& content, const LlmOutcome& out) {
     if (out.thinking.empty()) return;
-    json b;
+    nlohmann::json b;
     b["type"] = "thinking";
     b["thinking"] = out.thinking;
     if (!out.thinking_signature.empty()) b["signature"] = out.thinking_signature;
     content.push_back(b);
 }
 
-bool Agent::llm_call(const json& dialog, LlmOutcome& out) {
+bool Agent::llm_call(const nlohmann::json& dialog, LlmOutcome& out) {
     const HttpRequest req = build_request(*ctx_.config, dialog);
     if (req.url.rfind("http", 0) != 0) {
         // base_url 没配全，拼出来的是个相对路径。libcurl 会报一句难懂的错，
@@ -158,7 +157,7 @@ bool Agent::llm_call(const json& dialog, LlmOutcome& out) {
                 .curl = curl,
                 .parser = SseParser(*protocol_from(ctx_.config->get("protocol"))),
                 .out = &out,
-                .model = dialog["model"].as_string().value_or("")};
+                .model = dialog.value("model", std::string())};
     curl_easy_setopt(curl, CURLOPT_URL, req.url.c_str());
     curl_easy_setopt(curl, CURLOPT_POST, 1L);
     curl_easy_setopt(curl, CURLOPT_POSTFIELDS, req.body.c_str());
@@ -172,7 +171,7 @@ bool Agent::llm_call(const json& dialog, LlmOutcome& out) {
     if (hdrs) curl_easy_setopt(curl, CURLOPT_HTTPHEADER, hdrs);
 
     const CURLcode rc = curl_easy_perform(curl);
-    s.parser.flush([](std::string_view, const json&) {});
+    s.parser.flush([](std::string_view, const nlohmann::json&) {});
     curl_easy_cleanup(curl);
     if (hdrs) curl_slist_free_all(hdrs);
 
@@ -197,17 +196,18 @@ bool Agent::llm_call(const json& dialog, LlmOutcome& out) {
     return true;
 }
 
-json Agent::build_dialog(ModelTier tier) const {
-    json dialog;
+nlohmann::json Agent::build_dialog(ModelTier tier) const {
+    nlohmann::json dialog;
     dialog["model"] = ctx_.config->model(tier);
     dialog["system"] = "You are a helpful coding agent.";
     // 工具定义：静态表，LLM 见到的名字与 executor 查表用的名字是同一个
-    json tools = json::array();
+    nlohmann::json tools = nlohmann::json::array();
     for (const auto& t : tool_defs()) {
-        json tool;
+        nlohmann::json tool;
         tool["name"] = t.name;
         tool["description"] = t.description;
-        tool["input_schema"] = json::parse(t.parameters).value_or(json{});
+        // 工具 schema 是编译进来的字面量，解不动就是 core 自己写错了
+        tool["input_schema"] = nlohmann::json::parse(t.parameters);
         tools.push_back(tool);
     }
     dialog["tools"] = tools;
@@ -219,15 +219,11 @@ void Agent::run(const std::string& user_input) {
     abort_.store(false);
     exe_.reset(); // 中止痕迹与 abort_ 同一个生命周期，一起清
     run_cost_ = 0;
-    json um;
+    nlohmann::json um;
     um["role"] = "user";
-    um["content"] = json::array();
-    json ublock;
-    ublock["type"] = "text";
-    ublock["text"] = user_input;
-    um["content"].push_back(ublock);
+    um["content"] = nlohmann::json::array({nlohmann::json{{"type", "text"}, {"text", user_input}}});
     record(um);
-    broadcast("message_start", json{{"role", "user"}});
+    broadcast("message_start", nlohmann::json{{"role", "user"}});
 
     // 不设轮数上限：一个数字定不出"多少轮算跑飞了"——同一个任务，改个错字一轮，
     // 重构一个模块几十轮，两者都正常。真正让循环停下来的是下面四处 abort_ 检查点
@@ -235,67 +231,62 @@ void Agent::run(const std::string& user_input) {
     // 上限只会在最需要它继续的时候把长任务砍断，还不给用户任何解释。
     for (;;) {
         if (abort_.load()) {
-            broadcast("interrupted", json{});
+            broadcast("interrupted", nlohmann::json::object());
             break;
         }
-        broadcast("turn_start", json{});
+        broadcast("turn_start", nlohmann::json::object());
         LlmOutcome out;
         // 对话主链路走主模型；小模型档留给后续杂活调用点（标题/摘要）
         if (!llm_call(build_dialog(ModelTier::Main), out)) {
             if (abort_.load()) {
                 if (!out.text.empty() || !out.thinking.empty()) {
-                    json am;
+                    nlohmann::json am;
                     am["role"] = "assistant";
-                    am["content"] = json::array();
+                    am["content"] = nlohmann::json::array();
                     append_thinking(am["content"], out);
-                    if (!out.text.empty()) {
-                        json b;
-                        b["type"] = "text";
-                        b["text"] = out.text;
-                        am["content"].push_back(b);
-                    }
+                    if (!out.text.empty())
+                        am["content"].push_back(nlohmann::json{{"type", "text"}, {"text", out.text}});
                     record(am);
                 }
-                broadcast("interrupted", json{});
+                broadcast("interrupted", nlohmann::json::object());
             } else {
                 broadcast("turn_end",
-                          json{{"error", out.error.empty() ? "llm_call failed" : out.error}});
+                          nlohmann::json{{"error", out.error.empty() ? "llm_call failed" : out.error}});
             }
             break;
         }
         run_cost_ += out.cost;
 
         if (!out.tool_uses.empty()) {
-            json am;
+            nlohmann::json am;
             am["role"] = "assistant";
-            am["content"] = json::array();
+            am["content"] = nlohmann::json::array();
             append_thinking(am["content"], out);
             for (const auto& tu : out.tool_uses) {
-                json b;
-                b["type"] = "tool_use";
-                b["id"] = tu.id;
-                b["name"] = tu.name;
-                b["input"] = json::parse(tu.input).value_or(json{});
-                am["content"].push_back(b);
+                nlohmann::json in = nlohmann::json::parse(tu.input, nullptr, false);
+                am["content"].push_back(nlohmann::json{{"type", "tool_use"},
+                                             {"id", tu.id},
+                                             {"name", tu.name},
+                                             {"input", in.is_discarded() ? nlohmann::json::object() : in}});
             }
             record(am);
 
             size_t executed = 0;
             for (const auto& tu : out.tool_uses) {
                 if (abort_.load()) break;
-                broadcast("tool_execution_start", json{{"name", tu.name}, {"id", tu.id}});
-                const json r = exe_.execute(tu.id, tu.name, tu.input);
-                const int status = static_cast<int>(r["status"].as_int64().value_or(0));
-                const bool interrupted = r["interrupted"].as_bool().value_or(false);
-                const std::string output = r["output"].as_string().value_or("");
-                broadcast("tool_execution_end", json{{"name", tu.name},
+                broadcast("tool_execution_start", nlohmann::json{{"name", tu.name}, {"id", tu.id}});
+                const nlohmann::json r = exe_.execute(tu.id, tu.name, tu.input);
+                const int status = r["status"];
+                const bool interrupted = r["interrupted"];
+                const std::string output = r["output"];
+                broadcast("tool_execution_end", nlohmann::json{{"name", tu.name},
                                                      {"id", tu.id},
                                                      {"status", status},
                                                      {"interrupted", interrupted}});
-                json tr;
+                nlohmann::json tr;
                 tr["role"] = "user";
-                tr["content"] = json::array();
-                json tb;
+                tr["content"] = nlohmann::json::array();
+                nlohmann::json tb;
                 tb["type"] = "tool_result";
                 tb["tool_use_id"] = tu.id;
                 // 被中断的结果照实说，别混进"命令失败了"里——模型据此判断该不该重试，
@@ -312,21 +303,16 @@ void Agent::run(const std::string& user_input) {
             }
             if (abort_.load()) {
                 for (size_t i = executed; i < out.tool_uses.size(); ++i) {
-                    json tr;
-                    tr["role"] = "user";
-                    tr["content"] = json::array();
-                    json tb;
-                    tb["type"] = "tool_result";
-                    tb["tool_use_id"] = out.tool_uses[i].id;
-                    tb["content"] = "interrupted by user";
-                    tb["is_error"] = true;
-                    tr["content"].push_back(tb);
-                    record(tr);
+                    record(nlohmann::json{{"role", "user"},
+                                {"content", nlohmann::json::array({nlohmann::json{{"type", "tool_result"},
+                                                              {"tool_use_id", out.tool_uses[i].id},
+                                                              {"content", "interrupted by user"},
+                                                              {"is_error", true}}})}});
                 }
-                broadcast("interrupted", json{});
+                broadcast("interrupted", nlohmann::json::object());
                 break;
             }
-            broadcast("turn_end", json{{"tool_uses", (int)out.tool_uses.size()}});
+            broadcast("turn_end", nlohmann::json{{"tool_uses", (int)out.tool_uses.size()}});
             continue;
         }
 
@@ -334,22 +320,18 @@ void Agent::run(const std::string& user_input) {
         // 下一轮原样回传，而端点拒收空 text 块，那个会话从此每轮都 400。
         // 报错、不落盘（ADR-0017）
         if (out.text.empty() && out.thinking.empty()) {
-            broadcast("turn_end", json{{"error", "端点没有返回任何内容（HTTP 2xx 但流里一个事件都没有）"}});
+            broadcast("turn_end", nlohmann::json{{"error", "端点没有返回任何内容（HTTP 2xx 但流里一个事件都没有）"}});
             fprintf(stderr, "[agent] 空回答：不写入会话\n");
             break;
         }
-        json am;
+        nlohmann::json am;
         am["role"] = "assistant";
-        am["content"] = json::array();
+        am["content"] = nlohmann::json::array();
         append_thinking(am["content"], out);
-        if (!out.text.empty()) {
-            json b;
-            b["type"] = "text";
-            b["text"] = out.text;
-            am["content"].push_back(b);
-        }
+        if (!out.text.empty())
+            am["content"].push_back(nlohmann::json{{"type", "text"}, {"text", out.text}});
         record(am);
-        broadcast("turn_end", json{{"stop_reason", out.stop_reason}});
+        broadcast("turn_end", nlohmann::json{{"stop_reason", out.stop_reason}});
         break;
     }
 }

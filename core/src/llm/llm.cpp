@@ -7,15 +7,11 @@
  */
 #include "llm/llm.hpp"
 
-#include <boost/json.hpp>
-#include <boost/system/error_code.hpp>
-
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
 
 namespace realagent {
-namespace bj = boost::json;
 namespace fs = std::filesystem;
 
 /* ==================== 协议身份 ==================== */
@@ -82,11 +78,9 @@ std::string http_status_error(long status, const std::string& body) {
     std::string msg;
     // 各家的错误体形状不同，就近捞一层 message：捞得到就说人话，捞不到就把原文给他，
     // 绝不因为"没读懂错误体"而把一次失败说成成功
-    if (const auto j = json::parse(body); j && j->is_object()) {
-        if (const auto direct = (*j)["message"].as_string()) msg = *direct;
-        else if ((*j)["error"].is_object()) {
-            if (const auto m = (*j)["error"]["message"].as_string()) msg = *m;
-        }
+    if (const nlohmann::json j = nlohmann::json::parse(body, nullptr, false); j.is_object()) {
+        msg = j.value("/message"_json_pointer, std::string());
+        if (msg.empty()) msg = j.value("/error/message"_json_pointer, std::string());
     }
     if (msg.empty()) msg = body.substr(0, 400);
     return "端点返回 HTTP " + std::to_string(status) + (msg.empty() ? "" : "：" + msg);
@@ -94,7 +88,7 @@ std::string http_status_error(long status, const std::string& body) {
 
 /* ==================== 上行派发 ==================== */
 
-HttpRequest build_request(const Config& cfg, const json& dialog) {
+HttpRequest build_request(const Config& cfg, const nlohmann::json& dialog) {
     // 协议缺失/写错在 Config::missing_required 那一关就拦下了（ADR-0017），
     // 到这里一定解得出来。解不出来只可能是那一关漏了，宁可炸响也不要静默走某个默认
     const auto p = protocol_from(cfg.get("protocol"));
@@ -185,12 +179,10 @@ bool SseParser::flush(const EventSink&) {
 void emit_usage(const UsageCounts& u, const EventSink& sink) {
     if (!sink) return;
     if (u.input == 0 && u.output == 0 && u.cache_read == 0 && u.cache_write == 0) return;
-    json ev;
-    ev["input"] = u.input;
-    ev["output"] = u.output;
-    ev["cache_read"] = u.cache_read;
-    ev["cache_write"] = u.cache_write;
-    sink("usage", ev);
+    sink("usage", nlohmann::json{{"input", u.input},
+                       {"output", u.output},
+                       {"cache_read", u.cache_read},
+                       {"cache_write", u.cache_write}});
 }
 
 /* ==================== 模型数据表 / 计价 ==================== */
@@ -217,44 +209,42 @@ Pricing Pricing::load(const Config& cfg, std::string* error) {
         text.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
     }
 
-    const auto parsed = json::parse(text);
-    if (!parsed || !parsed->is_array()) {
+    const nlohmann::json parsed = nlohmann::json::parse(text, nullptr, false);
+    if (!parsed.is_array()) {
         if (error) *error = "模型数据表不是 JSON 数组: " + path;
         return {};
     }
     Pricing out;
-    for (std::size_t i = 0; i < parsed->size(); ++i) {
-        const json m = (*parsed)[i];
-        const auto name = m["name"].as_string();
-        const auto owned_by = m["owned_by"].as_string();
-        const auto context = m["context"].as_int64();
-        // 严格：字段缺一即失败，不跳过坏条目、不补默认值。半份表比没有表更难查
-        if (!name || !owned_by || !context || !m["pricing"].is_object()) {
+    for (const nlohmann::json& m : parsed) {
+        // 严格：字段缺一即失败，不跳过坏条目、不补默认值。半份表比没有表更难查。
+        // 缺键要先用 find 问出来——const operator[] 撞上缺键是未定义行为
+        const auto name = m.find("name");
+        const auto owned_by = m.find("owned_by");
+        const auto context = m.find("context");
+        const auto pricing = m.find("pricing");
+        if (name == m.end() || !name->is_string() || owned_by == m.end() ||
+            !owned_by->is_string() || context == m.end() || !context->is_number_integer() ||
+            pricing == m.end() || !pricing->is_object()) {
             if (error)
                 *error = "模型数据表条目缺字段（name/owned_by/context/pricing）: " + m.dump();
             return {};
         }
-        out.pricing_[*name] = m["pricing"];
-        json e;
-        e["name"] = *name;
-        e["owned_by"] = *owned_by;
-        e["context"] = *context;
-        out.models_.push_back(std::move(e));
+        out.pricing_[*name] = *pricing;
+        out.models_.push_back(nlohmann::json{
+            {"name", *name}, {"owned_by", *owned_by}, {"context", *context}});
     }
     return out;
 }
 
-double Pricing::cost(const std::string& model, const json& usage) const {
+double Pricing::cost(const std::string& model, const nlohmann::json& usage) const {
     const auto it = pricing_.find(model);
     if (it == pricing_.end() || !usage.is_object()) return 0;
     double total = 0;
     // 键名两边同源（都是本表的口径），此处不认识具体是哪些键，也不需要认识
-    for (const auto& [k, tokens] : usage.as_object()) {
-        const json unit = it->second[std::string_view(k)];
-        const auto price = unit.as_double();
-        const auto n = json(tokens).as_double();
-        if (!price || !n) continue;
-        total += *n * *price / 1e6;
+    for (const auto& [k, tokens] : usage.items()) {
+        const auto unit = it->second.find(k);
+        if (unit == it->second.end() || !unit->is_number() || !tokens.is_number()) continue;
+        total += tokens.get<double>() * unit->get<double>() / 1e6;
     }
     return total;
 }

@@ -311,10 +311,13 @@ void QuicServer::run() {
                             // 审批裁决回传（PROTOCOL.md）→ 审批协调器
                             std::string resp_body = "{\"error\":\"no approval handler\"}";
                             if (impl_->cbs.on_approval_response) {
-                                auto b = json::parse(req.body).value_or(json{});
+                                const nlohmann::json b =
+                                    nlohmann::json::parse(req.body, nullptr, false);
+                                const auto id = b.find("id");
                                 impl_->cbs.on_approval_response(
-                                    b["id"].as_string().value_or(""),
-                                    b["allow"].as_bool().value_or(false));
+                                    id != b.end() && id->is_string() ? id->get<std::string>()
+                                                                     : std::string(),
+                                    b.value("allow", false));
                                 resp_body = "{\"status\":\"ok\"}";
                             }
                             send_json(c, sid, resp_body);

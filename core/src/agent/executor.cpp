@@ -57,24 +57,24 @@ void Executor::reset() {
     interrupted_ = false;
 }
 
-json Executor::execute(const std::string& call_id, const std::string& name,
+nlohmann::json Executor::execute(const std::string& call_id, const std::string& name,
                        const std::string& params_json) {
     const ToolDef* tool = find_tool(name);
-    if (!tool) return json{{"status", 1}, {"output", "unknown tool"}, {"interrupted", false}};
+    if (!tool) return nlohmann::json{{"status", 1}, {"output", "unknown tool"}, {"interrupted", false}};
 
     std::string reason;
     if (!check_permission(*tool, params_json, &reason))
-        return json{{"status", 1}, {"output", reason}, {"interrupted", false}};
+        return nlohmann::json{{"status", 1}, {"output", reason}, {"interrupted", false}};
 
     // 登记在先、执行在后：这个顺序才让 interrupt() 要么打断得到它、要么撞上 interrupted_，
     // 不存在"检查完了才开始跑"的缝
     {
         std::lock_guard<std::mutex> lk(inflight_mtx_);
         if (interrupted_)
-            return json{{"status", 1}, {"output", "interrupted by user"}, {"interrupted", true}};
+            return nlohmann::json{{"status", 1}, {"output", "interrupted by user"}, {"interrupted", true}};
         inflight_ = true;
     }
-    json r = run_tool(call_id, name, params_json, ctx_.emit_fn);
+    nlohmann::json r = run_tool(call_id, name, params_json, ctx_.emit_fn);
     {
         std::lock_guard<std::mutex> lk(inflight_mtx_);
         // "算不算被中断"由 core 判——中止是 core 提的，工具不必编造状态码

@@ -241,7 +241,7 @@ _Avoid_: `finalize`（原指把 streaming 消息收进列表，行模型下已�
 - 网络传输：core 内置 libcurl（同步 + SSE 流式）。
 - 日志：spdlog（第三方依赖）。
 - core 第三方依赖：libcurl + spdlog 两个（FTXUI 属 TUI 层）。
-  - 实况注（2026-08-16）：实际是**四个**——libcurl、spdlog、Boost.json、quiche（`core/CMakeLists.txt:12-19`）。括号里的 FTXUI 是 ADR-0007 之前"TUI 也用 C++"方案的残留，本项目**没有也不会**依赖它（TUI 是 Go + Bubble Tea）。
+  - 实况注（2026-08-28）：需要 find_package 的是**三个**——libcurl、spdlog、quiche（`core/CMakeLists.txt`）。JSON 是 nlohmann/json 3.12.0，单头文件 vendored 在 `core/include/json.hpp`，不必安装、不必链库。括号里的 FTXUI 是 ADR-0007 之前"TUI 也用 C++"方案的残留，本项目**没有也不会**依赖它（TUI 是 Go + Bubble Tea）。
 - TUI：Go + Bubble Tea（ADR-0007）。参考 claude code / codex 客户端外观，**有状态栏**（见 [[Statusline（状态栏）]]）。原定"无状态栏"，后反转并已完整实现（core 侧 `GET /statusline` + `statusline` 帧，TUI 侧 `tui/cmd/realagent-tui/statusline.go`）；**反转无 ADR 记录，且与现存 ADR 冲突**——`docs/adr/0007-tui-go-bubbletea.md:34` 至今写着"无状态栏（用户明确）"，无 ADR 取代它。理由未知。
 - TUI 渲染：历史归终端管，不进 altscreen（ADR-0008）——定型的行打进终端原生 scrollback，Bubble Tea 只重绘底部活动区。
 - 配置约定：项目级 `.realagent/` + AGENTS.md；全局 `~/.realagent/`。
@@ -276,7 +276,7 @@ _Avoid_: `finalize`（原指把 streaming 消息收进列表，行模型下已�
 - QUIC 库：core 用 **Cloudflare quiche**（QUIC + HTTP/3 一体，`core/CMakeLists.txt:17-19`）；TUI 用 quic-go。msquic 于 2026-08-09 被弃（纯传输层无 H3 语义），ADR-0006 当时记的替代品是 ngtcp2 + nghttp3，但落地的是 quiche——**此次换库无 ADR 记录，理由未知**（ADR-0006 与本条原文均未更新，ADR-0002 已在用"quiche 非线程安全"作论据）。
 - 出站 Provider 请求：core 用 libcurl（HTTP/1.1 客户端，请求 DeepSeek）；入站客户端通信走 QUIC。
 - 工具结果：一个 json，形状 `{"status": <int, 0=成功>, "output": <string, 给模型看的文本>}`；`Executor::execute` 再加一个 `"interrupted"` 键（core 本次执行期间提没提过中止）。没有 `ToolResult`/`ExecResult` 结构体——工具本来就在拼 json，两个字段的信封是多余的。
-- JSON 实现：参考 `~/revlm/backend/include/util/json.hpp`（boost::json 封装：默认 `{}`、链式 operator[]、宽容 parse、optional 提取器）。
+- JSON 实现：nlohmann/json 3.12.0，单头文件逐字节 vendored 在 `core/include/json.hpp`，类型就是 `nlohmann::json`——**core 不包壳**。链式 `a["b"]["c"]` 与隐式转换是库自带的；读不受控的输入用 `find()` / `value(key, 默认值)`（const `operator[]` 撞上缺键是未定义行为），解析用 `parse(text, nullptr, false)` + `is_discarded()`。
 - DeepSeek 接入：端点 `https://api.deepseek.com/anthropic`，模型 `deepseek-v4-flash`（或 `deepseek-v4-pro`），API key 见 platform.deepseek.com。工具调用与流式完整支持；`cache_control` 被忽略（验证首版无需 vendor 层）。
 - 参考资料：`OPENCODE_RESEARCH.md`（OpenCode 架构调研）。
 

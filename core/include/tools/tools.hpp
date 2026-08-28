@@ -37,7 +37,7 @@ const ToolDef* find_tool(std::string_view name);
  * 单独一个两字段结构体是多余的信封——工具本来就在拼 json，把 status 放进去即可。
  *
  * 执行。call_id 透传进实时输出帧（tool_output），客户端靠它认领是哪次调用。 */
-json run_tool(const std::string& call_id, const std::string& name,
+nlohmann::json run_tool(const std::string& call_id, const std::string& name,
               const std::string& params_json, const EmitFn& emit);
 
 /* 中止在跑的 bash（任意线程）。手上没有在跑的就什么都不做——

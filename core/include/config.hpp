@@ -59,7 +59,7 @@ public:
     // 先落盘成功才改内存——失败时内存与文件都没变，不会出现"切了档但没写进去"。
     // 文件不存在按空对象起头；文件是坏 JSON 则拒绝写入并返回 false：
     // 宁可这次改动不生效，也不能拿内存树盖掉读不懂的用户数据（里面有 api_key）。
-    bool persist(std::string_view key, const json& v);
+    bool persist(std::string_view key, const nlohmann::json& v);
 
     // 会话存储目录（core 常量，不可配置）。相对 cwd —— 会话按项目分家，
     // 与全局配置（~/.realagent）不同层。
@@ -71,10 +71,10 @@ public:
     std::string models_path() const;
 
     // 合并后的完整配置树
-    json to_json() const;
+    nlohmann::json to_json() const;
 
 private:
-    json settings_;  // 合并后的配置树（默认树 + settings.json）
+    nlohmann::json settings_;  // 合并后的配置树（默认树 + settings.json）
     // mutex 不可拷贝/移动，用 shared_ptr 包装保持 Config 可拷贝（load() 按值返回）
     mutable std::shared_ptr<std::mutex> mutex_ = std::make_shared<std::mutex>();
 };

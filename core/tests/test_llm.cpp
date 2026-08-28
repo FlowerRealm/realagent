@@ -21,6 +21,7 @@
 #include <vector>
 
 using namespace realagent;
+using nlohmann::json;
 namespace fs = std::filesystem;
 
 static int failures = 0;
@@ -85,9 +86,9 @@ static Collected run_parse(const std::vector<std::string>& chunks,
         if (t == "message_update") c.updates.push_back(ev);
         else if (t == "tool_use") c.tools.push_back(ev);
         else if (t == "usage") c.usages.push_back(ev);
-        else if (t == "stop") c.stop_reason = ev["reason"].as_string().value_or("");
-        else if (t == "thinking_start") c.thinking_sig = ev["signature"].as_string().value_or("");
-        else if (t == "thinking_update") c.thinking += ev["delta"].as_string().value_or("");
+        else if (t == "stop") c.stop_reason = ev["reason"];
+        else if (t == "thinking_start") c.thinking_sig = ev["signature"];
+        else if (t == "thinking_update") c.thinking += ev["delta"].get<std::string>();
         else if (t == "thinking_stop") ++c.thinking_stops;
     };
     for (const auto& ch : chunks)
@@ -100,7 +101,7 @@ static Collected run_parse(const std::vector<std::string>& chunks,
 static void test_build_request() {
     printf("[build_request]\n");
     const Config cfg = make_config("http://127.0.0.1:18080", "test-key-123");
-    const auto dialog = json::parse(R"({
+    const json dialog = json::parse(R"({
         "model": "deepseek-v4-flash",
         "system": "You are a coding agent.",
         "messages": [
@@ -114,7 +115,7 @@ static void test_build_request() {
             {"name":"read","description":"读文件","input_schema":{"type":"object","properties":{"file_path":{"type":"string"}}}}
         ]
     })");
-    const HttpRequest req = build_request(cfg, *dialog);
+    const HttpRequest req = build_request(cfg, dialog);
 
     CHECK(req.url == "http://127.0.0.1:18080/v1/messages", "url = base_url + /v1/messages");
     std::string hdrs;
@@ -126,28 +127,28 @@ static void test_build_request() {
     CHECK(hdrs.find("anthropic-version") != std::string::npos,
           "headers 含 anthropic-version（协议固有）");
 
-    const auto body = json::parse(req.body);
-    CHECK(body.has_value(), "body 是合法 JSON");
-    if (!body) return;
-    CHECK((*body)["stream"].as_bool().value_or(false), "stream=true");
-    CHECK((*body)["model"].as_string().value_or("") == "deepseek-v4-flash", "model 从对话透传");
-    const json asst = (*body)["messages"][1];
-    CHECK(asst["content"][0]["type"].as_string().value_or("") == "thinking",
+    const json body = json::parse(req.body, nullptr, false);
+    CHECK(!body.is_discarded(), "body 是合法 JSON");
+    if (body.is_discarded()) return;
+    CHECK(body["stream"] == true, "stream=true");
+    CHECK(body["model"] == "deepseek-v4-flash", "model 从对话透传");
+    const json asst = body["messages"][1];
+    CHECK(asst["content"][0]["type"] == "thinking",
           "assistant[0].type=thinking");
-    CHECK(asst["content"][0]["thinking"].as_string().value_or("") == "先分析问题",
+    CHECK(asst["content"][0]["thinking"] == "先分析问题",
           "thinking 内容原样回传");
-    CHECK(asst["content"][0]["signature"].as_string().value_or("") == "sig-abc",
+    CHECK(asst["content"][0]["signature"] == "sig-abc",
           "thinking signature 原样回传");
-    CHECK(asst["content"][1]["type"].as_string().value_or("") == "text",
+    CHECK(asst["content"][1]["type"] == "text",
           "assistant[1].type=text（thinking 块在正文前）");
-    CHECK((*body)["tools"][0]["name"].as_string().value_or("") == "read", "tools 带上工具清单");
+    CHECK(body["tools"][0]["name"] == "read", "tools 带上工具清单");
 }
 
 /* —— openai-chat 的请求形状 —— */
 static void test_build_request_openai_chat() {
     printf("[build_request openai-chat]\n");
     const Config cfg = make_config("http://127.0.0.1:18080/v1", "k-oa", "", "openai-chat");
-    const auto dialog = json::parse(R"({
+    const json dialog = json::parse(R"({
         "model": "gpt-x",
         "system": "You are a coding agent.",
         "messages": [
@@ -157,30 +158,30 @@ static void test_build_request_openai_chat() {
         ],
         "tools": [{"name":"read","description":"读文件","input_schema":{"type":"object"}}]
     })");
-    const HttpRequest req = build_request(cfg, *dialog);
+    const HttpRequest req = build_request(cfg, dialog);
     CHECK(req.url == "http://127.0.0.1:18080/v1/chat/completions", "url = base_url + /chat/completions");
     std::string hdrs;
     for (const auto& h : req.headers) hdrs += h + "\n";
     CHECK(hdrs.find("Authorization: Bearer k-oa") != std::string::npos, "只发 Bearer");
     CHECK(hdrs.find("x-api-key") == std::string::npos, "不发 x-api-key（那是另一套协议的事）");
 
-    const auto body = json::parse(req.body);
-    CHECK(body.has_value(), "body 是合法 JSON");
-    if (!body) return;
-    CHECK((*body)["messages"][0]["role"].as_string().value_or("") == "system",
+    const json body = json::parse(req.body, nullptr, false);
+    CHECK(!body.is_discarded(), "body 是合法 JSON");
+    if (body.is_discarded()) return;
+    CHECK(body["messages"][0]["role"] == "system",
           "system 是 messages 里的一条，不是顶层字段");
-    CHECK((*body)["stream_options"]["include_usage"].as_bool().value_or(false),
+    CHECK(body["stream_options"]["include_usage"] == true,
           "开 stream_options.include_usage，否则流里没有 usage，计价拿不到数");
-    const json asst = (*body)["messages"][2];
-    CHECK(asst["tool_calls"][0]["function"]["name"].as_string().value_or("") == "read",
+    const json asst = body["messages"][2];
+    CHECK(asst["tool_calls"][0]["function"]["name"] == "read",
           "tool_use → tool_calls[].function");
     CHECK(asst["tool_calls"][0]["function"]["arguments"].is_string(),
           "arguments 是 JSON 字符串，不是对象（本协议如此）");
-    const json toolmsg = (*body)["messages"][3];
-    CHECK(toolmsg["role"].as_string().value_or("") == "tool",
+    const json toolmsg = body["messages"][3];
+    CHECK(toolmsg["role"] == "tool",
           "tool_result → 单独一条 role=tool 的 message");
-    CHECK(toolmsg["tool_call_id"].as_string().value_or("") == "c1", "靠 tool_call_id 关联");
-    CHECK((*body)["tools"][0]["type"].as_string().value_or("") == "function",
+    CHECK(toolmsg["tool_call_id"] == "c1", "靠 tool_call_id 关联");
+    CHECK(body["tools"][0]["type"] == "function",
           "工具套一层 function");
 }
 
@@ -188,7 +189,7 @@ static void test_build_request_openai_chat() {
 static void test_build_request_openai_responses() {
     printf("[build_request openai-responses]\n");
     const Config cfg = make_config("http://127.0.0.1:18080/v1", "k-rs", "", "openai-responses");
-    const auto dialog = json::parse(R"({
+    const json dialog = json::parse(R"({
         "model": "gpt-x",
         "system": "sys text",
         "messages": [
@@ -198,21 +199,21 @@ static void test_build_request_openai_responses() {
         ],
         "tools": [{"name":"read","input_schema":{"type":"object"}}]
     })");
-    const HttpRequest req = build_request(cfg, *dialog);
+    const HttpRequest req = build_request(cfg, dialog);
     CHECK(req.url == "http://127.0.0.1:18080/v1/responses", "url = base_url + /responses");
-    const auto body = json::parse(req.body);
-    CHECK(body.has_value(), "body 是合法 JSON");
-    if (!body) return;
-    CHECK((*body)["instructions"].as_string().value_or("") == "sys text",
+    const json body = json::parse(req.body, nullptr, false);
+    CHECK(!body.is_discarded(), "body 是合法 JSON");
+    if (body.is_discarded()) return;
+    CHECK(body["instructions"] == "sys text",
           "system 走顶层 instructions");
-    CHECK((*body)["input"][0]["content"][0]["type"].as_string().value_or("") == "input_text",
+    CHECK(body["input"][0]["content"][0]["type"] == "input_text",
           "用户侧文本叫 input_text");
-    CHECK((*body)["input"][1]["type"].as_string().value_or("") == "function_call",
+    CHECK(body["input"][1]["type"] == "function_call",
           "tool_use → function_call item");
-    CHECK((*body)["input"][1]["call_id"].as_string().value_or("") == "c9", "关联键叫 call_id");
-    CHECK((*body)["input"][2]["type"].as_string().value_or("") == "function_call_output",
+    CHECK(body["input"][1]["call_id"] == "c9", "关联键叫 call_id");
+    CHECK(body["input"][2]["type"] == "function_call_output",
           "tool_result → function_call_output item");
-    CHECK((*body)["tools"][0]["name"].as_string().value_or("") == "read",
+    CHECK(body["tools"][0]["name"] == "read",
           "工具是平的，不套 function");
 }
 
@@ -284,9 +285,9 @@ static void test_parse_text() {
     });
     CHECK(c.ok, "解析全程无错");
     CHECK(c.updates.size() == 2, "产出 2 个 message_update");
-    CHECK(c.updates.size() >= 2 && c.updates[0]["delta"].as_string().value_or("") == "你好",
+    CHECK(c.updates.size() >= 2 && c.updates[0]["delta"] == "你好",
           "message_update[0] 文本=你好");
-    CHECK(c.updates.size() >= 2 && c.updates[1]["delta"].as_string().value_or("") == "世界",
+    CHECK(c.updates.size() >= 2 && c.updates[1]["delta"] == "世界",
           "message_update[1] 文本=世界（跨 chunk）");
     CHECK(c.stop_reason == "end_turn", "stop reason=end_turn");
 }
@@ -306,8 +307,8 @@ static void test_parse_tool_use() {
     CHECK(c.ok, "解析全程无错");
     CHECK(c.tools.size() == 1, "产出 1 个 tool_use");
     if (!c.tools.empty()) {
-        CHECK(c.tools[0]["name"].as_string().value_or("") == "read", "tool_use.name=read");
-        CHECK(c.tools[0]["input"]["file_path"].as_string().value_or("") == "a.txt",
+        CHECK(c.tools[0]["name"] == "read", "tool_use.name=read");
+        CHECK(c.tools[0]["input"]["file_path"] == "a.txt",
               "tool_use.input.file_path=a.txt（partial_json 累积）");
     }
     CHECK(c.stop_reason == "tool_use", "stop reason=tool_use");
@@ -333,7 +334,7 @@ static void test_parse_thinking() {
     CHECK(c.thinking == "初始想法我需要先读文件",
           "thinking_update 增量拼接（起始文本 + 跨 chunk delta）");
     CHECK(c.thinking_stops == 1, "thinking_stop 产出 1 次");
-    CHECK(!c.updates.empty() && c.updates[0]["delta"].as_string().value_or("") == "答案",
+    CHECK(!c.updates.empty() && c.updates[0]["delta"] == "答案",
           "thinking 块结束后 text 块正常解析");
     CHECK(c.stop_reason == "end_turn", "stop reason=end_turn");
 }
@@ -345,7 +346,7 @@ static void test_parse_crlf() {
         "event: content_block_delta\r\ndata: {\"type\":\"content_block_delta\",\"index\":0,"
         "\"delta\":{\"type\":\"text_delta\",\"text\":\"crlf\"}}\r\n\r\n",
     });
-    CHECK(c.updates.size() == 1 && c.updates[0]["delta"].as_string().value_or("") == "crlf",
+    CHECK(c.updates.size() == 1 && c.updates[0]["delta"] == "crlf",
           "\\r\\n\\r\\n 分隔的事件块照常解析");
 }
 
@@ -371,9 +372,9 @@ static void test_usage() {
     CHECK(c.usages.size() == 2, "产出 2 个 usage 事件（首帧 + 终帧）");
     if (c.usages.size() == 2) {
         const json& last = c.usages.back();
-        CHECK(last["input"].as_int64().value_or(0) == 1200, "input 保留自 message_start");
-        CHECK(last["output"].as_int64().value_or(0) == 88, "output 取 message_delta 的终值");
-        CHECK(last["cache_read"].as_int64().value_or(0) == 300, "cache_read 合并上报");
+        CHECK(last["input"] == 1200, "input 保留自 message_start");
+        CHECK(last["output"] == 88, "output 取 message_delta 的终值");
+        CHECK(last["cache_read"] == 300, "cache_read 合并上报");
     }
     // usage 必须先于 stop：下游收工时数字得已经定了
     const auto usage_at = std::find(c.order.begin(), c.order.end(), std::string("usage"));
@@ -393,18 +394,18 @@ static void test_pricing() {
     const Pricing p = Pricing::load(cfg, &err);
     CHECK(err.empty(), "用户接管的模型数据表读入成功");
 
-    const json usage = *json::parse(R"({"input":77,"output":0,"cache_read":0,"cache_write":0})");
+    const json usage = json::parse(R"({"input":77,"output":0,"cache_read":0,"cache_write":0})");
     const double cost = p.cost("test-model", usage);
     CHECK(cost > 0.0769 && cost < 0.0771, "cost = input 77 × 1000/1M = 0.077");
-    CHECK(p.cost("test-model", *json::parse(R"({"input":0,"output":0})")) == 0,
+    CHECK(p.cost("test-model", json::parse(R"({"input":0,"output":0})")) == 0,
           "无用量则不产生费用");
     CHECK(p.cost("不在表里", usage) == 0, "表里没这个模型 → 不计价，不猜");
 
     const json& models = p.models();
     CHECK(models.size() == 1, "清单是 JSON 数组（1 条）");
-    CHECK(models[0]["name"].as_string().value_or("") == "test-model", "name 报上来");
-    CHECK(models[0]["owned_by"].as_string().value_or("") == "tester", "owned_by 报上来");
-    CHECK(models[0]["context"].as_int64().value_or(0) == 131072, "context 报上来");
+    CHECK(models[0]["name"] == "test-model", "name 报上来");
+    CHECK(models[0]["owned_by"] == "tester", "owned_by 报上来");
+    CHECK(models[0]["context"] == 131072, "context 报上来");
     CHECK(!models[0].contains("pricing"), "单价不进公开清单");
 }
 
@@ -448,9 +449,9 @@ static void test_parse_openai_chat() {
     CHECK(c.usages.size() == 1, "产出 1 个 usage 事件");
     if (!c.usages.empty()) {
         const json u = c.usages.back();
-        CHECK(u["input"].as_int64().value_or(0) == 120, "prompt_tokens → input");
-        CHECK(u["output"].as_int64().value_or(0) == 8, "completion_tokens → output");
-        CHECK(u["cache_read"].as_int64().value_or(0) == 100,
+        CHECK(u["input"] == 120, "prompt_tokens → input");
+        CHECK(u["output"] == 8, "completion_tokens → output");
+        CHECK(u["cache_read"] == 100,
               "prompt_tokens_details.cached_tokens → cache_read");
     }
 }
@@ -469,9 +470,9 @@ static void test_parse_openai_chat_tools() {
     CHECK(c.ok, "解析全程无错");
     CHECK(c.tools.size() == 1, "分片累积成 1 个 tool_use");
     if (!c.tools.empty()) {
-        CHECK(c.tools[0]["id"].as_string().value_or("") == "call_1", "id 取自首帧");
-        CHECK(c.tools[0]["name"].as_string().value_or("") == "read", "name 取自首帧");
-        CHECK(c.tools[0]["input"]["file_path"].as_string().value_or("") == "a.txt",
+        CHECK(c.tools[0]["id"] == "call_1", "id 取自首帧");
+        CHECK(c.tools[0]["name"] == "read", "name 取自首帧");
+        CHECK(c.tools[0]["input"]["file_path"] == "a.txt",
               "arguments 分片拼完再解析");
     }
     CHECK(c.stop_reason == "tool_use",
@@ -509,19 +510,19 @@ static void test_parse_openai_responses() {
         Protocol::OpenAiResponses);
     CHECK(c.ok, "解析全程无错");
     CHECK(c.thinking == "琢磨", "reasoning_summary_text.delta → thinking_update");
-    CHECK(c.updates.size() == 1 && c.updates[0]["delta"].as_string().value_or("") == "答案",
+    CHECK(c.updates.size() == 1 && c.updates[0]["delta"] == "答案",
           "output_text.delta → message_update");
     CHECK(c.tools.size() == 1, "产出 1 个 tool_use");
     if (!c.tools.empty()) {
-        CHECK(c.tools[0]["id"].as_string().value_or("") == "fc_1", "id 取 call_id");
-        CHECK(c.tools[0]["input"]["file_path"].as_string().value_or("") == "b.txt",
+        CHECK(c.tools[0]["id"] == "fc_1", "id 取 call_id");
+        CHECK(c.tools[0]["input"]["file_path"] == "b.txt",
               "arguments 增量拼完再解析");
     }
     CHECK(c.stop_reason == "tool_use", "有工具调用 → 收工理由是 tool_use");
     if (!c.usages.empty()) {
         const json u = c.usages.back();
-        CHECK(u["input"].as_int64().value_or(0) == 70, "input_tokens → input");
-        CHECK(u["cache_read"].as_int64().value_or(0) == 20,
+        CHECK(u["input"] == 70, "input_tokens → input");
+        CHECK(u["cache_read"] == 20,
               "input_tokens_details.cached_tokens → cache_read");
     }
 }

@@ -33,7 +33,7 @@ M6 TUI              → M7 集成与测试
 - 目录结构落地（CONTEXT.md 中的布局：core/ tui/ plugins/ docs/）
 - 双语言构建编排：CMake 统一入口，自定义 target 调 `go build`（TUI），core + plugins 走原生 CMake
 - C++26 协程可行性 spike（Clang 19+ / brew llvm）
-- boost::json 封装（revlm 风格）、spdlog 接入
+- JSON 库接入（nlohmann/json 单头 vendored）、spdlog 接入
 - 插件 SDK 头文件 v0：plugin.json 结构、类型枚举、生命周期接口初版
 
 **已定实现约定**
@@ -41,7 +41,7 @@ M6 TUI              → M7 集成与测试
 - API key：`.realagent/settings.json` 的 `api_key`（不读 env；core 默认树里是空串，缺省即不发 Authorization）
 
 **技术要点**
-- JSON 封装参考 `~/revlm/backend/include/util/json.hpp`：boost::json 子类，默认 `{}`、链式 `operator[]`（读缺键返回 null 不抛异常、写自动构造对象/数组）、宽容 parse（全文失败后截取首尾 `{}` 重试——为 LLM 输出带额外文本设计）、optional 提取器（as_string/as_int64 返回 optional 不抛异常）。
+- JSON：nlohmann/json 3.12.0 单头文件，逐字节上游，vendored 在 `core/include/json.hpp`。**core 不再包一层壳**——链式 `a["b"]["c"]` 与隐式转换（`std::string s = j["k"];`）是它自带的。读不受控的输入（HTTP 体、SSE 帧、盘上的文件）用 `find()` / `value(key, 默认值)`：const `operator[]` 撞上缺键是未定义行为。解析用 `parse(text, nullptr, false)` + `is_discarded()`，不抛。
 - Clang C++26 协程：C++20 协程核心完全支持（P0912R5，macOS 全支持）；P2561 非抛出协程未实现但本项目不依赖（见 ADR-0003）。
 
 **风险**（每条分「决策」与「实现」两行，两者互不蕴含）

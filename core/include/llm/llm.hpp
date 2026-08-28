@@ -77,14 +77,14 @@ struct HttpRequest {
 /* —— 上行：抽象对话 {model, system, messages, tools} → 具体协议的请求 ——
  * 端点取 cfg.base_url，凭证取 cfg.api_key，模型名由调用方放进 dialog["model"]。
  * 认证头归各协议自己：Anthropic 原厂认 x-api-key，OpenAI 系认 Authorization: Bearer。 */
-HttpRequest build_request(protocol::AnthropicMessages, const Config& cfg, const json& dialog);
-HttpRequest build_request(protocol::OpenAiChat, const Config& cfg, const json& dialog);
-HttpRequest build_request(protocol::OpenAiResponses, const Config& cfg, const json& dialog);
+HttpRequest build_request(protocol::AnthropicMessages, const Config& cfg, const nlohmann::json& dialog);
+HttpRequest build_request(protocol::OpenAiChat, const Config& cfg, const nlohmann::json& dialog);
+HttpRequest build_request(protocol::OpenAiResponses, const Config& cfg, const nlohmann::json& dialog);
 /* 按配置里的协议派发（认不出的协议由 Config 那一关拦下，到不了这里） */
-HttpRequest build_request(const Config& cfg, const json& dialog);
+HttpRequest build_request(const Config& cfg, const nlohmann::json& dialog);
 
 /* 解析出的事件同步交给它（payload 只在回调内有效） */
-using EventSink = std::function<void(std::string_view type, const json& payload)>;
+using EventSink = std::function<void(std::string_view type, const nlohmann::json& payload)>;
 
 /* —— 下行：每个协议一份解析状态 ——
  * 一次 LLM 调用一份，用完就扔：上一轮的半截缓冲绝不该漏进下一轮。
@@ -184,14 +184,14 @@ public:
 
     /* token 用量 × 该模型单价，同名键点积 / 1M。表里没这个模型/没这个键 → 该维度不计。
      * 算不出返回 0。 */
-    double cost(const std::string& model, const json& usage) const;
+    double cost(const std::string& model, const nlohmann::json& usage) const;
 
     /* 公开清单 [{name, owned_by, context}]——单价不在里面，那是本表自己的事 */
-    const json& models() const { return models_; }
+    const nlohmann::json& models() const { return models_; }
 
 private:
-    std::unordered_map<std::string, json> pricing_; // 模型名 → 单价对象
-    json models_ = json::array();
+    std::unordered_map<std::string, nlohmann::json> pricing_; // 模型名 → 单价对象
+    nlohmann::json models_ = nlohmann::json::array();
 };
 
 } // namespace realagent

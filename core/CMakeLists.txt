@@ -9,7 +9,6 @@ if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Debug)
 endif()
 
-find_package(Boost REQUIRED COMPONENTS json)
 find_package(spdlog REQUIRED)
 # macOS 的 libcurl 是系统库（SDK 自带头），FindCURL 会把 SDK usr/include 当 include dir
 # 注入为 isystem——与 brew libc++ 头冲突。因此只取库路径，不用 CURL::libcurl target。
@@ -36,7 +35,7 @@ add_library(realagent_core_lib STATIC
   src/agent/session.cpp
 )
 target_include_directories(realagent_core_lib PUBLIC include)
-target_link_libraries(realagent_core_lib PUBLIC Boost::json PRIVATE ${CURL_LIBRARIES})
+target_link_libraries(realagent_core_lib PRIVATE ${CURL_LIBRARIES})
 
 add_executable(realagent-core
   src/main.cpp

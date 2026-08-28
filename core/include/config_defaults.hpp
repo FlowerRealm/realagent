@@ -33,8 +33,8 @@
 
 namespace realagent {
 
-inline json config_defaults() {
-    json d;
+inline nlohmann::json config_defaults() {
+    nlohmann::json d;
 
     // —— 凭证 ——
     // 形如 sk-xxx。空 = 不发认证头，需要鉴权的端点会回 401

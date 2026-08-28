@@ -26,7 +26,7 @@
 namespace fs = std::filesystem;
 using realagent::Config;
 using realagent::ModelTier;
-using realagent::json;
+using nlohmann::json;
 
 static int failures = 0;
 #define CHECK(cond, msg)                                                        \
@@ -174,14 +174,13 @@ int main() {
             CHECK(r->persist("model", json("m-new")), "persist 成功");
             CHECK(r->model(ModelTier::Main) == "m-new", "内存树已更新");
 
-            const auto on_disk = json::parse(read_settings_raw(home));
-            CHECK(on_disk.has_value(), "落盘内容是合法 JSON");
-            if (on_disk) {
-                CHECK((*on_disk)["model"].as_string().value_or("") == "m-new", "目标键写进去了");
-                CHECK((*on_disk)["api_key"].as_string().value_or("") == "sk-test",
-                      "用户原有的键原样保留");
+            const json on_disk = json::parse(read_settings_raw(home), nullptr, false);
+            CHECK(!on_disk.is_discarded(), "落盘内容是合法 JSON");
+            if (!on_disk.is_discarded()) {
+                CHECK(on_disk["model"] == "m-new", "目标键写进去了");
+                CHECK(on_disk["api_key"] == "sk-test", "用户原有的键原样保留");
                 // size==2 一并覆盖了 small_model / permission 等默认值没被写进来
-                CHECK(on_disk->size() == 2, "文件里只有用户配过的两个键，默认值没渗进去");
+                CHECK(on_disk.size() == 2, "文件里只有用户配过的两个键，默认值没渗进去");
             }
         }
     }
@@ -191,8 +190,8 @@ int main() {
         remove_settings(home);
         auto fresh = Config::load();
         CHECK(fresh.has_value() && fresh->persist("model", json("m-fresh")), "文件不存在 → 写成功");
-        const auto on_disk = json::parse(read_settings_raw(home));
-        CHECK(on_disk.has_value() && on_disk->size() == 1, "按空对象起头，只有这一个键");
+        const json on_disk = json::parse(read_settings_raw(home), nullptr, false);
+        CHECK(!on_disk.is_discarded() && on_disk.size() == 1, "按空对象起头，只有这一个键");
 
         write_settings(home, k_full);
         auto r = Config::load();

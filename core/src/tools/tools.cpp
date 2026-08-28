@@ -17,20 +17,24 @@ namespace {
 constexpr size_t kMaxOut = 50000; // 工具输出截断：50KB
 
 /* 结果只有一种形状：{"status", "output"}。status 非零即错，output 是给模型看的文本。 */
-json result(int status, std::string output) {
-    return json{{"status", status}, {"output", std::move(output)}};
+nlohmann::json result(int status, std::string output) {
+    return nlohmann::json{{"status", status}, {"output", std::move(output)}};
 }
-json fail(const std::string& msg) { return result(1, msg); }
-json ok(const std::string& what) { return result(0, what); }
+nlohmann::json fail(const std::string& msg) { return result(1, msg); }
+nlohmann::json ok(const std::string& what) { return result(0, what); }
 
-/* 取一个字符串参数；缺失/非字符串返回 nullopt */
-std::optional<std::string> arg(const json& params, std::string_view key) {
-    return params[key].as_string();
+/* 取一个字符串参数；缺失/非字符串返回 nullopt。
+ * 参数是模型给的，形状不由 core 说了算——const operator[] 撞上缺键是未定义行为，
+ * 这里只能按迭代器查。 */
+std::optional<std::string> arg(const nlohmann::json& params, std::string_view key) {
+    const auto it = params.find(key);
+    if (it == params.end() || !it->is_string()) return std::nullopt;
+    return it->get<std::string>();
 }
 
 /* ==================== read ==================== */
 
-json do_read(const json& params) {
+nlohmann::json do_read(const nlohmann::json& params) {
     const auto path = arg(params, "file_path");
     if (!path) return fail("missing file_path");
 
@@ -52,7 +56,7 @@ json do_read(const json& params) {
 
 /* ==================== edit（+x-0 = 创建） ==================== */
 
-json do_edit(const json& params) {
+nlohmann::json do_edit(const nlohmann::json& params) {
     const auto path = arg(params, "file_path");
     if (!path) return fail("missing file_path");
     const auto new_s = arg(params, "new_string");
@@ -98,7 +102,7 @@ bool g_bash_killed = false; // 本次调用挨过刀：收尾时要盯着它死�
  * 与 tool_result 不是二选一——完整输出照旧在结果里回传，这里推的是"现在长什么样"。 */
 void emit_output(const EmitFn& emit, const std::string& call_id, const std::string& text) {
     if (!emit) return;
-    json ev;
+    nlohmann::json ev;
     ev["call_id"] = call_id;
     // 一条流，不分家（ADR-0017）：stdout 与 stderr 在同一个管道里，
     // 字段值就叫 output，不留一个说谎的 "stdout"
@@ -107,7 +111,7 @@ void emit_output(const EmitFn& emit, const std::string& call_id, const std::stri
     emit("tool_output", ev.dump());
 }
 
-json do_bash(const std::string& call_id, const json& params, const EmitFn& emit) {
+nlohmann::json do_bash(const std::string& call_id, const nlohmann::json& params, const EmitFn& emit) {
     const auto cmd = arg(params, "command");
     if (!cmd) return fail("missing command");
 
@@ -221,9 +225,10 @@ const ToolDef* find_tool(std::string_view name) {
     return it == std::end(k_tools) ? nullptr : it;
 }
 
-json run_tool(const std::string& call_id, const std::string& name,
+nlohmann::json run_tool(const std::string& call_id, const std::string& name,
               const std::string& params_json, const EmitFn& emit) {
-    const json params = json::parse(params_json).value_or(json{});
+    nlohmann::json params = nlohmann::json::parse(params_json, nullptr, false);
+    if (params.is_discarded()) params = nlohmann::json::object();
     if (name == "read") return do_read(params);
     if (name == "edit") return do_edit(params);
     if (name == "bash") return do_bash(call_id, params, emit);

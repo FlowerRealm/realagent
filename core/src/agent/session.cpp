@@ -38,14 +38,15 @@ fs::path path_of(const std::string& id) {
  * 从内容里现取，不另存——另存就得管它什么时候失效。 */
 constexpr std::size_t kTitleMax = 60;
 
-std::string title_of(const json& msg) {
-    if (msg["role"].as_string().value_or("") != "user") return "";
-    const json content = msg["content"];
-    if (!content.is_array()) return "";
-    for (std::size_t i = 0; i < content.size(); ++i) {
-        const json b = content[i];
-        if (b["type"].as_string().value_or("") != "text") continue;
-        std::string s = std::string(b["text"].as_string().value_or(""));
+std::string title_of(const nlohmann::json& msg) {
+    // value() 在非对象上会抛。坏行是常态（断电写了一半），不能让它变成一次崩溃
+    if (!msg.is_object() || msg.value("role", std::string()) != "user") return "";
+    // find 在非对象上恒返回 end()，所以不必先问一句 is_object
+    const auto content = msg.find("content");
+    if (content == msg.end() || !content->is_array()) return "";
+    for (const nlohmann::json& b : *content) {
+        if (!b.is_object() || b.value("type", std::string()) != "text") continue;
+        std::string s = b.value("text", std::string());
         // 换行会把清单一行撑成多行，直接压成空格
         std::replace(s.begin(), s.end(), '\n', ' ');
         if (s.size() > kTitleMax) {
@@ -63,7 +64,7 @@ std::string title_of(const json& msg) {
 
 Session::Session() : id_(make_id()), path_(path_of(id_).string()) {}
 
-void Session::append(const json& msg) {
+void Session::append(const nlohmann::json& msg) {
     std::error_code ec;
     fs::create_directories(fs::path(path_).parent_path(), ec);
     std::ofstream f(path_, std::ios::app);
@@ -72,28 +73,28 @@ void Session::append(const json& msg) {
         return;
     }
     // 一行一条，不缩进——JSONL 的行边界就是记录边界，dump 里出现换行就全散了
-    f << json(msg).dump() << '\n';
+    f << msg.dump() << '\n';
 }
 
-bool Session::resume(const std::string& id, json& out) {
+bool Session::resume(const std::string& id, nlohmann::json& out) {
     const fs::path p = path_of(id);
     std::ifstream f(p);
     if (!f) return false;
 
-    json msgs = json::array();
+    nlohmann::json msgs = nlohmann::json::array();
     std::string line;
     long long lineno = 0;
     while (std::getline(f, line)) {
         ++lineno;
         if (line.empty()) continue;
-        const auto parsed = json::parse(line);
-        if (!parsed) {
+        nlohmann::json parsed = nlohmann::json::parse(line, nullptr, false);
+        if (parsed.is_discarded()) {
             // 坏行跳过而不是整个会话作废：append-only 文件的末尾可能是断电时写了一半的，
             // 为了那一行丢掉前面几百条对话是本末倒置
             fprintf(stderr, "[session] %s:%lld 不是合法 JSON，跳过\n", p.c_str(), lineno);
             continue;
         }
-        msgs.push_back(*parsed);
+        msgs.push_back(std::move(parsed));
     }
     out = std::move(msgs);
     id_ = id;
@@ -121,7 +122,8 @@ std::vector<SessionInfo> Session::list() {
             if (line.empty()) continue;
             ++info.messages;
             if (!info.title.empty()) continue;
-            if (const auto m = json::parse(line)) info.title = title_of(*m);
+            if (const nlohmann::json m = nlohmann::json::parse(line, nullptr, false); !m.is_discarded())
+                info.title = title_of(m);
         }
         // file_clock → system_clock：这个 libc++ 没有 clock_cast，用两个时钟的"此刻"
         // 之差换算。误差在两次 now() 之间，对"最近改过的排前面"绰绰有余。

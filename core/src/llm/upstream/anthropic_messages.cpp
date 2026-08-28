@@ -9,38 +9,30 @@
  * 同一个凭证的两个名字，实测原厂对多出来的那个头视而不见——
  * 于是不必为"对面是哪一家"开一个配置项，也不必在代码里认 URL。
  */
-#include <boost/json.hpp>
-
 #include "llm/llm.hpp"
 
 namespace realagent {
-namespace bj = boost::json;
 
-HttpRequest build_request(protocol::AnthropicMessages, const Config& cfg, const json& dialog) {
-    const bj::object& d = dialog.as_object();
-    const std::string model =
-        d.contains("model") ? bj::value_to<std::string>(d.at("model")) : std::string();
-    const std::string system =
-        d.contains("system") ? bj::value_to<std::string>(d.at("system")) : std::string();
+HttpRequest build_request(protocol::AnthropicMessages, const Config& cfg, const nlohmann::json& dialog) {
+    const nlohmann::json& d = dialog;
 
-    bj::object body;
-    body["model"] = model;
+    nlohmann::json body;
+    body["model"] = d.value("model", std::string());
     body["max_tokens"] = 4096;
     body["stream"] = true;
-    if (!system.empty()) body["system"] = system;
+    if (const std::string system = d.value("system", std::string()); !system.empty())
+        body["system"] = system;
 
     // messages：抽象对话 → /v1/messages 格式（合并相邻同 role）
-    bj::array msgs;
-    if (d.contains("messages") && d.at("messages").is_array()) {
-        for (const auto& m : d.at("messages").as_array()) {
-            const bj::object& mo = m.as_object();
-            const std::string role = bj::value_to<std::string>(mo.at("role"));
-            bj::array blocks;
-            if (mo.contains("content") && mo.at("content").is_array()) {
-                for (const auto& blk : mo.at("content").as_array()) {
-                    const bj::object& b = blk.as_object();
-                    const std::string bt = bj::value_to<std::string>(b.at("type"));
-                    bj::object out_block;
+    nlohmann::json msgs = nlohmann::json::array();
+    if (d.contains("messages") && d["messages"].is_array()) {
+        for (const nlohmann::json& m : d["messages"]) {
+            const std::string role = m.at("role");
+            nlohmann::json blocks = nlohmann::json::array();
+            if (m.contains("content") && m["content"].is_array()) {
+                for (const nlohmann::json& b : m["content"]) {
+                    const std::string bt = b.at("type");
+                    nlohmann::json out_block = nlohmann::json::object();
                     if (bt == "text") {
                         out_block["type"] = "text";
                         out_block["text"] = b.at("text");
@@ -48,13 +40,12 @@ HttpRequest build_request(protocol::AnthropicMessages, const Config& cfg, const 
                         out_block["type"] = "tool_use";
                         out_block["id"] = b.at("id");
                         out_block["name"] = b.at("name");
-                        out_block["input"] = b.contains("input") ? b.at("input") : bj::object{};
+                        out_block["input"] = b.value("input", nlohmann::json::object());
                     } else if (bt == "tool_result") {
                         out_block["type"] = "tool_result";
                         out_block["tool_use_id"] = b.at("tool_use_id");
                         out_block["content"] = b.at("content");
-                        if (b.contains("is_error") && b.at("is_error").as_bool())
-                            out_block["is_error"] = true;
+                        if (b.value("is_error", false)) out_block["is_error"] = true;
                     } else if (bt == "thinking") {
                         // thinking 块（协议固有内容）原样回传，带 signature（缺失时省略）
                         out_block["type"] = "thinking";
@@ -65,11 +56,11 @@ HttpRequest build_request(protocol::AnthropicMessages, const Config& cfg, const 
                 }
             }
             // 合并相邻同 role：若上一条 message 同 role，并入其 content
-            if (!msgs.empty() && msgs.back().as_object().at("role").as_string() == role) {
-                auto& last_blocks = msgs.back().as_object().at("content").as_array();
-                for (auto& blk : blocks) last_blocks.push_back(blk);
+            if (!msgs.empty() && msgs.back()["role"] == role) {
+                nlohmann::json& last_blocks = msgs.back()["content"];
+                for (nlohmann::json& blk : blocks) last_blocks.push_back(blk);
             } else {
-                bj::object mout;
+                nlohmann::json mout;
                 mout["role"] = role;
                 mout["content"] = blocks;
                 msgs.push_back(mout);
@@ -78,21 +69,17 @@ HttpRequest build_request(protocol::AnthropicMessages, const Config& cfg, const 
     }
     body["messages"] = msgs;
 
-    if (d.contains("tools") && d.at("tools").is_array()) {
-        bj::array tools;
-        for (const auto& t : d.at("tools").as_array()) {
-            const bj::object& to = t.as_object();
-            bj::object tool;
-            tool["name"] = to.at("name");
-            if (to.contains("description")) tool["description"] = to.at("description");
-            tool["input_schema"] =
-                to.contains("input_schema") ? to.at("input_schema") : bj::object{};
+    if (d.contains("tools") && d["tools"].is_array()) {
+        nlohmann::json tools = nlohmann::json::array();
+        for (const nlohmann::json& t : d["tools"]) {
+            nlohmann::json tool;
+            tool["name"] = t.at("name");
+            if (t.contains("description")) tool["description"] = t.at("description");
+            tool["input_schema"] = t.value("input_schema", nlohmann::json::object());
             tools.push_back(tool);
         }
         body["tools"] = tools;
-        bj::object tc;
-        tc["type"] = "auto";
-        body["tool_choice"] = tc;
+        body["tool_choice"] = nlohmann::json{{"type", "auto"}};
     }
 
     HttpRequest req;
@@ -103,7 +90,7 @@ HttpRequest build_request(protocol::AnthropicMessages, const Config& cfg, const 
     }
     req.headers.push_back("Content-Type: application/json");
     req.headers.push_back("anthropic-version: 2023-06-01");
-    req.body = bj::serialize(body);
+    req.body = body.dump();
     return req;
 }
 

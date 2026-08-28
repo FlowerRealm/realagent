@@ -21,10 +21,11 @@ Verdict ApprovalCoordinator::await(const std::string& tool_name,
         pending_[p->id] = p;
     }
     // 发 permission_request（入事件队列 → 推送流，事件循环线程投递）
-    json ev;
+    nlohmann::json ev;
     ev["id"] = p->id;
     ev["tool"] = tool_name;
-    if (auto args = json::parse(params)) ev["params"] = *args;
+    if (nlohmann::json args = nlohmann::json::parse(params, nullptr, false); !args.is_discarded())
+        ev["params"] = std::move(args);
     if (emit_) emit_("permission_request", ev.dump());
 
     // 阻塞等待裁决（30s 超时按 deny）

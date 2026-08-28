@@ -30,7 +30,7 @@ struct SessionInfo {
     long long messages = 0; // 消息条数 = 行数
     long long mtime = 0;    // 最后写入时间（Unix 秒），列表排序用
 };
-BOOST_DESCRIBE_STRUCT(SessionInfo, (), (id, title, messages, mtime))
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(SessionInfo, id, title, messages, mtime)
 
 /* 一个打开着的会话。整个类只做"往一个文件后面追加"这一件事。 */
 class Session {
@@ -43,11 +43,11 @@ public:
 
     /* 追加一条消息（一行 JSON + '\n'）。写不进去只报 stderr，不打断对话：
      * 落盘失败是运维问题，不是让用户这轮白说的理由。 */
-    void append(const json& msg);
+    void append(const nlohmann::json& msg);
 
     /* 切到一个已有会话：id 指向的文件读进 out，后续 append 续写该文件。
      * 读不到返回 false，此时本对象**不变**（还是原来那个会话）。 */
-    bool resume(const std::string& id, json& out);
+    bool resume(const std::string& id, nlohmann::json& out);
 
     /* 扫描会话目录 → 清单，按 mtime 倒序（最近的在前）。目录不存在返回空。 */
     static std::vector<SessionInfo> list();
