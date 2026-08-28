@@ -1,9 +1,11 @@
 /*
  * config.hpp — 配置
  *
- * 分层两级（ADR-0010）：代码里的默认树（config_defaults.hpp）打底，
+ * 分层两级（ADR-0010）：代码里的默认打底（config.cpp 的 defaults()），
  * ~/.realagent/settings.json 覆盖。不看 cwd，不看项目目录，没有 env 那一层。
- * 默认树是键清单的唯一来源——想知道能配什么、不配是什么值，看那一个函数。
+ *
+ * 有默认值的键只有一个：permission（安全默认）。其余键缺了就是空串。
+ * 端点那一束（protocol / base_url / model）坚持不给默认，理由见 llm.hpp。
  *
  * 没有"必需键"：配置缺失不是错误状态，只是取到默认值，load() 不校验缺了什么。
  * load() 只在一种情况下失败：settings.json 存在但不是合法 JSON。
@@ -29,7 +31,6 @@
 #include <mutex>
 #include <string>
 #include <string_view>
-#include <vector>
 
 #include "json.hpp"
 

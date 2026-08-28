@@ -5,8 +5,6 @@
 #include <filesystem>
 #include <fstream>
 
-#include "config_defaults.hpp"
-
 namespace realagent {
 namespace fs = std::filesystem;
 
@@ -14,6 +12,17 @@ namespace {
 
 // 会话落盘路径：core 自己的实现细节，不是配置项
 constexpr std::string_view kSessionDir = ".realagent/sessions";
+
+// 默认配置树（ADR-0010）：load() 用它打底，settings.json 再逐键覆盖。
+// 只有一个键：permission。这是安全默认，缺了不该放行。
+// 其余键（api_key / small_model / 端点那一束 base_url / model / protocol）没有默认——
+// 缺了 get() 本就返回空串，再写一行 d["x"] = "" 是把编译器免费做的事运行期重做一遍；
+// 端点三键为什么坚持不给默认，见 llm.hpp 与 endpoint_config_error()。
+nlohmann::json defaults()
+{
+    // dangerous 工具执行前怎么裁决：ask 问用户（默认）/ allow-all 一律放行 / deny 一律拒绝
+    return {{"permission", "ask"}};
+}
 
 fs::path settings_path(const fs::path &dir) { return dir / ".realagent" / "settings.json"; }
 
@@ -85,7 +94,7 @@ std::string getenv_or(std::string_view name, std::string_view fallback)
 std::expected<Config, std::string> Config::load()
 {
     Config cfg;
-    cfg.settings_ = config_defaults();
+    cfg.settings_ = defaults();
 
     // 默认树打底，settings.json 覆盖。缺键不是错，缺的就用默认值——不校验必需项。
     auto file = read_settings(settings_path(global_dir()));
