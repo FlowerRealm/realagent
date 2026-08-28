@@ -1,0 +1,3 @@
+# 纯格式化提交，git blame 跳过。
+# 本地生效需要：git config blame.ignoreRevsFile .git-blame-ignore-revs
+8ec56c8faf35d4b970be42b40fbc4486aa23d8c0
