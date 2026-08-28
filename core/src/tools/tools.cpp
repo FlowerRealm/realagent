@@ -17,16 +17,18 @@ namespace {
 constexpr size_t kMaxOut = 50000; // 工具输出截断：50KB
 
 /* 结果只有一种形状：{"status", "output"}。status 非零即错，output 是给模型看的文本。 */
-nlohmann::json result(int status, std::string output) {
+nlohmann::json result(int status, std::string output)
+{
     return nlohmann::json{{"status", status}, {"output", std::move(output)}};
 }
-nlohmann::json fail(const std::string& msg) { return result(1, msg); }
-nlohmann::json ok(const std::string& what) { return result(0, what); }
+nlohmann::json fail(const std::string &msg) { return result(1, msg); }
+nlohmann::json ok(const std::string &what) { return result(0, what); }
 
 /* 取一个字符串参数；缺失/非字符串返回 nullopt。
  * 参数是模型给的，形状不由 core 说了算——const operator[] 撞上缺键是未定义行为，
  * 这里只能按迭代器查。 */
-std::optional<std::string> arg(const nlohmann::json& params, std::string_view key) {
+std::optional<std::string> arg(const nlohmann::json &params, std::string_view key)
+{
     const auto it = params.find(key);
     if (it == params.end() || !it->is_string()) return std::nullopt;
     return it->get<std::string>();
@@ -34,7 +36,8 @@ std::optional<std::string> arg(const nlohmann::json& params, std::string_view ke
 
 /* ==================== read ==================== */
 
-nlohmann::json do_read(const nlohmann::json& params) {
+nlohmann::json do_read(const nlohmann::json &params)
+{
     const auto path = arg(params, "file_path");
     if (!path) return fail("missing file_path");
 
@@ -47,7 +50,8 @@ nlohmann::json do_read(const nlohmann::json& params) {
     std::string buf(kMaxOut + 1, '\0');
     f.read(buf.data(), kMaxOut + 1);
     buf.resize(static_cast<size_t>(f.gcount()));
-    if (buf.size() > kMaxOut) {
+    if (buf.size() > kMaxOut)
+    {
         buf.resize(kMaxOut);
         buf.replace(buf.size() - 3, 3, "...");
     }
@@ -56,7 +60,8 @@ nlohmann::json do_read(const nlohmann::json& params) {
 
 /* ==================== edit（+x-0 = 创建） ==================== */
 
-nlohmann::json do_edit(const nlohmann::json& params) {
+nlohmann::json do_edit(const nlohmann::json &params)
+{
     const auto path = arg(params, "file_path");
     if (!path) return fail("missing file_path");
     const auto new_s = arg(params, "new_string");
@@ -64,7 +69,8 @@ nlohmann::json do_edit(const nlohmann::json& params) {
     const std::string old_s = arg(params, "old_string").value_or("");
 
     std::ifstream in(*path, std::ios::binary);
-    if (!in) {
+    if (!in)
+    {
         // 文件不存在 → 创建（write 语义：edit +x-0）
         std::ofstream out(*path, std::ios::binary);
         if (!out) return fail("cannot create: " + *path);
@@ -74,7 +80,8 @@ nlohmann::json do_edit(const nlohmann::json& params) {
     std::string content((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
     in.close();
 
-    if (old_s.empty()) {
+    if (old_s.empty())
+    {
         std::ofstream out(*path, std::ios::binary | std::ios::app);
         if (!out) return fail("cannot append");
         out << *new_s;
@@ -100,7 +107,8 @@ bool g_bash_killed = false; // 本次调用挨过刀：收尾时要盯着它死�
 
 /* tool_output 帧（PROTOCOL.md）：命令还在跑的时候就把输出推出去。
  * 与 tool_result 不是二选一——完整输出照旧在结果里回传，这里推的是"现在长什么样"。 */
-void emit_output(const EmitFn& emit, const std::string& call_id, const std::string& text) {
+void emit_output(const EmitFn &emit, const std::string &call_id, const std::string &text)
+{
     if (!emit) return;
     nlohmann::json ev;
     ev["call_id"] = call_id;
@@ -111,7 +119,8 @@ void emit_output(const EmitFn& emit, const std::string& call_id, const std::stri
     emit("tool_output", ev.dump());
 }
 
-nlohmann::json do_bash(const std::string& call_id, const nlohmann::json& params, const EmitFn& emit) {
+nlohmann::json do_bash(const std::string &call_id, const nlohmann::json &params, const EmitFn &emit)
+{
     const auto cmd = arg(params, "command");
     if (!cmd) return fail("missing command");
 
@@ -125,7 +134,8 @@ nlohmann::json do_bash(const std::string& call_id, const nlohmann::json& params,
     {
         std::lock_guard<std::mutex> lk(g_bash_mtx);
         pid = fork();
-        if (pid == 0) {
+        if (pid == 0)
+        {
             /* 子进程：以下都是 async-signal-safe 的，多线程 fork 后只能用这些 */
             setpgid(0, 0); /* 自成进程组：中止时一枪打掉整棵子孙树，不留孤儿 */
             /* stdout 与 stderr 都接到同一个管道（ADR-0017）。只接 stdout 的话，
@@ -137,10 +147,11 @@ nlohmann::json do_bash(const std::string& call_id, const nlohmann::json& params,
             dup2(fds[1], STDERR_FILENO);
             close(fds[0]);
             close(fds[1]);
-            execl("/bin/sh", "sh", "-c", cmd->c_str(), (char*)nullptr);
+            execl("/bin/sh", "sh", "-c", cmd->c_str(), (char *)nullptr);
             _exit(127);
         }
-        if (pid > 0) {
+        if (pid > 0)
+        {
             setpgid(pid, pid); /* 父子各设一遍：谁先跑到都算数，不必猜调度 */
             g_bash_pgid = pid;
             g_bash_killed = false;
@@ -148,12 +159,14 @@ nlohmann::json do_bash(const std::string& call_id, const nlohmann::json& params,
     }
 
     close(fds[1]);
-    if (pid < 0) {
+    if (pid < 0)
+    {
         close(fds[0]);
         return fail("fork failed");
     }
-    FILE* f = fdopen(fds[0], "r");
-    if (!f) {
+    FILE *f = fdopen(fds[0], "r");
+    if (!f)
+    {
         close(fds[0]);
         return fail("fdopen failed");
     }
@@ -163,12 +176,16 @@ nlohmann::json do_bash(const std::string& call_id, const nlohmann::json& params,
     std::string out;
     std::array<char, 4096> line{};
     bool truncated = false;
-    while (fgets(line.data(), (int)line.size(), f)) {
+    while (fgets(line.data(), (int)line.size(), f))
+    {
         const std::string chunk(line.data());
-        if (out.size() + chunk.size() <= kMaxOut) {
+        if (out.size() + chunk.size() <= kMaxOut)
+        {
             out += chunk;
             emit_output(emit, call_id, chunk);
-        } else {
+        }
+        else
+        {
             truncated = true; // 超限后只吞不推：管道还得读干净，撒手等于给命令一个 SIGPIPE
         }
     }
@@ -184,12 +201,16 @@ nlohmann::json do_bash(const std::string& call_id, const nlohmann::json& params,
 
     int st = 0;
     bool reaped = false;
-    if (killed) {
+    if (killed)
+    {
         /* SIGTERM 递出去了，没人保证它一定死。给一秒，还赖着就 SIGKILL 整组——
          * 用户按了中止，后台不许留下任何东西。 */
-        for (int i = 0; i < 100 && !reaped; ++i) {
-            if (waitpid(pid, &st, WNOHANG) > 0) reaped = true;
-            else usleep(10000);
+        for (int i = 0; i < 100 && !reaped; ++i)
+        {
+            if (waitpid(pid, &st, WNOHANG) > 0)
+                reaped = true;
+            else
+                usleep(10000);
         }
         if (!reaped) kill(-pid, SIGKILL);
     }
@@ -219,14 +240,16 @@ const ToolDef k_tools[] = {
 
 std::span<const ToolDef> tool_defs() { return k_tools; }
 
-const ToolDef* find_tool(std::string_view name) {
+const ToolDef *find_tool(std::string_view name)
+{
     const auto it = std::find_if(std::begin(k_tools), std::end(k_tools),
-                                 [&](const ToolDef& t) { return t.name == name; });
+                                 [&](const ToolDef &t) { return t.name == name; });
     return it == std::end(k_tools) ? nullptr : it;
 }
 
-nlohmann::json run_tool(const std::string& call_id, const std::string& name,
-              const std::string& params_json, const EmitFn& emit) {
+nlohmann::json run_tool(const std::string &call_id, const std::string &name,
+                        const std::string &params_json, const EmitFn &emit)
+{
     nlohmann::json params = nlohmann::json::parse(params_json, nullptr, false);
     if (params.is_discarded()) params = nlohmann::json::object();
     if (name == "read") return do_read(params);
@@ -235,7 +258,8 @@ nlohmann::json run_tool(const std::string& call_id, const std::string& name,
     return fail("unknown tool: " + name);
 }
 
-void interrupt_tool() {
+void interrupt_tool()
+{
     std::lock_guard<std::mutex> lk(g_bash_mtx);
     if (g_bash_pgid <= 0) return;
     /* 打的是进程组，不是单个进程。第一次 SIGTERM，给命令一个自己收尾的机会；

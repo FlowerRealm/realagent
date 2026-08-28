@@ -31,14 +31,14 @@ struct ToolDef {
 std::span<const ToolDef> tool_defs();
 
 /* 按名查定义；没有返回 nullptr */
-const ToolDef* find_tool(std::string_view name);
+const ToolDef *find_tool(std::string_view name);
 
 /* 执行结果就是一个 json：{"status": <int, 0=成功>, "output": <string, 给模型看的文本>}。
  * 单独一个两字段结构体是多余的信封——工具本来就在拼 json，把 status 放进去即可。
  *
  * 执行。call_id 透传进实时输出帧（tool_output），客户端靠它认领是哪次调用。 */
-nlohmann::json run_tool(const std::string& call_id, const std::string& name,
-              const std::string& params_json, const EmitFn& emit);
+nlohmann::json run_tool(const std::string &call_id, const std::string &name,
+                        const std::string &params_json, const EmitFn &emit);
 
 /* 中止在跑的 bash（任意线程）。手上没有在跑的就什么都不做——
  * "下一次调用该不该拒"是 executor 的账，记在这里只会变成一个迟早过期的标志位。 */

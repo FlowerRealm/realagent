@@ -17,9 +17,11 @@ namespace realagent {
 namespace {
 
 /* 块数组 → 一段文本（本协议的 content 只有字符串这一种形状） */
-std::string join_text(const nlohmann::json& blocks) {
+std::string join_text(const nlohmann::json &blocks)
+{
     std::string out;
-    for (const nlohmann::json& b : blocks) {
+    for (const nlohmann::json &b : blocks)
+    {
         if (b.at("type") != "text") continue;
         out += b.at("text").get<std::string>();
     }
@@ -28,8 +30,9 @@ std::string join_text(const nlohmann::json& blocks) {
 
 } // namespace
 
-HttpRequest build_request(protocol::OpenAiChat, const Config& cfg, const nlohmann::json& dialog) {
-    const nlohmann::json& d = dialog;
+HttpRequest build_request(protocol::OpenAiChat, const Config &cfg, const nlohmann::json &dialog)
+{
+    const nlohmann::json &d = dialog;
 
     nlohmann::json body;
     body["model"] = d.value("model", std::string());
@@ -42,21 +45,27 @@ HttpRequest build_request(protocol::OpenAiChat, const Config& cfg, const nlohman
     if (const std::string system = d.value("system", std::string()); !system.empty())
         msgs.push_back(nlohmann::json{{"role", "system"}, {"content", system}});
 
-    if (d.contains("messages") && d["messages"].is_array()) {
-        for (const nlohmann::json& m : d["messages"]) {
+    if (d.contains("messages") && d["messages"].is_array())
+    {
+        for (const nlohmann::json &m : d["messages"])
+        {
             const std::string role = m.at("role");
             const nlohmann::json blocks = m.value("content", nlohmann::json::array());
 
             // tool_result 各自单独成一条 role=tool 的 message，先把它们摘出去
             nlohmann::json tool_msgs = nlohmann::json::array();
             nlohmann::json tool_calls = nlohmann::json::array();
-            for (const nlohmann::json& b : blocks) {
+            for (const nlohmann::json &b : blocks)
+            {
                 const std::string bt = b.at("type");
-                if (bt == "tool_result") {
+                if (bt == "tool_result")
+                {
                     tool_msgs.push_back(nlohmann::json{{"role", "tool"},
-                                             {"tool_call_id", b.at("tool_use_id")},
-                                             {"content", b.at("content")}});
-                } else if (bt == "tool_use") {
+                                                       {"tool_call_id", b.at("tool_use_id")},
+                                                       {"content", b.at("content")}});
+                }
+                else if (bt == "tool_use")
+                {
                     nlohmann::json fn;
                     fn["name"] = b.at("name");
                     // 参数是 JSON 字符串，不是对象——本协议如此
@@ -67,21 +76,24 @@ HttpRequest build_request(protocol::OpenAiChat, const Config& cfg, const nlohman
             }
 
             const std::string text = join_text(blocks);
-            if (!text.empty() || !tool_calls.empty()) {
+            if (!text.empty() || !tool_calls.empty())
+            {
                 nlohmann::json mout;
                 mout["role"] = role == "user" ? "user" : "assistant";
                 mout["content"] = text;
                 if (!tool_calls.empty()) mout["tool_calls"] = tool_calls;
                 msgs.push_back(mout);
             }
-            for (nlohmann::json& tm : tool_msgs) msgs.push_back(tm);
+            for (nlohmann::json &tm : tool_msgs) msgs.push_back(tm);
         }
     }
     body["messages"] = msgs;
 
-    if (d.contains("tools") && d["tools"].is_array()) {
+    if (d.contains("tools") && d["tools"].is_array())
+    {
         nlohmann::json tools = nlohmann::json::array();
-        for (const nlohmann::json& t : d["tools"]) {
+        for (const nlohmann::json &t : d["tools"])
+        {
             nlohmann::json fn;
             fn["name"] = t.at("name");
             if (t.contains("description")) fn["description"] = t.at("description");

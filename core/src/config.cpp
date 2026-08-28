@@ -15,14 +15,15 @@ namespace {
 // 会话落盘路径：core 自己的实现细节，不是配置项
 constexpr std::string_view kSessionDir = ".realagent/sessions";
 
-fs::path settings_path(const fs::path& dir) { return dir / ".realagent" / "settings.json"; }
+fs::path settings_path(const fs::path &dir) { return dir / ".realagent" / "settings.json"; }
 
 // 全局配置落点：~/.realagent/settings.json——唯一的覆盖来源，不看 cwd
 fs::path global_dir() { return fs::path(getenv_or("HOME", ".")); }
 
 // 读一份 settings.json。文件不存在 → nullopt（不是错误，用默认树就行）；
 // 打不开 / 解析不了 → 错误（读不懂就别猜）
-std::expected<std::optional<nlohmann::json>, std::string> read_settings(const fs::path& path) {
+std::expected<std::optional<nlohmann::json>, std::string> read_settings(const fs::path &path)
+{
     if (!fs::exists(path)) return std::optional<nlohmann::json>{};
     std::ifstream f(path);
     if (!f) return std::unexpected(path.string() + " 打不开");
@@ -36,30 +37,35 @@ std::expected<std::optional<nlohmann::json>, std::string> read_settings(const fs
 // 逐键覆盖：用户配了哪个键就换哪个键，没提的保留默认值。
 // 配置树是平的（ADR-0016 删掉 plugins 那一节之后再没有嵌套键），所以不必递归——
 // 需要嵌套的那天连着默认树一起加，不提前留机械。
-void merge_into(nlohmann::json& dst, const nlohmann::json& src) {
+void merge_into(nlohmann::json &dst, const nlohmann::json &src)
+{
     if (!src.is_object()) return; // settings.json 是合法 JSON 但不是对象：当没配
-    for (const auto& [k, v] : src.items()) dst[k] = v;
+    for (const auto &[k, v] : src.items()) dst[k] = v;
 }
 
 // tmp + rename 原子写。断电或进程被杀只会留下临时文件，不会留半截的 settings.json
-bool write_atomic(const fs::path& target, const std::string& text) {
+bool write_atomic(const fs::path &target, const std::string &text)
+{
     std::error_code ec;
     fs::create_directories(target.parent_path(), ec);
-    if (ec) {
+    if (ec)
+    {
         fprintf(stderr, "[config] persist: 创建目录失败 %s\n", ec.message().c_str());
         return false;
     }
     const fs::path tmp = target.string() + ".tmp";
     {
         std::ofstream f(tmp);
-        if (!f) {
+        if (!f)
+        {
             fprintf(stderr, "[config] persist: 无法写 %s\n", tmp.c_str());
             return false;
         }
         f << text << "\n";
     }
     fs::rename(tmp, target, ec);
-    if (ec) {
+    if (ec)
+    {
         fprintf(stderr, "[config] persist: rename 失败 %s\n", ec.message().c_str());
         fs::remove(tmp, ec);
         return false;
@@ -69,13 +75,15 @@ bool write_atomic(const fs::path& target, const std::string& text) {
 
 } // namespace
 
-std::string getenv_or(std::string_view name, std::string_view fallback) {
-    if (const char* v = std::getenv(std::string(name).c_str()); v != nullptr)
+std::string getenv_or(std::string_view name, std::string_view fallback)
+{
+    if (const char *v = std::getenv(std::string(name).c_str()); v != nullptr)
         return std::string(v);
     return std::string(fallback);
 }
 
-std::expected<Config, std::string> Config::load() {
+std::expected<Config, std::string> Config::load()
+{
     Config cfg;
     cfg.settings_ = config_defaults();
 
@@ -87,34 +95,39 @@ std::expected<Config, std::string> Config::load() {
     return cfg;
 }
 
-std::string Config::get(std::string_view key) const {
+std::string Config::get(std::string_view key) const
+{
     std::lock_guard<std::mutex> lk(*mutex_);
     return settings_.value(std::string(key), std::string());
 }
 
-bool Config::has(std::string_view key) const {
+bool Config::has(std::string_view key) const
+{
     std::lock_guard<std::mutex> lk(*mutex_);
     return settings_.contains(std::string(key));
 }
 
 // 不做档位间回落：small_model 空就是空串。回落会让"我明明配了小模型"与
 // "我没配所以用了主模型"长得一模一样，出账单时才发现区别
-std::string Config::model(ModelTier tier) const {
+std::string Config::model(ModelTier tier) const
+{
     return get(tier == ModelTier::Small ? "small_model" : "model");
 }
 
-bool Config::persist(std::string_view key, const nlohmann::json& v) {
+bool Config::persist(std::string_view key, const nlohmann::json &v)
+{
     const fs::path target = settings_path(global_dir());
 
     // 点对点：读出文件原样，只改这一个键。不 dump 内存树——默认值不进用户的文件。
     auto file = read_settings(target);
-    if (!file) {
+    if (!file)
+    {
         // 坏 JSON：拒绝写入。要写就只能整树覆盖，那会抹掉我们没读懂的用户数据（含 api_key）
         fprintf(stderr, "[config] persist 放弃：%s\n", file.error().c_str());
         return false;
     }
     nlohmann::json tree = file->value_or(nlohmann::json::object()); // 文件不存在 → 空对象起头
-    tree[std::string(key)] = v; // 只动这一个键，用户配的其余键原样留在文件里
+    tree[std::string(key)] = v;                                     // 只动这一个键，用户配的其余键原样留在文件里
     if (!write_atomic(target, tree.dump())) return false;
 
     // 落盘成功才改内存：失败时内存与文件都没变，不会出现"切了档但没写进去"
@@ -125,11 +138,13 @@ bool Config::persist(std::string_view key, const nlohmann::json& v) {
 
 std::string Config::session_dir() { return std::string(kSessionDir); }
 
-std::string Config::models_path() const {
+std::string Config::models_path() const
+{
     return (global_dir() / ".realagent" / "models.json").string();
 }
 
-nlohmann::json Config::to_json() const {
+nlohmann::json Config::to_json() const
+{
     std::lock_guard<std::mutex> lk(*mutex_);
     return settings_;
 }

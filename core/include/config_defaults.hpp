@@ -33,7 +33,8 @@
 
 namespace realagent {
 
-inline nlohmann::json config_defaults() {
+inline nlohmann::json config_defaults()
+{
     nlohmann::json d;
 
     // —— 凭证 ——

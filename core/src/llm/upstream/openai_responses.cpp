@@ -13,8 +13,9 @@
 
 namespace realagent {
 
-HttpRequest build_request(protocol::OpenAiResponses, const Config& cfg, const nlohmann::json& dialog) {
-    const nlohmann::json& d = dialog;
+HttpRequest build_request(protocol::OpenAiResponses, const Config &cfg, const nlohmann::json &dialog)
+{
+    const nlohmann::json &d = dialog;
 
     nlohmann::json body;
     body["model"] = d.value("model", std::string());
@@ -23,27 +24,35 @@ HttpRequest build_request(protocol::OpenAiResponses, const Config& cfg, const nl
         body["instructions"] = system;
 
     nlohmann::json input = nlohmann::json::array();
-    if (d.contains("messages") && d["messages"].is_array()) {
-        for (const nlohmann::json& m : d["messages"]) {
+    if (d.contains("messages") && d["messages"].is_array())
+    {
+        for (const nlohmann::json &m : d["messages"])
+        {
             const std::string role = m.at("role");
             const bool is_user = role == "user";
             const nlohmann::json blocks = m.value("content", nlohmann::json::array());
 
             nlohmann::json text_parts = nlohmann::json::array();
-            for (const nlohmann::json& b : blocks) {
+            for (const nlohmann::json &b : blocks)
+            {
                 const std::string bt = b.at("type");
-                if (bt == "text") {
+                if (bt == "text")
+                {
                     text_parts.push_back(nlohmann::json{{"type", is_user ? "input_text" : "output_text"},
-                                              {"text", b.at("text")}});
-                } else if (bt == "tool_use") {
+                                                        {"text", b.at("text")}});
+                }
+                else if (bt == "tool_use")
+                {
                     input.push_back(nlohmann::json{{"type", "function_call"},
-                                         {"call_id", b.at("id")},
-                                         {"name", b.at("name")},
-                                         {"arguments", b.value("input", nlohmann::json::object()).dump()}});
-                } else if (bt == "tool_result") {
+                                                   {"call_id", b.at("id")},
+                                                   {"name", b.at("name")},
+                                                   {"arguments", b.value("input", nlohmann::json::object()).dump()}});
+                }
+                else if (bt == "tool_result")
+                {
                     input.push_back(nlohmann::json{{"type", "function_call_output"},
-                                         {"call_id", b.at("tool_use_id")},
-                                         {"output", b.at("content")}});
+                                                   {"call_id", b.at("tool_use_id")},
+                                                   {"output", b.at("content")}});
                 }
             }
             if (!text_parts.empty())
@@ -53,9 +62,11 @@ HttpRequest build_request(protocol::OpenAiResponses, const Config& cfg, const nl
     }
     body["input"] = input;
 
-    if (d.contains("tools") && d["tools"].is_array()) {
+    if (d.contains("tools") && d["tools"].is_array())
+    {
         nlohmann::json tools = nlohmann::json::array();
-        for (const nlohmann::json& t : d["tools"]) {
+        for (const nlohmann::json &t : d["tools"])
+        {
             nlohmann::json tool;
             tool["type"] = "function";
             tool["name"] = t.at("name");

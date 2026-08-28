@@ -22,13 +22,15 @@ namespace realagent {
 namespace {
 
 /* usage 对象里的整数字段，缺失/类型不符按 0——各家实现给的字段并不齐全 */
-long long usage_num(const nlohmann::json& u, const char* key) {
+long long usage_num(const nlohmann::json &u, const char *key)
+{
     const auto it = u.find(key);
     return it != u.end() && it->is_number_integer() ? it->get<long long>() : 0;
 }
 
 /* 合并一帧 usage 并发出。绝对值：后到覆盖先到，丢帧不造成永久偏差 */
-void merge_usage(const nlohmann::json& u, UsageCounts& c, const EventSink& sink) {
+void merge_usage(const nlohmann::json &u, UsageCounts &c, const EventSink &sink)
+{
     if (usage_num(u, "input_tokens") > 0) c.input = usage_num(u, "input_tokens");
     if (usage_num(u, "output_tokens") > 0) c.output = usage_num(u, "output_tokens");
     if (usage_num(u, "cache_read_input_tokens") > 0)
@@ -40,33 +42,42 @@ void merge_usage(const nlohmann::json& u, UsageCounts& c, const EventSink& sink)
 
 } // namespace
 
-bool feed_block(protocol::AnthropicMessages, AnthropicState& st, std::string_view block,
-                const EventSink& sink) {
+bool feed_block(protocol::AnthropicMessages, AnthropicState &st, std::string_view block,
+                const EventSink &sink)
+{
     const SseBlock sb = split_sse_block(block);
     if (sb.data.empty()) return true;
-    try {
+    try
+    {
         const nlohmann::json o = nlohmann::json::parse(sb.data, nullptr, false);
         // 不是 JSON 的 data 行（如 [DONE]）：忽略，不是错
         if (o.is_discarded() || !o.is_object()) return true;
         const std::string t = o.at("type");
 
-        if (t == "message_start") {
+        if (t == "message_start")
+        {
             // 新 message：计数清零，再合并首帧 usage（input_tokens 在这里给）
             st.usage = UsageCounts{};
             const auto msg = o.find("message");
-            if (msg != o.end() && msg->is_object()) {
+            if (msg != o.end() && msg->is_object())
+            {
                 const auto u = msg->find("usage");
                 if (u != msg->end() && u->is_object()) merge_usage(*u, st.usage, sink);
             }
-        } else if (t == "content_block_start") {
-            const nlohmann::json& cb = o.at("content_block");
+        }
+        else if (t == "content_block_start")
+        {
+            const nlohmann::json &cb = o.at("content_block");
             const std::string cbt = cb.at("type");
             st.block_type_ = cbt;
-            if (cbt == "tool_use") {
+            if (cbt == "tool_use")
+            {
                 st.tool_id_ = cb.at("id");
                 st.tool_name_ = cb.at("name");
                 st.tool_input_.clear();
-            } else if (cbt == "thinking") {
+            }
+            else if (cbt == "thinking")
+            {
                 // 思考块开始：先发 signature，再发起始文本（部分端点起始块自带文本）
                 st.thinking_sig_ = cb.value("signature", st.thinking_sig_);
                 if (sink) sink("thinking_start", nlohmann::json{{"signature", st.thinking_sig_}});
@@ -74,33 +85,48 @@ bool feed_block(protocol::AnthropicMessages, AnthropicState& st, std::string_vie
                     !init.empty() && sink)
                     sink("thinking_update", nlohmann::json{{"delta", init}});
             }
-        } else if (t == "content_block_delta") {
-            const nlohmann::json& delta = o.at("delta");
+        }
+        else if (t == "content_block_delta")
+        {
+            const nlohmann::json &delta = o.at("delta");
             const std::string dt = delta.at("type");
-            if (dt == "text_delta" && sink) {
+            if (dt == "text_delta" && sink)
+            {
                 sink("message_update", nlohmann::json{{"delta", delta.at("text")}});
-            } else if (dt == "thinking_delta" && st.block_type_ == "thinking" && sink) {
+            }
+            else if (dt == "thinking_delta" && st.block_type_ == "thinking" && sink)
+            {
                 sink("thinking_update", nlohmann::json{{"delta", delta.at("thinking")}});
-            } else if (dt == "input_json_delta" && st.block_type_ == "tool_use") {
+            }
+            else if (dt == "input_json_delta" && st.block_type_ == "tool_use")
+            {
                 st.tool_input_ += delta.at("partial_json").get<std::string>();
             }
-        } else if (t == "content_block_stop") {
-            if (st.block_type_ == "tool_use" && sink) {
+        }
+        else if (t == "content_block_stop")
+        {
+            if (st.block_type_ == "tool_use" && sink)
+            {
                 nlohmann::json in = nlohmann::json::parse(st.tool_input_, nullptr, false);
                 sink("tool_use", nlohmann::json{{"id", st.tool_id_},
-                                      {"name", st.tool_name_},
-                                      {"input", in.is_discarded() ? nlohmann::json::object() : in}});
+                                                {"name", st.tool_name_},
+                                                {"input", in.is_discarded() ? nlohmann::json::object() : in}});
                 st.block_type_.clear();
-            } else if (st.block_type_ == "thinking") {
+            }
+            else if (st.block_type_ == "thinking")
+            {
                 if (sink) sink("thinking_stop", nlohmann::json::object());
                 st.block_type_.clear();
                 st.thinking_sig_.clear();
             }
-        } else if (t == "message_delta") {
+        }
+        else if (t == "message_delta")
+        {
             // output_tokens 在这里给终值：先发 usage 再发 stop，保证下游收工时数字已定
             if (const auto u = o.find("usage"); u != o.end() && u->is_object())
                 merge_usage(*u, st.usage, sink);
-            if (sink) {
+            if (sink)
+            {
                 // delta 缺失/非对象不是丢帧的理由：stop 照发，reason 退回默认值
                 nlohmann::json ev;
                 ev["reason"] = "stop";
@@ -110,10 +136,12 @@ bool feed_block(protocol::AnthropicMessages, AnthropicState& st, std::string_vie
             }
         }
         return true;
-    } catch (const std::exception& e) {
+    } catch (const std::exception &e)
+    {
         fprintf(stderr, "[llm] anthropic-messages 帧不合规: %s | data=%.200s\n", e.what(),
                 sb.data.c_str());
-    } catch (...) {
+    } catch (...)
+    {
         fprintf(stderr, "[llm] anthropic-messages 帧不合规（未知异常）| data=%.200s\n",
                 sb.data.c_str());
     }

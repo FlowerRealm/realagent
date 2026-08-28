@@ -31,16 +31,16 @@ struct QuicServerConfig {
 /* QUIC 服务端回调（agent 线程注册） */
 struct QuicCallbacks {
     /* 收到用户消息 → 投递 agent 线程。返回 JSON 响应字符串。 */
-    std::function<std::string(const std::string& body)> on_message;
+    std::function<std::string(const std::string &body)> on_message;
     /* 执行斜杠命令（POST /command，体 {"command":"/new"}）→ 响应 JSON 字符串。
      * 与 on_message 的 `/` 前缀分支是同一份实现，不是两套行为。 */
-    std::function<std::string(const std::string& body)> on_command;
+    std::function<std::string(const std::string &body)> on_command;
     /* 会话清单（GET /sessions）→ JSON 数组字符串 */
     std::function<std::string()> on_sessions;
     /* 新建 / 恢复会话（POST /session，体 {"id"} 恢复、体空则新建）→ 响应 JSON 字符串 */
-    std::function<std::string(const std::string& body)> on_session;
+    std::function<std::string(const std::string &body)> on_session;
     /* 收到审批裁决（POST /approval-response）→ 交给审批协调器 */
-    std::function<void(const std::string& id, bool allow)> on_approval_response;
+    std::function<void(const std::string &id, bool allow)> on_approval_response;
     /* 斜杠命令列表（GET /commands）→ JSON 数组 [{name,description},...]。core 是唯一真相源。 */
     std::function<std::string()> on_commands;
     /* 状态栏数据（GET /statusline）→ JSON 对象字符串 {"model":"...", ...}。
@@ -56,18 +56,18 @@ struct QuicCallbacks {
 
 /* 最小 QUIC/HTTP3 服务端。事件循环阻塞在 run() 中。 */
 class QuicServer {
-public:
-    explicit QuicServer(const QuicServerConfig& cfg);
+  public:
+    explicit QuicServer(const QuicServerConfig &cfg);
     ~QuicServer();
 
-    QuicServer(const QuicServer&) = delete;
-    QuicServer& operator=(const QuicServer&) = delete;
+    QuicServer(const QuicServer &) = delete;
+    QuicServer &operator=(const QuicServer &) = delete;
 
     /* 设置回调（agent 线程注册） */
-    void set_callbacks(const QuicCallbacks& cbs) { cbs_ = cbs; }
+    void set_callbacks(const QuicCallbacks &cbs) { cbs_ = cbs; }
 
     /* 推送事件到所有订阅了 /events 的客户端（agent 事件流，SSE 语义） */
-    void push_event(const std::string& type, const std::string& payload);
+    void push_event(const std::string &type, const std::string &payload);
 
     /* 运行事件循环（阻塞，信号退出） */
     void run();
@@ -76,7 +76,7 @@ public:
 
     bool is_running() const { return running_; }
 
-private:
+  private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
     QuicServerConfig cfg_;

@@ -9,8 +9,9 @@ namespace realagent {
 
 ApprovalCoordinator::~ApprovalCoordinator() { cancel_all(); }
 
-Verdict ApprovalCoordinator::await(const std::string& tool_name,
-                                               const std::string& params) {
+Verdict ApprovalCoordinator::await(const std::string &tool_name,
+                                   const std::string &params)
+{
     std::shared_ptr<PendingApproval> p;
     {
         std::lock_guard<std::mutex> lk(mtx_);
@@ -38,7 +39,8 @@ Verdict ApprovalCoordinator::await(const std::string& tool_name,
     return ok ? p->verdict : Verdict::Deny;
 }
 
-void ApprovalCoordinator::respond(const std::string& id, bool allow) {
+void ApprovalCoordinator::respond(const std::string &id, bool allow)
+{
     std::shared_ptr<PendingApproval> p;
     {
         std::lock_guard<std::mutex> lk(mtx_);
@@ -52,14 +54,16 @@ void ApprovalCoordinator::respond(const std::string& id, bool allow) {
     p->cv.notify_one();
 }
 
-void ApprovalCoordinator::cancel_all() {
+void ApprovalCoordinator::cancel_all()
+{
     std::vector<std::shared_ptr<PendingApproval>> all;
     {
         std::lock_guard<std::mutex> lk(mtx_);
-        for (auto& [_, p] : pending_) all.push_back(p);
+        for (auto &[_, p] : pending_) all.push_back(p);
         pending_.clear();
     }
-    for (auto& p : all) {
+    for (auto &p : all)
+    {
         std::lock_guard<std::mutex> lk(p->mtx);
         p->verdict = Verdict::Deny;
         p->responded = true;

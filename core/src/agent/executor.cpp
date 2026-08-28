@@ -6,7 +6,7 @@
 
 namespace realagent {
 
-Executor::Executor(CoreContext& ctx, ApprovalCoordinator& approval)
+Executor::Executor(CoreContext &ctx, ApprovalCoordinator &approval)
     : ctx_(ctx), approval_(approval) {}
 
 namespace {
@@ -15,7 +15,8 @@ namespace {
  *   allow-all —— 一律放行。打通链路用，不是安全策略
  *   deny      —— 一律拒绝
  * 认不出的值按 ask：配置写错时该多问一句，不该多放一次行。 */
-Verdict decide(const Config& cfg) {
+Verdict decide(const Config &cfg)
+{
     const std::string mode = cfg.get("permission");
     if (mode == "allow-all") return Verdict::Allow;
     if (mode == "deny") return Verdict::Deny;
@@ -25,10 +26,12 @@ Verdict decide(const Config& cfg) {
 }
 } // namespace
 
-bool Executor::check_permission(const ToolDef& tool, const std::string& params_json,
-                                std::string* denied_reason) {
+bool Executor::check_permission(const ToolDef &tool, const std::string &params_json,
+                                std::string *denied_reason)
+{
     if (!tool.dangerous) return true; // 只读工具不触发
-    switch (decide(*ctx_.config)) {
+    switch (decide(*ctx_.config))
+    {
         case Verdict::Allow:
             return true;
         case Verdict::Deny:
@@ -37,7 +40,8 @@ bool Executor::check_permission(const ToolDef& tool, const std::string& params_j
         case Verdict::Ask:
             // 审批链路（ADR-0005）：core 发 permission_request → 用户裁决 → 回传。
             // agent 线程真等裁决（30s 超时 deny），事件循环线程收 /approval-response 唤醒
-            if (approval_.await(tool.name, params_json) != Verdict::Allow) {
+            if (approval_.await(tool.name, params_json) != Verdict::Allow)
+            {
                 if (denied_reason) *denied_reason = "denied by user";
                 return false;
             }
@@ -46,20 +50,23 @@ bool Executor::check_permission(const ToolDef& tool, const std::string& params_j
     return false;
 }
 
-void Executor::interrupt() {
+void Executor::interrupt()
+{
     std::lock_guard<std::mutex> lk(inflight_mtx_);
     interrupted_ = true;
     if (inflight_) interrupt_tool(); // 手上没有在跑的：标记留给下一次 execute 撞上
 }
 
-void Executor::reset() {
+void Executor::reset()
+{
     std::lock_guard<std::mutex> lk(inflight_mtx_);
     interrupted_ = false;
 }
 
-nlohmann::json Executor::execute(const std::string& call_id, const std::string& name,
-                       const std::string& params_json) {
-    const ToolDef* tool = find_tool(name);
+nlohmann::json Executor::execute(const std::string &call_id, const std::string &name,
+                                 const std::string &params_json)
+{
+    const ToolDef *tool = find_tool(name);
     if (!tool) return nlohmann::json{{"status", 1}, {"output", "unknown tool"}, {"interrupted", false}};
 
     std::string reason;

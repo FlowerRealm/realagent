@@ -17,10 +17,10 @@
 namespace realagent {
 
 /* 事件出口：type + JSON 载荷字符串 */
-using EmitFn = std::function<void(const std::string& type, const std::string& payload)>;
+using EmitFn = std::function<void(const std::string &type, const std::string &payload)>;
 
 struct CoreContext {
-    Config* config = nullptr;
+    Config *config = nullptr;
     EmitFn emit_fn;
 };
 

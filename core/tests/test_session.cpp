@@ -25,23 +25,29 @@ using nlohmann::json;
 using realagent::Session;
 
 static int failures = 0;
-#define CHECK(cond, msg)                                                        \
-    do {                                                                        \
-        if (cond) {                                                             \
-            printf("  ok: %s\n", msg);                                          \
-        } else {                                                                \
-            printf("  FAIL: %s\n", msg);                                        \
-            ++failures;                                                         \
-        }                                                                       \
+#define CHECK(cond, msg)                 \
+    do                                   \
+    {                                    \
+        if (cond)                        \
+        {                                \
+            printf("  ok: %s\n", msg);   \
+        }                                \
+        else                             \
+        {                                \
+            printf("  FAIL: %s\n", msg); \
+            ++failures;                  \
+        }                                \
     } while (0)
 
 /* 造一条 user 消息（与 Agent::run 产出的形状一致） */
-static json user_msg(const std::string& text) {
+static json user_msg(const std::string &text)
+{
     return json{{"role", "user"},
                 {"content", json::array({json{{"type", "text"}, {"text", text}}})}};
 }
 
-int main() {
+int main()
+{
     const fs::path work = fs::temp_directory_path() /
                           ("realagent-session-test-" + std::to_string(::getpid()));
     fs::remove_all(work);
@@ -100,8 +106,9 @@ int main() {
         const auto list = Session::list();
         CHECK(list.size() == 2, "两个会话（空的那个不算）");
         bool found = false;
-        for (const auto& e : list)
-            if (e.id == first_id) {
+        for (const auto &e : list)
+            if (e.id == first_id)
+            {
                 found = true;
                 CHECK(e.title == "第一句", "标题取自第一条 user 消息");
                 CHECK(e.messages == 2, "条数 = 行数");

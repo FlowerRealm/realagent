@@ -25,22 +25,27 @@ using nlohmann::json;
 namespace fs = std::filesystem;
 
 static int failures = 0;
-#define CHECK(cond, msg)                        \
-    do {                                        \
-        if (cond) {                             \
-            printf("  ok: %s\n", msg);          \
-        } else {                                \
-            printf("  FAIL: %s\n", msg);        \
-            ++failures;                         \
-        }                                       \
+#define CHECK(cond, msg)                 \
+    do                                   \
+    {                                    \
+        if (cond)                        \
+        {                                \
+            printf("  ok: %s\n", msg);   \
+        }                                \
+        else                             \
+        {                                \
+            printf("  FAIL: %s\n", msg); \
+            ++failures;                  \
+        }                                \
     } while (0)
 
 /* 配置来自 ~/.realagent/settings.json（Config::load 的唯一覆盖来源）。
  * 测试把 HOME 指到临时目录，于是既能摆一份自己的 settings.json，
  * 也不会读到、写到用户真正的配置。 */
-static Config make_config(const std::string& base_url, const std::string& api_key,
-                          const std::string& models_json = "",
-                          const std::string& proto = "anthropic-messages") {
+static Config make_config(const std::string &base_url, const std::string &api_key,
+                          const std::string &models_json = "",
+                          const std::string &proto = "anthropic-messages")
+{
     static std::string home;
     home = (fs::temp_directory_path() / "realagent_test_home").string();
     fs::remove_all(home);
@@ -50,13 +55,15 @@ static Config make_config(const std::string& base_url, const std::string& api_ke
         f << R"({"protocol":")" << proto << R"(","base_url":")" << base_url
           << R"(","api_key":")" << api_key << R"(","model":"m-test"})";
     }
-    if (!models_json.empty()) {
+    if (!models_json.empty())
+    {
         std::ofstream f(home + "/.realagent/models.json");
         f << models_json;
     }
     setenv("HOME", home.c_str(), 1);
     auto cfg = Config::load();
-    if (!cfg) {
+    if (!cfg)
+    {
         printf("  FAIL: Config::load: %s\n", cfg.error().c_str());
         ++failures;
         std::exit(1);
@@ -71,34 +78,43 @@ struct Collected {
     std::vector<json> usages;
     std::vector<std::string> order;
     std::string stop_reason;
-    std::string thinking;       // thinking_update 增量拼接
-    std::string thinking_sig;   // thinking_start 的 signature
+    std::string thinking;     // thinking_update 增量拼接
+    std::string thinking_sig; // thinking_start 的 signature
     int thinking_stops = 0;
     bool ok = true;
 };
 
-static Collected run_parse(const std::vector<std::string>& chunks,
-                           Protocol proto = Protocol::AnthropicMessages) {
+static Collected run_parse(const std::vector<std::string> &chunks,
+                           Protocol proto = Protocol::AnthropicMessages)
+{
     Collected c;
     SseParser p(proto);
-    const EventSink sink = [&c](std::string_view t, const json& ev) {
+    const EventSink sink = [&c](std::string_view t, const json &ev) {
         c.order.emplace_back(t);
-        if (t == "message_update") c.updates.push_back(ev);
-        else if (t == "tool_use") c.tools.push_back(ev);
-        else if (t == "usage") c.usages.push_back(ev);
-        else if (t == "stop") c.stop_reason = ev["reason"];
-        else if (t == "thinking_start") c.thinking_sig = ev["signature"];
-        else if (t == "thinking_update") c.thinking += ev["delta"].get<std::string>();
-        else if (t == "thinking_stop") ++c.thinking_stops;
+        if (t == "message_update")
+            c.updates.push_back(ev);
+        else if (t == "tool_use")
+            c.tools.push_back(ev);
+        else if (t == "usage")
+            c.usages.push_back(ev);
+        else if (t == "stop")
+            c.stop_reason = ev["reason"];
+        else if (t == "thinking_start")
+            c.thinking_sig = ev["signature"];
+        else if (t == "thinking_update")
+            c.thinking += ev["delta"].get<std::string>();
+        else if (t == "thinking_stop")
+            ++c.thinking_stops;
     };
-    for (const auto& ch : chunks)
+    for (const auto &ch : chunks)
         if (!p.feed(ch, sink)) c.ok = false;
     p.flush(sink);
     return c;
 }
 
 /* —— 1. build_request —— */
-static void test_build_request() {
+static void test_build_request()
+{
     printf("[build_request]\n");
     const Config cfg = make_config("http://127.0.0.1:18080", "test-key-123");
     const json dialog = json::parse(R"({
@@ -119,7 +135,7 @@ static void test_build_request() {
 
     CHECK(req.url == "http://127.0.0.1:18080/v1/messages", "url = base_url + /v1/messages");
     std::string hdrs;
-    for (const auto& h : req.headers) hdrs += h + "\n";
+    for (const auto &h : req.headers) hdrs += h + "\n";
     CHECK(hdrs.find("x-api-key: test-key-123") != std::string::npos,
           "headers 含 x-api-key（Anthropic 原厂认这个）");
     CHECK(hdrs.find("Authorization: Bearer test-key-123") != std::string::npos,
@@ -145,7 +161,8 @@ static void test_build_request() {
 }
 
 /* —— openai-chat 的请求形状 —— */
-static void test_build_request_openai_chat() {
+static void test_build_request_openai_chat()
+{
     printf("[build_request openai-chat]\n");
     const Config cfg = make_config("http://127.0.0.1:18080/v1", "k-oa", "", "openai-chat");
     const json dialog = json::parse(R"({
@@ -161,7 +178,7 @@ static void test_build_request_openai_chat() {
     const HttpRequest req = build_request(cfg, dialog);
     CHECK(req.url == "http://127.0.0.1:18080/v1/chat/completions", "url = base_url + /chat/completions");
     std::string hdrs;
-    for (const auto& h : req.headers) hdrs += h + "\n";
+    for (const auto &h : req.headers) hdrs += h + "\n";
     CHECK(hdrs.find("Authorization: Bearer k-oa") != std::string::npos, "只发 Bearer");
     CHECK(hdrs.find("x-api-key") == std::string::npos, "不发 x-api-key（那是另一套协议的事）");
 
@@ -186,7 +203,8 @@ static void test_build_request_openai_chat() {
 }
 
 /* —— openai-responses 的请求形状 —— */
-static void test_build_request_openai_responses() {
+static void test_build_request_openai_responses()
+{
     printf("[build_request openai-responses]\n");
     const Config cfg = make_config("http://127.0.0.1:18080/v1", "k-rs", "", "openai-responses");
     const json dialog = json::parse(R"({
@@ -218,7 +236,8 @@ static void test_build_request_openai_responses() {
 }
 
 /* —— 端点配置校验（ADR-0017）：缺键、协议名写错 —— */
-static void test_endpoint_config_error() {
+static void test_endpoint_config_error()
+{
     printf("[endpoint_config_error]\n");
     {
         const Config cfg = make_config("http://x", "k");
@@ -229,7 +248,10 @@ static void test_endpoint_config_error() {
         static std::string home = (fs::temp_directory_path() / "realagent_cfgerr_home").string();
         fs::remove_all(home);
         fs::create_directories(home + "/.realagent");
-        { std::ofstream f(home + "/.realagent/settings.json"); f << R"({"api_key":"k"})"; }
+        {
+            std::ofstream f(home + "/.realagent/settings.json");
+            f << R"({"api_key":"k"})";
+        }
         setenv("HOME", home.c_str(), 1);
         const auto cfg = Config::load();
         CHECK(cfg.has_value(), "缺必填键不影响 load 本身（load 只管 JSON 读不读得懂）");
@@ -252,7 +274,8 @@ static void test_endpoint_config_error() {
 }
 
 /* —— HTTP 状态码：4xx/5xx 绝不当成"内容为空的成功"（ADR-0017）—— */
-static void test_http_status_error() {
+static void test_http_status_error()
+{
     printf("[http_status_error]\n");
     CHECK(http_status_error(0, "").empty(),
           "状态码 0 = 没拿到响应（连不上/被中断掐断）→ 那是 CURLcode 的事，"
@@ -270,7 +293,8 @@ static void test_http_status_error() {
 }
 
 /* —— 2. SSE 解析：正文 + tool_use + thinking —— */
-static void test_parse_text() {
+static void test_parse_text()
+{
     printf("[SseParser 正文]\n");
     // 分两段喂（模拟 curl chunk 边界切在事件中间）
     const auto c = run_parse({
@@ -292,7 +316,8 @@ static void test_parse_text() {
     CHECK(c.stop_reason == "end_turn", "stop reason=end_turn");
 }
 
-static void test_parse_tool_use() {
+static void test_parse_tool_use()
+{
     printf("[SseParser tool_use]\n");
     const auto c = run_parse({
         "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,"
@@ -306,7 +331,8 @@ static void test_parse_tool_use() {
     });
     CHECK(c.ok, "解析全程无错");
     CHECK(c.tools.size() == 1, "产出 1 个 tool_use");
-    if (!c.tools.empty()) {
+    if (!c.tools.empty())
+    {
         CHECK(c.tools[0]["name"] == "read", "tool_use.name=read");
         CHECK(c.tools[0]["input"]["file_path"] == "a.txt",
               "tool_use.input.file_path=a.txt（partial_json 累积）");
@@ -314,7 +340,8 @@ static void test_parse_tool_use() {
     CHECK(c.stop_reason == "tool_use", "stop reason=tool_use");
 }
 
-static void test_parse_thinking() {
+static void test_parse_thinking()
+{
     printf("[SseParser thinking]\n");
     const auto c = run_parse({
         "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,"
@@ -340,7 +367,8 @@ static void test_parse_thinking() {
 }
 
 /* CRLF 分隔的 SSE（部分端点这么发）也得认 */
-static void test_parse_crlf() {
+static void test_parse_crlf()
+{
     printf("[SseParser CRLF 分隔]\n");
     const auto c = run_parse({
         "event: content_block_delta\r\ndata: {\"type\":\"content_block_delta\",\"index\":0,"
@@ -351,7 +379,8 @@ static void test_parse_crlf() {
 }
 
 /* 畸形帧绝不静默跳过：报错让上层中止本次调用 */
-static void test_parse_malformed() {
+static void test_parse_malformed()
+{
     printf("[SseParser 畸形帧]\n");
     const auto c = run_parse({
         "event: content_block_start\ndata: {\"type\":\"content_block_start\"}\n\n", // 缺 content_block
@@ -360,7 +389,8 @@ static void test_parse_malformed() {
 }
 
 /* —— 3. usage：message_start 给 input，message_delta 给 output，合并上报 —— */
-static void test_usage() {
+static void test_usage()
+{
     printf("[SseParser usage]\n");
     const auto c = run_parse({
         "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"m1\","
@@ -370,8 +400,9 @@ static void test_usage() {
         "\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n",
     });
     CHECK(c.usages.size() == 2, "产出 2 个 usage 事件（首帧 + 终帧）");
-    if (c.usages.size() == 2) {
-        const json& last = c.usages.back();
+    if (c.usages.size() == 2)
+    {
+        const json &last = c.usages.back();
         CHECK(last["input"] == 1200, "input 保留自 message_start");
         CHECK(last["output"] == 88, "output 取 message_delta 的终值");
         CHECK(last["cache_read"] == 300, "cache_read 合并上报");
@@ -383,7 +414,8 @@ static void test_usage() {
 }
 
 /* —— 4. 计价与模型清单 —— */
-static void test_pricing() {
+static void test_pricing()
+{
     printf("[Pricing]\n");
     // 单价取整数好算：input 1000/1M，77 token → 0.077
     const Config cfg = make_config("http://x", "k", R"([
@@ -401,7 +433,7 @@ static void test_pricing() {
           "无用量则不产生费用");
     CHECK(p.cost("不在表里", usage) == 0, "表里没这个模型 → 不计价，不猜");
 
-    const json& models = p.models();
+    const json &models = p.models();
     CHECK(models.size() == 1, "清单是 JSON 数组（1 条）");
     CHECK(models[0]["name"] == "test-model", "name 报上来");
     CHECK(models[0]["owned_by"] == "tester", "owned_by 报上来");
@@ -410,7 +442,8 @@ static void test_pricing() {
 }
 
 /* 没有用户接管版时用出厂表——装完就能算钱，不必先摆一份表 */
-static void test_pricing_factory() {
+static void test_pricing_factory()
+{
     printf("[Pricing 出厂表]\n");
     const Config cfg = make_config("http://x", "k");
     std::string err;
@@ -420,7 +453,8 @@ static void test_pricing_factory() {
 }
 
 /* 坏表就是坏表：报错，不跳过坏条目、不补默认值 */
-static void test_pricing_bad_table() {
+static void test_pricing_bad_table()
+{
     printf("[Pricing 坏表]\n");
     const Config cfg = make_config("http://x", "k", R"([{"name":"m"}])"); // 缺 owned_by 等
     std::string err;
@@ -430,7 +464,8 @@ static void test_pricing_bad_table() {
 }
 
 /* —— openai-chat 的下行：终点是 [DONE]，工具按 index 攒 —— */
-static void test_parse_openai_chat() {
+static void test_parse_openai_chat()
+{
     printf("[解析 openai-chat]\n");
     const auto c = run_parse(
         {"data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"想一下\"}}]}\n\n",
@@ -447,7 +482,8 @@ static void test_parse_openai_chat() {
     CHECK(c.thinking_stops == 1, "正文开始即思考结束（本协议不另发结束帧）");
     CHECK(c.stop_reason == "stop", "finish_reason=stop");
     CHECK(c.usages.size() == 1, "产出 1 个 usage 事件");
-    if (!c.usages.empty()) {
+    if (!c.usages.empty())
+    {
         const json u = c.usages.back();
         CHECK(u["input"] == 120, "prompt_tokens → input");
         CHECK(u["output"] == 8, "completion_tokens → output");
@@ -456,7 +492,8 @@ static void test_parse_openai_chat() {
     }
 }
 
-static void test_parse_openai_chat_tools() {
+static void test_parse_openai_chat_tools()
+{
     printf("[解析 openai-chat 工具调用]\n");
     const auto c = run_parse(
         {"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\","
@@ -469,7 +506,8 @@ static void test_parse_openai_chat_tools() {
         Protocol::OpenAiChat);
     CHECK(c.ok, "解析全程无错");
     CHECK(c.tools.size() == 1, "分片累积成 1 个 tool_use");
-    if (!c.tools.empty()) {
+    if (!c.tools.empty())
+    {
         CHECK(c.tools[0]["id"] == "call_1", "id 取自首帧");
         CHECK(c.tools[0]["name"] == "read", "name 取自首帧");
         CHECK(c.tools[0]["input"]["file_path"] == "a.txt",
@@ -484,7 +522,8 @@ static void test_parse_openai_chat_tools() {
 }
 
 /* 流内错误帧（HTTP 200 但载荷是错误）必须让本次调用失败 */
-static void test_parse_openai_chat_error_frame() {
+static void test_parse_openai_chat_error_frame()
+{
     printf("[解析 openai-chat 流内错误]\n");
     const auto c = run_parse({"data: {\"error\":{\"message\":\"rate limited\"}}\n\n"},
                              Protocol::OpenAiChat);
@@ -492,7 +531,8 @@ static void test_parse_openai_chat_error_frame() {
 }
 
 /* —— openai-responses 的下行：类型在 event: 行上 —— */
-static void test_parse_openai_responses() {
+static void test_parse_openai_responses()
+{
     printf("[解析 openai-responses]\n");
     const auto c = run_parse(
         {"event: response.reasoning_summary_text.delta\n"
@@ -513,13 +553,15 @@ static void test_parse_openai_responses() {
     CHECK(c.updates.size() == 1 && c.updates[0]["delta"] == "答案",
           "output_text.delta → message_update");
     CHECK(c.tools.size() == 1, "产出 1 个 tool_use");
-    if (!c.tools.empty()) {
+    if (!c.tools.empty())
+    {
         CHECK(c.tools[0]["id"] == "fc_1", "id 取 call_id");
         CHECK(c.tools[0]["input"]["file_path"] == "b.txt",
               "arguments 增量拼完再解析");
     }
     CHECK(c.stop_reason == "tool_use", "有工具调用 → 收工理由是 tool_use");
-    if (!c.usages.empty()) {
+    if (!c.usages.empty())
+    {
         const json u = c.usages.back();
         CHECK(u["input"] == 70, "input_tokens → input");
         CHECK(u["cache_read"] == 20,
@@ -527,7 +569,8 @@ static void test_parse_openai_responses() {
     }
 }
 
-static void test_parse_openai_responses_failed() {
+static void test_parse_openai_responses_failed()
+{
     printf("[解析 openai-responses 失败帧]\n");
     const auto c = run_parse({"event: response.failed\ndata: {\"response\":{\"error\":"
                               "{\"message\":\"boom\"}}}\n\n"},
@@ -535,7 +578,8 @@ static void test_parse_openai_responses_failed() {
     CHECK(!c.ok, "response.failed → feed 返回 false（HTTP 是 200，但这次调用没成）");
 }
 
-int main() {
+int main()
+{
     test_build_request();
     test_build_request_openai_chat();
     test_build_request_openai_responses();

@@ -25,7 +25,8 @@
 
 using namespace realagent;
 
-static int run_tool_test(CoreContext& ctx) {
+static int run_tool_test(CoreContext &ctx)
+{
     ApprovalCoordinator approval; // 测试模式无客户端，ASK 会 30s 超时按 deny
     Executor exe(ctx, approval);
 
@@ -33,7 +34,7 @@ static int run_tool_test(CoreContext& ctx) {
     // 这条验证从第二次运行起就不再验证它声称验证的东西
     std::remove("/tmp/ra_edit_test.txt");
 
-    const auto show = [](const char* tag, const nlohmann::json& r) {
+    const auto show = [](const char *tag, const nlohmann::json &r) {
         printf("%s: status=%d output=%.80s\n", tag, r["status"].get<int>(),
                r["output"].get<std::string>().c_str());
     };
@@ -46,10 +47,12 @@ static int run_tool_test(CoreContext& ctx) {
 }
 
 /* /model 响应：模型数据表里的清单，current 标出配置里当前那档（ADR-0009）。 */
-static nlohmann::json models_payload(const CoreContext& ctx, const Agent& agent) {
+static nlohmann::json models_payload(const CoreContext &ctx, const Agent &agent)
+{
     const std::string cur = ctx.config->model(ModelTier::Main);
     nlohmann::json arr = nlohmann::json::array();
-    for (nlohmann::json m : agent.pricing().models()) {
+    for (nlohmann::json m : agent.pricing().models())
+    {
         m["current"] = (m["name"] == cur);
         arr.push_back(std::move(m));
     }
@@ -59,17 +62,20 @@ static nlohmann::json models_payload(const CoreContext& ctx, const Agent& agent)
 /* 会话清单（GET /sessions、/new、/resume 共用）：盘上有哪些会话 + 现在在哪一个。
  * 当前会话可能一条消息都还没有（文件尚未落地），此时它不在扫描结果里——
  * 补一条空的进去，客户端的 current 才不会落空。 */
-static nlohmann::json sessions_payload(const Agent& agent) {
+static nlohmann::json sessions_payload(const Agent &agent)
+{
     nlohmann::json arr = nlohmann::json::array();
     bool seen_current = false;
-    for (const auto& s : Session::list()) {
+    for (const auto &s : Session::list())
+    {
         nlohmann::json e = s;
         const bool cur = (s.id == agent.session_id());
         e["current"] = cur;
         seen_current = seen_current || cur;
         arr.push_back(std::move(e));
     }
-    if (!seen_current) {
+    if (!seen_current)
+    {
         nlohmann::json e = SessionInfo{.id = agent.session_id()};
         e["current"] = true;
         arr.push_back(std::move(e)); // 新会话还没写过盘，排在最前（它最新）
@@ -80,11 +86,13 @@ static nlohmann::json sessions_payload(const Agent& agent) {
 
 /* 状态栏载荷：配的模型名 + 数据表里查到的元数据。
  * 查不到就只回名字——模型清单是参考资料，不是白名单（ADR-0009）。 */
-static nlohmann::json statusline_payload(const CoreContext& ctx, const Agent& agent) {
+static nlohmann::json statusline_payload(const CoreContext &ctx, const Agent &agent)
+{
     const std::string name = ctx.config->model(ModelTier::Main);
     nlohmann::json out;
     out["model"] = name;
-    for (const nlohmann::json& m : agent.pricing().models()) {
+    for (const nlohmann::json &m : agent.pricing().models())
+    {
         if (m["name"] != name) continue;
         out["owned_by"] = m["owned_by"];
         out["context"] = m["context"];
@@ -93,10 +101,12 @@ static nlohmann::json statusline_payload(const CoreContext& ctx, const Agent& ag
     return out;
 }
 
-int main(int argc, char** argv) {
+int main(int argc, char **argv)
+{
     // 文件坏了就地退出：读不懂用户写了什么，就别带着半份配置往下跑
     auto loaded = Config::load();
-    if (!loaded) {
+    if (!loaded)
+    {
         fprintf(stderr, "[config] %s\n", loaded.error().c_str());
         return 1;
     }
@@ -118,19 +128,20 @@ int main(int argc, char** argv) {
     // （ADR-0002 线程模型：quiche 非线程安全，推送必须在事件循环线程）
     std::mutex ev_mtx;
     std::deque<std::pair<std::string, std::string>> ev_queue;
-    ctx.emit_fn = [&ev_mtx, &ev_queue](const std::string& type, const std::string& payload) {
+    ctx.emit_fn = [&ev_mtx, &ev_queue](const std::string &type, const std::string &payload) {
         std::lock_guard<std::mutex> lk(ev_mtx);
         ev_queue.emplace_back(type, payload);
     };
 
-    for (const auto& t : tool_defs())
+    for (const auto &t : tool_defs())
         fprintf(stderr, "  tool: %s (dangerous=%d)\n", t.name.c_str(), (int)t.dangerous);
 
     ApprovalCoordinator approval;
     approval.set_emit(ctx.emit_fn); // permission_request 也走队列
     Executor exe(ctx, approval);
 
-    if (argc > 1 && std::string(argv[1]) == "test-tools") {
+    if (argc > 1 && std::string(argv[1]) == "test-tools")
+    {
         return run_tool_test(ctx);
     }
 
@@ -152,7 +163,7 @@ int main(int argc, char** argv) {
     // 与下方 /message 的斜杠命令分支共用同一命令集——新增命令两处同步（v1 义务）。
     cbs.on_commands = []() {
         nlohmann::json arr = nlohmann::json::array();
-        const auto add = [&arr](const char* name, const char* desc) {
+        const auto add = [&arr](const char *name, const char *desc) {
             arr.push_back(nlohmann::json{{"name", name}, {"description", desc}});
         };
         add("new", "新建会话（清空当前对话，旧会话留在盘上）");
@@ -180,10 +191,11 @@ int main(int argc, char** argv) {
     // 一份代码——两份实现迟早只改一边，那时同一条命令在两个端点上行为不同，
     // 谁都查不出为什么。命令不启动 agent，直接返回结果。
     // 与 agent 互斥：/new /resume 会换掉对话历史，执行中换等于把地板抽走。
-    auto handle_command = [&](const std::string& user_input) -> std::string {
+    auto handle_command = [&](const std::string &user_input) -> std::string {
         std::unique_lock<std::mutex> lk(agent_mtx, std::try_to_lock);
         if (!lk.owns_lock()) return agent_busy();
-        if (user_input == "/new") {
+        if (user_input == "/new")
+        {
             agent.reset(); // 新建会话：清空历史 + 换一个 JSONL 文件（旧的留在盘上）
             nlohmann::json out;
             out["ok"] = true;
@@ -200,13 +212,15 @@ int main(int argc, char** argv) {
             while (!a.empty() && a.back() == ' ') a.pop_back();
             return a;
         };
-        if (cmd == "/resume") {
+        if (cmd == "/resume")
+        {
             // 无参 = 列会话（清单里 current 标出自己在哪儿）；带 id = 恢复那一个。
             // 恢复失败保持原会话不动：宁可这条命令没生效，也不能把人扔进一段空白历史
             const std::string id = arg_of();
             nlohmann::json out;
             out["command"] = "resume";
-            if (!id.empty() && !agent.resume(id)) {
+            if (!id.empty() && !agent.resume(id))
+            {
                 out["ok"] = false;
                 out["error"] = "unknown session: " + id;
                 return out.dump();
@@ -215,25 +229,29 @@ int main(int argc, char** argv) {
             out["data"] = sessions_payload(agent);
             return out.dump();
         }
-        if (cmd == "/model") {
+        if (cmd == "/model")
+        {
             // 无参 = 列清单；带名 = 切主模型（写回 settings.json，下一次调用即生效）。
             // 只认数据表里的模型：交互式选择就该从已知的里挑，打字选中不存在的
             // 只会得到一个端点 400。启动时不校验配置是另一回事（ADR-0009）。
             const std::string name = arg_of();
             nlohmann::json out;
             out["command"] = "model";
-            if (!name.empty()) {
+            if (!name.empty())
+            {
                 bool known = false;
-                for (const nlohmann::json& m : models_payload(ctx, agent))
+                for (const nlohmann::json &m : models_payload(ctx, agent))
                     if (m["name"] == name) known = true;
-                if (!known) {
+                if (!known)
+                {
                     out["ok"] = false;
                     out["error"] = "unknown model: " + name;
                     return out.dump();
                 }
                 // 点对点写：只改文件里的 model 这一个键。statusline 帧不在这里推——
                 // 事件循环发现载荷变了自己会推（见 on_tick）
-                if (!ctx.config->persist("model", nlohmann::json(name))) {
+                if (!ctx.config->persist("model", nlohmann::json(name)))
+                {
                     out["ok"] = false;
                     out["error"] = "写入 settings.json 失败";
                     return out.dump();
@@ -245,7 +263,7 @@ int main(int argc, char** argv) {
         }
         return std::string("{\"error\":\"unknown command\"}");
     };
-    cbs.on_message = [&](const std::string& body) {
+    cbs.on_message = [&](const std::string &body) {
         // POST /message：body 为 {"message":"..."}。agent 在独立线程运行
         // （ADR-0002 线程模型）：不阻塞事件循环，审批等待期间仍能收裁决。
         // 体是客户端给的，形状不由 core 说了算：不是对象、没这个键、值不是字符串——
@@ -268,7 +286,7 @@ int main(int argc, char** argv) {
     };
     // POST /command：体 {"command":"/new"}。与上面 `/` 前缀那条走同一份实现——
     // 存在两个端点是历史形态（PROTOCOL.md），不是两套行为。命令名可以不带 '/'。
-    cbs.on_command = [&handle_command](const std::string& body) {
+    cbs.on_command = [&handle_command](const std::string &body) {
         const nlohmann::json b = nlohmann::json::parse(body, nullptr, false);
         const auto it = b.find("command");
         std::string cmd = it != b.end() && it->is_string() ? it->get<std::string>() : std::string();
@@ -284,16 +302,19 @@ int main(int argc, char** argv) {
     };
     // POST /session：体带 id = 恢复，体空 = 新建。与 /resume /new 同一套动作，
     // 只是给不走斜杠命令的客户端留的门。
-    cbs.on_session = [&agent, &agent_mtx, &agent_busy](const std::string& body) {
+    cbs.on_session = [&agent, &agent_mtx, &agent_busy](const std::string &body) {
         const nlohmann::json b = nlohmann::json::parse(body, nullptr, false);
         const auto it = b.find("id");
         const std::string id = it != b.end() && it->is_string() ? it->get<std::string>() : std::string();
         std::unique_lock<std::mutex> lk(agent_mtx, std::try_to_lock);
         if (!lk.owns_lock()) return agent_busy();
         nlohmann::json out;
-        if (id.empty()) {
+        if (id.empty())
+        {
             agent.reset();
-        } else if (!agent.resume(id)) {
+        }
+        else if (!agent.resume(id))
+        {
             out["ok"] = false;
             out["error"] = "unknown session: " + id;
             return out.dump();
@@ -306,7 +327,7 @@ int main(int argc, char** argv) {
         agent.interrupt();
         approval.cancel_all();
     };
-    cbs.on_approval_response = [&approval](const std::string& id, bool allow) {
+    cbs.on_approval_response = [&approval](const std::string &id, bool allow) {
         approval.respond(id, allow);
     };
     // 状态栏数据（GET /statusline）：客户端启动时拉一次，之后由 statusline 帧推更新
@@ -319,7 +340,8 @@ int main(int argc, char** argv) {
     // 启动值取一次，避免首轮推一帧与客户端 GET /statusline 重复的内容。
     std::string last_statusline = statusline_payload(ctx, agent).dump();
     cbs.on_tick = [&]() {
-        if (std::string cur = statusline_payload(ctx, agent).dump(); cur != last_statusline) {
+        if (std::string cur = statusline_payload(ctx, agent).dump(); cur != last_statusline)
+        {
             last_statusline = std::move(cur);
             server.push_event("statusline", last_statusline);
         }
@@ -329,7 +351,7 @@ int main(int argc, char** argv) {
             std::lock_guard<std::mutex> lk(ev_mtx);
             batch.swap(ev_queue);
         }
-        for (auto& [t, p] : batch) server.push_event(t, p);
+        for (auto &[t, p] : batch) server.push_event(t, p);
     };
 
     server.set_callbacks(cbs);

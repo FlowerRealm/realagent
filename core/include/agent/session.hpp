@@ -34,25 +34,25 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(SessionInfo, id, title, messages, mtime)
 
 /* 一个打开着的会话。整个类只做"往一个文件后面追加"这一件事。 */
 class Session {
-public:
+  public:
     /* 新会话：生成 id，**不建文件**——空会话不该在清单里占一行。
      * 文件在第一次 append 时才出现。 */
     Session();
 
-    const std::string& id() const { return id_; }
+    const std::string &id() const { return id_; }
 
     /* 追加一条消息（一行 JSON + '\n'）。写不进去只报 stderr，不打断对话：
      * 落盘失败是运维问题，不是让用户这轮白说的理由。 */
-    void append(const nlohmann::json& msg);
+    void append(const nlohmann::json &msg);
 
     /* 切到一个已有会话：id 指向的文件读进 out，后续 append 续写该文件。
      * 读不到返回 false，此时本对象**不变**（还是原来那个会话）。 */
-    bool resume(const std::string& id, nlohmann::json& out);
+    bool resume(const std::string &id, nlohmann::json &out);
 
     /* 扫描会话目录 → 清单，按 mtime 倒序（最近的在前）。目录不存在返回空。 */
     static std::vector<SessionInfo> list();
 
-private:
+  private:
     std::string id_;
     std::string path_; // 由 id_ 算出，缓存一份省得每次拼
 };

@@ -22,18 +22,21 @@ namespace realagent {
 namespace {
 
 /* 数值字段，缺失/类型不符按 0 */
-long long num_of(const nlohmann::json& o, const char* key) {
+long long num_of(const nlohmann::json &o, const char *key)
+{
     const auto it = o.find(key);
     return it != o.end() && it->is_number_integer() ? it->get<long long>() : 0;
 }
 
 /* 取字符串字段；缺失或不是字符串返回空串（各家给的 delta 字段并不齐全） */
-std::string str_of(const nlohmann::json& o, const char* key) {
+std::string str_of(const nlohmann::json &o, const char *key)
+{
     const auto it = o.find(key);
     return it != o.end() && it->is_string() ? it->get<std::string>() : std::string();
 }
 
-void close_thinking(OpenAiChatState& st, const EventSink& sink) {
+void close_thinking(OpenAiChatState &st, const EventSink &sink)
+{
     if (!st.reasoning_open) return;
     st.reasoning_open = false;
     if (sink) sink("thinking_stop", nlohmann::json::object());
@@ -41,16 +44,19 @@ void close_thinking(OpenAiChatState& st, const EventSink& sink) {
 
 /* 收工：先把攒好的工具调用发出去，再发 stop。顺序不能反——
  * 上层收到 stop 就当本轮结束了，之后来的 tool_use 没人接。 */
-void finish(OpenAiChatState& st, const EventSink& sink) {
+void finish(OpenAiChatState &st, const EventSink &sink)
+{
     close_thinking(st, sink);
-    if (sink) {
-        for (const long long idx : st.tool_order) {
+    if (sink)
+    {
+        for (const long long idx : st.tool_order)
+        {
             const auto it = st.tools.find(idx);
             if (it == st.tools.end()) continue;
             nlohmann::json in = nlohmann::json::parse(it->second.args.empty() ? "{}" : it->second.args, nullptr, false);
             sink("tool_use", nlohmann::json{{"id", it->second.id},
-                                  {"name", it->second.name},
-                                  {"input", in.is_discarded() ? nlohmann::json::object() : in}});
+                                            {"name", it->second.name},
+                                            {"input", in.is_discarded() ? nlohmann::json::object() : in}});
         }
         nlohmann::json ev;
         // 本协议的 tool_calls 与 anthropic 的 tool_use 是同一件事，收工理由也归一
@@ -66,32 +72,38 @@ void finish(OpenAiChatState& st, const EventSink& sink) {
 
 } // namespace
 
-bool feed_block(protocol::OpenAiChat, OpenAiChatState& st, std::string_view block,
-                const EventSink& sink) {
+bool feed_block(protocol::OpenAiChat, OpenAiChatState &st, std::string_view block,
+                const EventSink &sink)
+{
     const SseBlock sb = split_sse_block(block);
     if (sb.data.empty()) return true;
-    if (sb.data == "[DONE]") {
+    if (sb.data == "[DONE]")
+    {
         // 有些端点只给 [DONE] 不给 finish_reason：收工帧照发，不让上层空等
         if (!st.tool_order.empty() || !st.finish_reason.empty() || st.reasoning_open)
             finish(st, sink);
         return true;
     }
-    try {
+    try
+    {
         const nlohmann::json o = nlohmann::json::parse(sb.data, nullptr, false);
         // 不是 JSON 的 data 行：忽略，不是错
         if (o.is_discarded() || !o.is_object()) return true;
 
         // 端点把错误塞进流里（HTTP 200 + 一帧 error）：这不是内容，是失败
-        if (o.contains("error")) {
+        if (o.contains("error"))
+        {
             fprintf(stderr, "[llm] openai-chat 流内错误: %.200s\n", sb.data.c_str());
             return false;
         }
 
-        if (const auto u = o.find("usage"); u != o.end() && u->is_object()) {
+        if (const auto u = o.find("usage"); u != o.end() && u->is_object())
+        {
             if (const long long n = num_of(*u, "prompt_tokens"); n > 0) st.usage.input = n;
             if (const long long n = num_of(*u, "completion_tokens"); n > 0) st.usage.output = n;
             if (const auto pd = u->find("prompt_tokens_details");
-                pd != u->end() && pd->is_object()) {
+                pd != u->end() && pd->is_object())
+            {
                 if (const long long n = num_of(*pd, "cached_tokens"); n > 0)
                     st.usage.cache_read = n;
             }
@@ -100,16 +112,19 @@ bool feed_block(protocol::OpenAiChat, OpenAiChatState& st, std::string_view bloc
 
         const auto choices = o.find("choices");
         if (choices == o.end() || !choices->is_array() || choices->empty()) return true;
-        const nlohmann::json& c0 = (*choices)[0];
+        const nlohmann::json &c0 = (*choices)[0];
 
-        if (const auto delta = c0.find("delta"); delta != c0.end() && delta->is_object()) {
-            const nlohmann::json& d = *delta;
+        if (const auto delta = c0.find("delta"); delta != c0.end() && delta->is_object())
+        {
+            const nlohmann::json &d = *delta;
 
             // 思考内容：两个字段名都认，同一件事
             std::string reasoning = str_of(d, "reasoning_content");
             if (reasoning.empty()) reasoning = str_of(d, "reasoning");
-            if (!reasoning.empty() && sink) {
-                if (!st.reasoning_open) {
+            if (!reasoning.empty() && sink)
+            {
+                if (!st.reasoning_open)
+                {
                     st.reasoning_open = true;
                     // 本协议没有 signature，字段留着让上层一视同仁
                     sink("thinking_start", nlohmann::json{{"signature", ""}});
@@ -117,19 +132,23 @@ bool feed_block(protocol::OpenAiChat, OpenAiChatState& st, std::string_view bloc
                 sink("thinking_update", nlohmann::json{{"delta", reasoning}});
             }
 
-            if (const std::string text = str_of(d, "content"); !text.empty()) {
+            if (const std::string text = str_of(d, "content"); !text.empty())
+            {
                 close_thinking(st, sink); // 正文开始 = 思考结束，本协议不另发结束帧
                 if (sink) sink("message_update", nlohmann::json{{"delta", text}});
             }
 
-            if (const auto tcs = d.find("tool_calls"); tcs != d.end() && tcs->is_array()) {
+            if (const auto tcs = d.find("tool_calls"); tcs != d.end() && tcs->is_array())
+            {
                 close_thinking(st, sink);
-                for (const nlohmann::json& tc : *tcs) {
+                for (const nlohmann::json &tc : *tcs)
+                {
                     const long long idx = num_of(tc, "index");
                     auto [it, fresh] = st.tools.try_emplace(idx);
                     if (fresh) st.tool_order.push_back(idx);
                     if (const std::string id = str_of(tc, "id"); !id.empty()) it->second.id = id;
-                    if (const auto fn = tc.find("function"); fn != tc.end() && fn->is_object()) {
+                    if (const auto fn = tc.find("function"); fn != tc.end() && fn->is_object())
+                    {
                         if (const std::string n = str_of(*fn, "name"); !n.empty())
                             it->second.name = n;
                         it->second.args += str_of(*fn, "arguments");
@@ -138,15 +157,18 @@ bool feed_block(protocol::OpenAiChat, OpenAiChatState& st, std::string_view bloc
             }
         }
 
-        if (const std::string fr = str_of(c0, "finish_reason"); !fr.empty()) {
+        if (const std::string fr = str_of(c0, "finish_reason"); !fr.empty())
+        {
             st.finish_reason = fr;
             finish(st, sink);
         }
         return true;
-    } catch (const std::exception& e) {
+    } catch (const std::exception &e)
+    {
         fprintf(stderr, "[llm] openai-chat 帧不合规: %s | data=%.200s\n", e.what(),
                 sb.data.c_str());
-    } catch (...) {
+    } catch (...)
+    {
         fprintf(stderr, "[llm] openai-chat 帧不合规（未知异常）| data=%.200s\n", sb.data.c_str());
     }
     return false;

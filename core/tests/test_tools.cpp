@@ -38,28 +38,35 @@ using namespace realagent;
 using nlohmann::json;
 
 static int failures = 0;
-#define CHECK(cond, msg)                                                        \
-    do {                                                                        \
-        if (cond) {                                                             \
-            printf("  ok: %s\n", msg);                                          \
-        } else {                                                                \
-            printf("  FAIL: %s\n", msg);                                        \
-            ++failures;                                                         \
-        }                                                                       \
+#define CHECK(cond, msg)                 \
+    do                                   \
+    {                                    \
+        if (cond)                        \
+        {                                \
+            printf("  ok: %s\n", msg);   \
+        }                                \
+        else                             \
+        {                                \
+            printf("  FAIL: %s\n", msg); \
+            ++failures;                  \
+        }                                \
     } while (0)
 
 static fs::path g_home;
 
-static void write_settings(const std::string& body) {
+static void write_settings(const std::string &body)
+{
     std::ofstream f(g_home / ".realagent" / "settings.json");
     f << body;
 }
 
 /* 按 permission 值造一份配置（其余键取默认） */
-static Config config_with(const std::string& permission) {
+static Config config_with(const std::string &permission)
+{
     write_settings(R"({"permission":")" + permission + R"("})");
     auto c = Config::load();
-    if (!c) {
+    if (!c)
+    {
         printf("  FAIL: 配置加载失败 %s\n", c.error().c_str());
         ++failures;
         std::exit(1);
@@ -67,24 +74,27 @@ static Config config_with(const std::string& permission) {
     return *c;
 }
 
-static std::string slurp(const fs::path& p) {
+static std::string slurp(const fs::path &p)
+{
     std::ifstream f(p, std::ios::binary);
     return std::string((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
 }
 
-static json call(const std::string& name, const std::string& params) {
+static json call(const std::string &name, const std::string &params)
+{
     return run_tool("call-1", name, params, nullptr); // emit 为空：工具不推实时帧也照跑
 }
 
 /* 结果 json 的三个字段：{"status", "output"}（executor 再加 "interrupted"） */
-static int st(const json& r) { return r.value("status", -1); }
-static std::string msg(const json& r) { return r.value("output", std::string()); }
-static bool intr(const json& r) { return r.value("interrupted", false); }
+static int st(const json &r) { return r.value("status", -1); }
+static std::string msg(const json &r) { return r.value("output", std::string()); }
+static bool intr(const json &r) { return r.value("interrupted", false); }
 
 /* 参数里的路径要进 JSON 字符串，临时目录路径里不含需要转义的字符 */
-static std::string q(const fs::path& p) { return "\"" + p.string() + "\""; }
+static std::string q(const fs::path &p) { return "\"" + p.string() + "\""; }
 
-int main() {
+int main()
+{
     g_home = fs::temp_directory_path() / ("realagent-tools-test-" + std::to_string(::getpid()));
     fs::remove_all(g_home);
     fs::create_directories(g_home / ".realagent");
@@ -94,9 +104,9 @@ int main() {
     printf("== 工具清单 ==\n");
     {
         CHECK(tool_defs().size() == 3, "三个内置工具");
-        const ToolDef* r = find_tool("read");
-        const ToolDef* e = find_tool("edit");
-        const ToolDef* b = find_tool("bash");
+        const ToolDef *r = find_tool("read");
+        const ToolDef *e = find_tool("edit");
+        const ToolDef *b = find_tool("bash");
         CHECK(r && !r->dangerous, "read 是只读工具，不触发权限检查点");
         CHECK(e && e->dangerous, "edit 危险");
         CHECK(b && b->dangerous, "bash 危险");
@@ -108,7 +118,10 @@ int main() {
     printf("== read ==\n");
     {
         const fs::path f = g_home / "r.txt";
-        { std::ofstream o(f); o << "hello\nworld\n"; }
+        {
+            std::ofstream o(f);
+            o << "hello\nworld\n";
+        }
         const auto ok = call("read", R"({"file_path":)" + q(f) + "}");
         CHECK(st(ok) == 0 && msg(ok) == "hello\nworld\n", "读到原文");
 
@@ -178,7 +191,7 @@ int main() {
     {
         // 恰好读满与真被截断，从前读回来一模一样（gcount 都是上限），
         // 于是刚好读满的文件被无辜削三个字节
-        const auto write_n = [](const fs::path& p, std::size_t n) {
+        const auto write_n = [](const fs::path &p, std::size_t n) {
             std::ofstream o(p, std::ios::binary);
             o << std::string(n, 'x');
         };
@@ -201,7 +214,7 @@ int main() {
         Config cfg = config_with("allow-all");
         ApprovalCoordinator ap;
         int asked = 0;
-        ap.set_emit([&asked](const std::string& t, const std::string&) {
+        ap.set_emit([&asked](const std::string &t, const std::string &) {
             if (t == "permission_request") ++asked;
         });
         CoreContext ctx{.config = &cfg, .emit_fn = nullptr};
@@ -215,7 +228,7 @@ int main() {
         Config cfg = config_with("deny");
         ApprovalCoordinator ap;
         int asked = 0;
-        ap.set_emit([&asked](const std::string& t, const std::string&) {
+        ap.set_emit([&asked](const std::string &t, const std::string &) {
             if (t == "permission_request") ++asked;
         });
         CoreContext ctx{.config = &cfg, .emit_fn = nullptr};
@@ -235,7 +248,7 @@ int main() {
         Config cfg = config_with("ask");
         ApprovalCoordinator ap;
         std::string seen_tool;
-        ap.set_emit([&ap, &seen_tool](const std::string& t, const std::string& payload) {
+        ap.set_emit([&ap, &seen_tool](const std::string &t, const std::string &payload) {
             if (t != "permission_request") return;
             const json ev = json::parse(payload);
             seen_tool = ev["tool"];
@@ -250,7 +263,7 @@ int main() {
     {
         Config cfg = config_with("ask");
         ApprovalCoordinator ap;
-        ap.set_emit([&ap](const std::string& t, const std::string& payload) {
+        ap.set_emit([&ap](const std::string &t, const std::string &payload) {
             if (t != "permission_request") return;
             const json ev = json::parse(payload);
             ap.respond(ev["id"], false);
@@ -266,7 +279,7 @@ int main() {
         Config cfg = config_with("yolo");
         ApprovalCoordinator ap;
         int asked = 0;
-        ap.set_emit([&ap, &asked](const std::string& t, const std::string& payload) {
+        ap.set_emit([&ap, &asked](const std::string &t, const std::string &payload) {
             if (t != "permission_request") return;
             ++asked;
             const json ev = json::parse(payload);

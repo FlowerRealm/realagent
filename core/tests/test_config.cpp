@@ -24,23 +24,28 @@
 #include "config.hpp"
 
 namespace fs = std::filesystem;
+using nlohmann::json;
 using realagent::Config;
 using realagent::ModelTier;
-using nlohmann::json;
 
 static int failures = 0;
-#define CHECK(cond, msg)                                                        \
-    do {                                                                        \
-        if (cond) {                                                             \
-            printf("  ok: %s\n", msg);                                          \
-        } else {                                                                \
-            printf("  FAIL: %s\n", msg);                                        \
-            ++failures;                                                         \
-        }                                                                       \
+#define CHECK(cond, msg)                 \
+    do                                   \
+    {                                    \
+        if (cond)                        \
+        {                                \
+            printf("  ok: %s\n", msg);   \
+        }                                \
+        else                             \
+        {                                \
+            printf("  FAIL: %s\n", msg); \
+            ++failures;                  \
+        }                                \
     } while (0)
 
 /* 临时 HOME：全局配置唯一落点 */
-static fs::path make_sandbox(const char* tag) {
+static fs::path make_sandbox(const char *tag)
+{
     const fs::path dir = fs::temp_directory_path() /
                          ("realagent-cfg-test-" + std::string(tag) + "-" +
                           std::to_string(::getpid()));
@@ -49,26 +54,30 @@ static fs::path make_sandbox(const char* tag) {
     return dir;
 }
 
-static void write_settings(const fs::path& home, const std::string& body) {
+static void write_settings(const fs::path &home, const std::string &body)
+{
     std::ofstream f(home / ".realagent" / "settings.json");
     f << body;
 }
 
-static void remove_settings(const fs::path& home) {
+static void remove_settings(const fs::path &home)
+{
     fs::remove(home / ".realagent" / "settings.json");
 }
 
-static std::string read_settings_raw(const fs::path& home) {
+static std::string read_settings_raw(const fs::path &home)
+{
     std::ifstream f(home / ".realagent" / "settings.json");
     return std::string((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
 }
 
 /* 端点配置齐活的一份配置 */
-static const char* k_full =
+static const char *k_full =
     R"({"api_key":"sk-test","base_url":"https://example.test/anthropic",)"
     R"("model":"m-main","small_model":"m-small"})";
 
-int main() {
+int main()
+{
     const fs::path home = make_sandbox("home");
     ::setenv("HOME", home.c_str(), 1);
     fs::current_path(fs::temp_directory_path()); // cwd 不参与配置读取，随便在哪都一样
@@ -94,7 +103,8 @@ int main() {
         write_settings(home, R"({"api_key":"sk-only"})");
         const auto partial = Config::load();
         CHECK(partial.has_value(), "只配一个键 → load 成功（必填键的检查不在 load 这一层）");
-        if (partial) {
+        if (partial)
+        {
             CHECK(partial->get("api_key") == "sk-only", "配了的用文件里的值");
             CHECK(partial->get("small_model").empty(), "没配的取默认（这个默认就是空串）");
             CHECK(partial->get("permission") == "ask", "没配的取默认（这个默认有值）");
@@ -114,7 +124,8 @@ int main() {
         write_settings(home, k_full);
         const auto r = Config::load();
         CHECK(r.has_value(), "load 成功");
-        if (r) {
+        if (r)
+        {
             CHECK(r->get("base_url") == "https://example.test/anthropic", "文件值覆盖默认");
             CHECK(r->model(ModelTier::Main) == "m-main", "主模型");
             CHECK(r->model(ModelTier::Small) == "m-small", "小模型独立，不是主模型");
@@ -157,7 +168,8 @@ int main() {
         write_settings(home, R"({"model":"m-only"})");
         const auto r = Config::load();
         CHECK(r.has_value(), "load 成功");
-        if (r) {
+        if (r)
+        {
             CHECK(r->model(ModelTier::Main) == "m-only", "文件里的键生效");
             CHECK(r->get("permission") == "ask", "没提及的默认键原样在，不被顶层替换带走");
             CHECK(r->get("base_url").empty(),
@@ -170,13 +182,15 @@ int main() {
         write_settings(home, R"({"api_key":"sk-test","model":"m-old"})");
         auto r = Config::load();
         CHECK(r.has_value(), "load 成功");
-        if (r) {
+        if (r)
+        {
             CHECK(r->persist("model", json("m-new")), "persist 成功");
             CHECK(r->model(ModelTier::Main) == "m-new", "内存树已更新");
 
             const json on_disk = json::parse(read_settings_raw(home), nullptr, false);
             CHECK(!on_disk.is_discarded(), "落盘内容是合法 JSON");
-            if (!on_disk.is_discarded()) {
+            if (!on_disk.is_discarded())
+            {
                 CHECK(on_disk["model"] == "m-new", "目标键写进去了");
                 CHECK(on_disk["api_key"] == "sk-test", "用户原有的键原样保留");
                 // size==2 一并覆盖了 small_model / permission 等默认值没被写进来
@@ -196,7 +210,8 @@ int main() {
         write_settings(home, k_full);
         auto r = Config::load();
         CHECK(r.has_value(), "load 成功");
-        if (r) {
+        if (r)
+        {
             write_settings(home, "{ not json");
             CHECK(!r->persist("model", json("m-should-not-land")), "文件坏了 → 拒绝写入");
             CHECK(r->model(ModelTier::Main) == "m-main", "内存树没被改（先落盘成功才改内存）");

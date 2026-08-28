@@ -37,12 +37,12 @@ namespace realagent {
 
 /* 模型档位：一次 LLM 调用用哪一档模型 */
 enum class ModelTier {
-    Main,  // 主模型（对话主链路）
-    Small  // 小模型（标题/摘要一类杂活）
+    Main, // 主模型（对话主链路）
+    Small // 小模型（标题/摘要一类杂活）
 };
 
 class Config {
-public:
+  public:
     // 加载：默认树打底 + ~/.realagent/settings.json 逐键覆盖（配置树是平的）。
     // 只有一种失败：文件存在但不是合法 JSON——读不懂就别带着半份配置往下跑。
     // 配置"缺项"不是失败，缺的取默认值。
@@ -59,7 +59,7 @@ public:
     // 先落盘成功才改内存——失败时内存与文件都没变，不会出现"切了档但没写进去"。
     // 文件不存在按空对象起头；文件是坏 JSON 则拒绝写入并返回 false：
     // 宁可这次改动不生效，也不能拿内存树盖掉读不懂的用户数据（里面有 api_key）。
-    bool persist(std::string_view key, const nlohmann::json& v);
+    bool persist(std::string_view key, const nlohmann::json &v);
 
     // 会话存储目录（core 常量，不可配置）。相对 cwd —— 会话按项目分家，
     // 与全局配置（~/.realagent）不同层。
@@ -73,8 +73,8 @@ public:
     // 合并后的完整配置树
     nlohmann::json to_json() const;
 
-private:
-    nlohmann::json settings_;  // 合并后的配置树（默认树 + settings.json）
+  private:
+    nlohmann::json settings_; // 合并后的配置树（默认树 + settings.json）
     // mutex 不可拷贝/移动，用 shared_ptr 包装保持 Config 可拷贝（load() 按值返回）
     mutable std::shared_ptr<std::mutex> mutex_ = std::make_shared<std::mutex>();
 };

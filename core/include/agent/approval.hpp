@@ -23,7 +23,9 @@
 namespace realagent {
 
 /* 权限裁决。ASK 不是第三种结论，是"这一条得问人"——问完仍然只有放行与拒绝。 */
-enum class Verdict { Allow, Deny, Ask };
+enum class Verdict { Allow,
+                     Deny,
+                     Ask };
 
 struct PendingApproval {
     std::string id; // 请求 ID（permission_request / approval-response 关联）
@@ -36,26 +38,27 @@ struct PendingApproval {
 };
 
 class ApprovalCoordinator {
-public:
+  public:
     ApprovalCoordinator() = default;
     ~ApprovalCoordinator();
 
     /* 事件出口：core → 客户端（推送流）。agent 线程经事件队列异步投递（ADR-0002）。 */
-    void set_emit(std::function<void(const std::string& type, const std::string& payload)> emit) {
+    void set_emit(std::function<void(const std::string &type, const std::string &payload)> emit)
+    {
         emit_ = std::move(emit);
     }
 
     /* agent 线程：请求审批，阻塞直到裁决。30s 超时按 deny（危险工具默认拒绝）。 */
-    Verdict await(const std::string& tool_name, const std::string& params);
+    Verdict await(const std::string &tool_name, const std::string &params);
 
     /* 事件循环线程：收到 /approval-response 裁决 */
-    void respond(const std::string& id, bool allow);
+    void respond(const std::string &id, bool allow);
 
     /* 清理全部挂起审批（按 deny 唤醒，避免线程悬挂） */
     void cancel_all();
 
-private:
-    std::function<void(const std::string&, const std::string&)> emit_;
+  private:
+    std::function<void(const std::string &, const std::string &)> emit_;
     std::mutex mtx_;
     std::unordered_map<std::string, std::shared_ptr<PendingApproval>> pending_;
     uint64_t next_id_ = 1;
