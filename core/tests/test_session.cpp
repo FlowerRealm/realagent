@@ -46,6 +46,14 @@ static json user_msg(const std::string &text)
                 {"content", json::array({json{{"type", "text"}, {"text", text}}})}};
 }
 
+/* 帧序列压平成 "type type type"，一眼看得出顺序对不对 */
+static std::string types(const json &frames)
+{
+    std::string s;
+    for (const auto &f : frames) s += (s.empty() ? "" : " ") + f["type"].get<std::string>();
+    return s;
+}
+
 int main()
 {
     const fs::path work = fs::temp_directory_path() /
@@ -143,6 +151,58 @@ int main()
         json loaded;
         CHECK(r.resume(s.id(), loaded), "有坏行仍能恢复");
         CHECK(loaded.size() == 2, "两条好行都在，坏行被跳过");
+    }
+
+    printf("\n== Session::to_frames 事件帧回放（与推送流同形，ADR-0020） ==\n");
+    {
+        CHECK(Session::to_frames(json::array()).empty(), "空数组进，空数组出");
+        CHECK(Session::to_frames(json("不是数组")).empty(), "不是数组也不崩，回空");
+
+        const json qa = json::array({
+            {{"role", "user"}, {"content", {{{"type", "text"}, {"text", "在吗"}}}}},
+            {{"role", "assistant"}, {"content", {{{"type", "text"}, {"text", "在"}}}}},
+        });
+        const json f = Session::to_frames(qa);
+        CHECK(types(f) == "message_start turn_start message_update turn_end", "帧序列与实时流同形");
+        CHECK(f[0]["data"]["text"] == "在吗", "用户正文随 message_start 走");
+        CHECK(f[2]["data"]["delta"] == "在", "assistant 正文走 message_update 的 delta");
+
+        const json tool = json::array({
+            {{"role", "assistant"},
+             {"content", {{{"type", "tool_use"}, {"id", "c1"}, {"name", "bash"}, {"input", json::object()}}}}},
+            {{"role", "user"},
+             {"content", {{{"type", "tool_result"}, {"tool_use_id", "c1"}, {"content", "hi\n"}}}}},
+        });
+        const json g = Session::to_frames(tool);
+        CHECK(types(g) == "turn_start tool_execution_start turn_end tool_output tool_execution_end",
+              "工具帧齐全且按实时顺序");
+        CHECK(g[4]["data"]["name"] == "bash", "tool_execution_end 补上了工具名");
+        CHECK(g[4]["data"]["status"] == 0, "没标 is_error 就是 status 0");
+        CHECK(g[3]["data"]["text"] == "hi\n", "工具输出回放成 tool_output");
+
+        const json bad = json::array({
+            {{"role", "user"},
+             {"content", {{{"type", "tool_result"}, {"tool_use_id", "c9"}, {"content", "boom"}, {"is_error", true}}}}},
+        });
+        CHECK(Session::to_frames(bad)[1]["data"]["status"] == 1, "is_error 变成 status 1");
+
+        const json think = json::array({
+            {{"role", "assistant"},
+             {"content", {{{"type", "thinking"}, {"thinking", "嗯"}, {"signature", "sig"}}}}},
+        });
+        const json t = Session::to_frames(think);
+        CHECK(types(t) == "turn_start thinking_start thinking_update thinking_stop turn_end",
+              "思考块回放成三帧，与实时流同形");
+        CHECK(t[1]["data"]["signature"] == "sig" && t[2]["data"]["delta"] == "嗯", "签名与正文各归各位");
+    }
+
+    printf("\n== Session::read_frames 从文件读取并直接转换为事件帧 ==\n");
+    {
+        const json frames = Session::read_frames(dir, first_id);
+        CHECK(!frames.empty(), "read_frames 成功读回已落盘会话并转为帧");
+        CHECK(frames[0]["type"] == "message_start" && frames[0]["data"]["text"] == "第一句",
+              "首帧为第一句 user 消息");
+        CHECK(Session::read_frames(dir, "non-existent-id").empty(), "不存在的会话返回空数组");
     }
 
     fs::current_path(fs::temp_directory_path());

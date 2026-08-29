@@ -7,7 +7,11 @@
 
 ### **Agent Loop（代理循环）**:
 
-一次对话的驱动核心。一个 **Turn**（轮次）= 一次 LLM 调用 + 该调用产生的所有工具执行；LLM 继续调用工具则进入下一 Turn，直到 LLM 停止调用工具为止。
+一次对话的驱动核心。一个 **Turn**（轮次）= 一次 LLM 调用 + 该调用产生的所有工具执行。
+
+**出口只有一个：模型调 `stop` 工具**（2026-08-29）。「这次没调工具」不再算收工——那只是它一句话说完了，不代表活干完了。模型回了话却没打 stop，core 就提醒它（一条 user 消息：**如果已回答或已完成任务请立即调用 `stop`，切勿臆想未要求的任务**），接着跑下一圈——模型对「结束」的意识不清晰，只写在 system prompt 里它会忘，system prompt 也配以范例要求输出回答的同时调用 stop。出错和用户中断照样收工，那两条不归模型决定。
+
+代码里是**一层循环**（`Agent::loop`），一圈一个 Turn，重复单位是 Turn 不是消息。「一趟」（`agent_start` 到 `agent_end`、跑完通知邻居、把历史还给盘）不是第二层循环，是 idle ⇄ 运行中那条边沿——就是 `run_mtx_` 的持有与否，开跑上锁、收工解锁（[[ADR-0019]] §5）。
 
 _Avoid_: `agentic loop`、`对话循环`
 
@@ -19,7 +23,9 @@ _Avoid_: `iteration`、`round`
 
 ### **Tool（工具）**:
 
-LLM 可调用的具名函数。带名称、描述、参数 Schema（JSON Schema）、危险标记，执行后返回结构化结果。core 内置一张静态表（`core/src/tools/tools.cpp`）：文件与命令那三个 `read` / `edit` / `bash`，加上多 agent 那两个 `spawn` / `send_message`（[[ADR-0019]]）。
+LLM 可调用的具名函数。带名称、描述、参数 Schema（JSON Schema）、危险标记，执行后返回结构化结果。core 内置一张静态表（`core/src/tools/tools.cpp`）：文件与命令那三个 `read` / `edit` / `bash`，多 agent 那两个 `spawn` / `send_message`（[[ADR-0019]]），加上 [[Agent Loop]] 的出口 `stop`。
+
+**出口工具叫 `stop` 不叫 `close`**：`close` 在这里已经是 agent 的一个状态（节点没了），撞名。`stop` 是「这一趟干完了，回 idle」，agent 还活着。
 
 后两个的**实现**在 `Executor` 而不是 `tools.cpp`——它们要认识 `Agents`，而 `tools/` 在 `agent/` 下面，反过来包含就是层级倒挂。**定义仍在同一张表里**：LLM 看见的清单只有一份。
 
@@ -204,7 +210,7 @@ _Avoid_: `child`、`父子`、`树`（树是早先的说法，2026-08-28 改为�
 
 一个 [[Agent]] 待处理消息的队列，**三种来源一个队列**：人发来的（`POST /message`）、别的 agent 用 `send_message` 工具投的、别的 agent 跑完时沿入边广播的完成通知。
 
-Agent 主循环不是"被喂一句用户输入"，是**从收件箱取下一条**——三种来源在主循环里不产生任何分支。**一次取一条，不批量取走**：等不等是模型的判断，攒成一批等于替它决定了「这几条要一起看」。
+Agent 主循环不是"被喂一句用户输入"，是**一圈一个 [[Turn]]**，每圈开头把收件箱里此刻攒着的**全部**取走——三种来源在主循环里不产生任何分支。跑着的时候投进来的消息，下一个 turn 就进得去，不必等整趟跑完；而模型正在思考或正在跑工具时没人来取，所以「等它做完」不是一条规则，是取用点只在 turn 开头的后果（[[ADR-0019]] §5，2026-08-29 修订）。
 
 「跑完通知」那一路仍然是一个 hook（跑完时触发的行为），但**它没有自己的注册表**：订阅者集合由[[边（Edge）]]推导——跑完就扫自己的入边、逐个投递。建边即注册，没有「注册 hook」这个动作，也就没有第二份数据可漂。
 
@@ -305,7 +311,7 @@ TUI 每帧重绘的区域。**[[ADR-0020]] 之后它就是整个屏幕**——TU
 
 内容按 `line{role, text}` 组织，数据里不含 ANSI，样式在渲染最后一刻套上。**渲染后的行一行都不存**——每帧按当前宽度重折，所以改宽历史跟着重排。
 
-常驻的是**当前这个 agent 的那份行流**：切 agent 时整个丢掉，从 `GET /history` 重读一遍（[[ADR-0020]] 起草时写的是"只存一个索引"，落地时没做，理由记在那份 ADR 里）。要的那条不变量成立：**行缓冲与 agent 数量无关**——20 个还是 200 个 agent，内存里都只有正在看的那一个。
+常驻的是**当前这个 agent 的那份行流**：切 agent 时整个丢掉，从 `GET /session` 重读一遍（[[ADR-0020]] 起草时写的是"只存一个索引"，落地时没做，理由记在那份 ADR 里）。要的那条不变量成立：**行缓冲与 agent 数量无关**——20 个还是 200 个 agent，内存里都只有正在看的那一个。
 
 _Avoid_: `scrollback`（终端的那条 buffer 已不再承载会话历史）
 
@@ -379,7 +385,7 @@ _Avoid_: `定型`、`提交`、`freeze`、`finalize`（都不再指任何东西�
 - core 第三方依赖：libcurl + spdlog 两个（FTXUI 属 TUI 层）。
   - 实况注（2026-08-28）：需要 find_package 的是**三个**——libcurl、spdlog、quiche（`core/CMakeLists.txt`）。JSON 是 nlohmann/json 3.12.0，单头文件 vendored 在 `core/include/json.hpp`，不必安装、不必链库。括号里的 FTXUI 是 ADR-0007 之前"TUI 也用 C++"方案的残留，本项目**没有也不会**依赖它（TUI 是 Go + Bubble Tea）。
 - TUI：Go + Bubble Tea（ADR-0007）。参考 claude code / codex 客户端外观，**有状态栏**（见 [[Statusline（状态栏）]]）。原定"无状态栏"，后反转并已完整实现（core 侧 `GET /statusline` + `statusline` 帧，TUI 侧 `tui/cmd/realagent-tui/statusline.go`）。ADR-0007 正文第 34 行仍写着"无状态栏（用户明确）"，紧跟其后的实况注（2026-08-16）已注明该条被推翻——**正文与注不一致是有意保留的**：ADR 记录的是当时怎么想的，注记录的是后来发生了什么。
-- TUI 渲染：~~历史归终端管，不进 altscreen（ADR-0008）~~ —— **已推翻**（[[ADR-0020]]，2026-08-28）。进 altscreen + 自建 viewport；**不开 mouse mode**（开了终端原生选中/复制会整个失效，bubbletea issue #162），滚动绑键盘、滚轮靠终端的 alternate scroll 转方向键。行不常驻内存，从会话记录读、动态渲染，改宽可重排。新增 `GET /agent/<id>/history`，**返回事件帧序列**（不是抽象对话消息）——TUI 复用同一个渲染器，不写第二份。
+- TUI 渲染：~~历史归终端管，不进 altscreen（ADR-0008）~~ —— **已推翻**（[[ADR-0020]]，2026-08-28）。进 altscreen + 自建 viewport；**不开 mouse mode**（开了终端原生选中/复制会整个失效，bubbletea issue #162），滚动绑键盘、滚轮靠终端的 alternate scroll 转方向键。行不常驻内存，从会话记录读、动态渲染，改宽可重排。新增 `GET /session`（兼容 `GET /history`），**返回事件帧序列**（不是抽象对话消息）——TUI 复用同一个渲染器，不写第二份。
   - 接缝在「最后一条已落盘的消息」：历史走端点，正在流的走事件帧。subagent 的历史同样读得到（它落在 `sessions/sub/`，只是不进会话清单）。
   - 换掉的东西：退出即消失、不能 `tee`/管道、滚出屏幕要滚回来才能选。换来的：切 agent 可行、翻得到没在看的时段、改宽能重排、删掉「定型」与 `outbox` 两套机制。
 - 配置约定：**只有全局 `~/.realagent/`**。~~项目级 `.realagent/settings.json`~~ 已砍（2026-08-28，从未落地）：`core/src/config.cpp` 明写「唯一的覆盖来源，不看 cwd」，而 [[ADR-0019]] 之后 core 连 cwd 这个概念都没有了，项目级配置该按哪个 [[工作目录（Workdir）]]取也答不上来——同一个 core 里 N 个 agent，N 份项目配置合并给谁用？`extensions/` 随 [[ADR-0016]] 作废。真按项目分家的只有会话目录（`<workdir>/.realagent/sessions`）。

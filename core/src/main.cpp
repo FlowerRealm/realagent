@@ -21,7 +21,6 @@
 #include "agent/command.hpp"
 #include "agent/context.hpp"
 #include "agent/executor.hpp"
-#include "agent/history.hpp"
 #include "agent/session.hpp"
 #include "config.hpp"
 #include "server/quic_server.hpp"
@@ -138,16 +137,13 @@ int main(int argc, char **argv)
         return pool.list().dump();
     };
 
-    /* GET /history：一个 agent 的历史，回放成事件帧（ADR-0020）。 */
-    cbs.on_history = [&](const std::string &body) {
+    /* GET /session（兼别名 GET /history）：一个 agent 的会话内容回放成事件帧（ADR-0020）。 */
+    cbs.on_session_get = [&](const std::string &body) {
         const nlohmann::json j = nlohmann::json::parse(body, nullptr, false);
         const int id = j.value("agent_id", 0);
         Agent *a = pool.find(id);
         if (!a) return command_error("无此 agent: " + std::to_string(id));
-        nlohmann::json msgs;
-        if (!Session::read(a->session_dir(), a->session_id(), msgs))
-            msgs = nlohmann::json::array();
-        return history_frames(msgs).dump();
+        return Session::read_frames(a->session_dir(), a->session_id()).dump();
     };
 
     cbs.on_message = [&](const std::string &body) {

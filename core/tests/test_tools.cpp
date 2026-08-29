@@ -129,17 +129,22 @@ int main()
     {
         // 一个工具一个文件，read/edit/bash 自带实现，spawn/send_message 由 Executor 实现——
         // 定义都在同一张表里，LLM 看见的清单只有一份（ADR-0019）
-        CHECK(tool_defs().size() == 5, "五个工具");
+        CHECK(tool_defs().size() == 6, "六个工具");
         CHECK(find_tool("spawn") && find_tool("send_message"), "两个 agent 级工具在同一张表里");
         const ToolDef *r = find_tool("read");
         const ToolDef *e = find_tool("edit");
         const ToolDef *b = find_tool("bash");
+        const ToolDef *s = find_tool("stop");
         CHECK(r && !r->dangerous, "read 是只读工具，不触发权限检查点");
         CHECK(e && e->dangerous, "edit 危险");
         CHECK(b && b->dangerous, "bash 危险");
+        CHECK(s && !s->dangerous, "stop 是非危险控制工具");
         CHECK(find_tool("core-tools_bash") == nullptr,
               "没有命名空间前缀这回事了（ADR-0016）");
         CHECK(st(call("nope", "{}")) != 0, "未知工具返回错误，不是空成功");
+        const auto stop_res = call("stop", "{}");
+        CHECK(st(stop_res) == 0 && stop_res.value("stop", false) == true,
+              "stop 工具执行返回 stop=true 标记");
     }
 
     printf("== read ==\n");

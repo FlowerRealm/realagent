@@ -36,9 +36,9 @@ func main() {
 	r, _ := b.SendTo(la[0].ID, "你好")
 	fmt.Println("b 发消息:", r.Status)
 
-	// 历史：新会话还没落盘，应是空数组而不是错
-	h, err := a.FetchHistory(a.AgentID())
-	fmt.Printf("新 agent 的历史: %d 帧, err=%v\n", len(h), err)
+	// 会话内容：新会话还没落盘，应是空数组而不是错
+	h, err := a.FetchSession(a.AgentID())
+	fmt.Printf("新 agent 的会话帧: %d 帧, err=%v\n", len(h), err)
 
 	// 会话清单：opened_by 指向自己那个 agent
 	ch := make(chan client.Event, 64)

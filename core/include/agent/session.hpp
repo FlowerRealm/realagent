@@ -53,9 +53,15 @@ class Session {
     /* 扫描会话目录 → 清单，按 mtime 倒序（最近的在前）。目录不存在返回空。 */
     static std::vector<SessionInfo> list(const std::string &dir);
 
-    /* 只读一份历史出来，不动任何人的当前会话（GET /history 走这条，ADR-0020）。
+    /* 只读一份历史出来，不动任何人的当前会话。
      * resume 就是「read 成功之后把自己也搬过去」，两者共用这一份读取。 */
     static bool read(const std::string &dir, const std::string &id, nlohmann::json &out);
+
+    /* 一段消息历史 → 事件帧序列 `[{"type": ..., "data": {...}}]`（协议同形回放，ADR-0020）。 */
+    static nlohmann::json to_frames(const nlohmann::json &messages);
+
+    /* 只读一份会话并转换为事件帧序列（GET /session 回放走这条）。读不到返回空数组。 */
+    static nlohmann::json read_frames(const std::string &dir, const std::string &id);
 
   private:
     std::string dir_;

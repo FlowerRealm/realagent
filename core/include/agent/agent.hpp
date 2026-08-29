@@ -66,7 +66,8 @@ class Agent {
     ~Agent();
 
     /* 投一条消息进收件箱。三种来源一个队列（ADR-0019）：人发的、别的 agent 发的、
-     * 别的 agent 跑完的通知。主循环取下一条时不分辨它是哪来的。 */
+     * 别的 agent 跑完的通知。取走时不分辨它是哪来的。
+     * 正在跑也照投不误：下一个 turn 开头就会被一并取走（ADR-0019 §5）。 */
     void post(std::string message);
 
     /* 正在推进一个 Turn（不是 idle）。GET /agents 报状态用。 */
@@ -102,14 +103,31 @@ class Agent {
                       const std::string &model);
 
   private:
-    /* 主循环：从收件箱取下一条，跑到 LLM 不再调工具为止，再取下一条。
-     * 收件箱空就阻塞——那就是 idle（ADR-0019）。 */
+    /* agent 主循环，整条线程从头到尾就在这里面。**一层循环，一圈一个 turn**：
+     * 等到有活干（上一圈没收工，或收件箱非空）→ 把攒着的消息全收进来 → 调 LLM →
+     * 执行工具 → 模型调了 `stop` 才收工，回去等。
+     * 两样都没有就阻塞——那就是 idle（ADR-0019），不需要「空闲」这个状态。 */
     void loop();
+
+    /* idle ⇄ 运行中那条边沿。「一趟」不是第二层循环，就是这两个函数之间那段；
+     * busy（run_mtx_）的持有与否即「在不在一趟中间」，不另存状态位。 */
+    void start_run(std::unique_lock<std::mutex> &busy);
+    void finish_run(std::unique_lock<std::mutex> &busy);
+
+    /* 收件箱里此刻攒着的全部入账（可能一条也没有） */
+    void take_inbox();
+    /* 一条从外面来的消息入账 + 广播。人发的、别的 agent 发的、完成通知、core 递的话头，
+     * 全走这里——凡是从 agent 外面来的输入都是 user（ADR-0019 §5）。 */
+    void record_user(const std::string &text);
+    /* 一次 LLM 产出入账（thinking + 正文 + tool_use，块序由协议定） */
+    void record_assistant(const LlmOutcome &out);
+    /* 顺序执行这一批工具，结果逐条入账。返回：模型打了 `stop` 没有。
+     * 中断不由返回值表达——abort_ 调用方自己看得见。 */
+    bool run_tools(const LlmOutcome &out);
+
     /* idle 时历史还给了盘，醒来先读回来。读不到 = 这个会话还没写过盘，
      * 空历史就是对的，不是错。 */
     void ensure_loaded();
-    /* 一条消息 → 完整 agent loop（阻塞至 LLM 完成或工具链结束） */
-    void run(const std::string &user_input);
 
     /* 消息入账的唯一入口：进内存，同时落盘。
      * run() 里有六处产生消息，全都走这里——散着写 push_back 迟早漏掉一处，

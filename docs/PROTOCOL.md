@@ -8,7 +8,7 @@
 
 - **所有推送一律可靠**——增量与结构化事件无差别对待，丢弃任何一种都致命：
   - LLM 增量丢一整个段落，用户直接看不懂；
-  - turn_end 丢失，整个事件流状态机断裂（灾难性的）。
+  - agent_end 丢失，客户端的读秒永远停不下来（整个事件流状态机断裂，灾难性的）。
   因此**不存在"可丢预览"**。
 - **用对传输层**：可靠性交给 QUIC 可靠流原生保证，**不自建确认机制**（无水位/无 ACK/无捎带重发/无发送队列）。
 - **快握手 + 少校验**：QUIC 0-RTT（重复连接握手与数据同发），无自建校验开销。
@@ -28,7 +28,7 @@ TUI ◀──(2) 长生命周期单向流────────────  c
 |---|---|---|
 | `POST /agent` | 建一个 agent，体 `{"client_id","workdir"}` → `{"ok":true,"agent_id"}`。**`workdir` 必传，core 不猜**（ADR-0019）——它是全机单实例，自己的 cwd 跟任何 agent 都无关；客户端知道用户站在哪，由它给。`client_id` 决定它属于哪一组，该客户端还没有组就顺手建组。人不是图上的节点，所以这道门建出来的 agent 没有边 | ✅ |
 | `GET /agents` | agent 清单 `[{id, workdir, state, session_id, in_edges, out_edges}]`，体 `{"client_id"}`。**只列调用方那一组**（ADR-0021）——组的单位就是客户端。组内不受边的约束：客户端看得见本组全部，agent 只看得见自己的出边邻居，两层 | ✅ |
-| `GET /history` | 一个 agent 的历史，体 `{"client_id","agent_id"}` → **事件帧数组** `[{type, data}]`，形状与推送流逐帧相同。客户端因此复用同一个渲染器，实时看和翻历史看长得一样（ADR-0020）。读的是盘上那份，接缝在「最后一条已落盘的消息」：视图 = 这段回放 + 推送流喂进来的活尾巴。新会话还没写过盘 → 空数组，不是错 | ✅ |
+| `GET /session` | 一个 agent 的会话内容回放（`GET /history` 为兼容别名），体 `{"client_id","agent_id"}` → **事件帧数组** `[{type, data}]`，形状与推送流逐帧相同。客户端因此复用同一个渲染器，实时看和翻历史看长得一样（ADR-0020）。读的是盘上那份，接缝在「最后一条已落盘的消息」：视图 = 这段回放 + 推送流喂进来的活尾巴。新会话还没写过盘 → 空数组，不是错 | ✅ |
 | `POST /group/close` | 关掉调用方那一组，体 `{"client_id"}`。客户端正常退出前显式发一次；**断线满 60 秒 core 自己也会关**，那是兜底不是主路（ADR-0021） | ✅ |
 | `POST /message` | 提交用户消息，体 `{"client_id","agent_id","message"}` → 投进那个 agent 的收件箱。首字符为 `/` 时按斜杠命令处理，不投收件箱（见下「命令」节）。**`agent_id` 必填、无默认**——猜"就那一个吧"在第二个 agent 出现的当天就会变成"刚才那条消息发给谁了" | ✅ |
 | `POST /command` | 执行斜杠命令，体 `{"client_id","agent_id","command":"/new"}`（命令名带不带 `/` 都认）。与 `POST /message` 的 `/` 前缀分支**共用 core 侧同一份实现**——两个门，一套行为。**agent 正在跑时立刻回 `{"ok":false,"error":"agent 正在运行…"}`**，不排队等（见下「忙碌与中断」） | ✅ |
@@ -72,17 +72,17 @@ data: <json>
 |---|---|---|---|
 | `message_update` | delta 文本 | LLM 流式增量 | ✅ |
 | `message_start` | `{role, text}` | 一条 user 消息进了收件箱。**正文随帧走**：收件箱三种来源都是 user 消息（人发的、别的 agent 用 `send_message` 投的、别的 agent 跑完沿入边广播的完成通知），后两种客户端根本没打过，靠"我刚才输入了什么"渲染不出来（ADR-0019 §5）。客户端因此不本地回显，实时与回放走同一段代码。assistant 消息不发这个帧 | ✅ |
-| `message_end` | 消息结构 | 消息生命周期 | ❌ 未实现——收工靠 `turn_end` |
+| `message_end` | 消息结构 | 消息生命周期 | ❌ 未实现——收工靠 `agent_end` |
 | `thinking_start/update/stop` | signature / delta / 空 | 模型思考过程（DeepSeek v4 reasoning），流式增量与 message_update 同语义 | ✅ |
 | `tool_output` | `{call_id, stream, text}` | 工具边跑边推的输出（stdout 与 stderr 合流，见下） | ✅ |
 | `tool_execution_start/end` | `{name, id}` / `{name, id, status, interrupted}` | 工具生命周期。`interrupted` 为真表示这次是被 `POST /interrupt` 打断的，不是工具自己失败——两者模型的反应完全不同，故分开报 | ✅ |
-| `turn_start/end` | 轮次信息 | Turn 生命周期 | ✅ |
+| `turn_start/end` | 轮次信息 | Turn 生命周期。**`turn_end` 不是收工信号**：模型不调 `stop` 工具就还有下一个 turn（ADR-0019 §5）。客户端的读秒跨 turn 连续，只认 `agent_end` |
 | `status_update` | 运行态数据 | 状态行数字（开放键集，见下） | ✅ |
 | `statusline` | 状态栏数据 | 会话身份变了就推一帧（见下），与 `GET /statusline` 同一份载荷 | ✅ |
 | `permission_request` | `{id, agent_id, tool, params}` | 审批请求（可靠，卡点）。**不按"当前看着谁"过滤**：审批不属于任何 agent 的视图，它是全局的，客户端不管正在看哪个 agent 都要弹，靠 `agent_id` 说明是谁在问。过滤会让一个没人看的 agent 静默地拿不到任何权限，而用户根本不知道有人问过（ADR-0019 §8）。**没有客户端订阅推送流时当场拒绝**，不等那 30 秒——agent 没有客户端也照跑，两条合起来就是后台 agent 的每个危险工具都卡 30 秒然后必然被拒，那不是安全策略，是一个装成策略的超时 | ✅ |
 | `interrupted` | 空对象 | `POST /interrupt` 生效——agent 在某个检查点停了。此后本次 run 不再有帧 | ✅ |
-| `agent_start` | 空对象 | 一次「跑」开始：收件箱里的一条消息进来了。与 turn 不是一回事——一次跑里有 N 个 turn | ✅ |
-| `agent_end` | `{cost}` | 一次「跑」收工：LLM 不再调工具，agent 回去 pop 下一条（空了就是 idle）。`cost` 是本次跑的累计花费 | ✅ |
+| `agent_start` | 空对象 | 一次「跑」开始：agent 从 idle 醒了。与 turn 不是一回事——一次跑里有 N 个 turn | ✅ |
+| `agent_end` | `{cost}` | 一次「跑」收工，**唯一的收工信号**：模型调了 `stop` 工具，或出错/被中断——四条路最后都发这一帧。agent 回去等收件箱（空了就是 idle）。`cost` 是本次跑的累计花费 | ✅ |
 
 ### statusline 帧
 

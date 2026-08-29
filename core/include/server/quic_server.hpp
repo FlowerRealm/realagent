@@ -54,9 +54,9 @@ struct QuicCallbacks {
     std::function<std::string(const std::string &body)> on_agent;
     /* agent 清单（GET /agents，体 {"client_id"}）→ JSON 数组。只列调用方那一组（ADR-0021） */
     std::function<std::string(const std::string &body)> on_agents;
-    /* 一个 agent 的历史（GET /history，体 {"client_id","agent_id"}）→ 事件帧数组。
+    /* 会话内容回放（GET /session 或 GET /history，体 {"client_id","agent_id"}）→ 事件帧数组。
      * 客户端据此把一段自己没在看的时间画出来，用的是渲染实时流那份代码（ADR-0020）。 */
-    std::function<std::string(const std::string &body)> on_history;
+    std::function<std::string(const std::string &body)> on_session_get;
     /* 每轮事件循环调用（main 把事件队列 flush 到推送流，ADR-0002 线程模型） */
     std::function<void()> on_tick;
     /* 新推送流注册（M6 接入：agent 事件推送给客户端） */

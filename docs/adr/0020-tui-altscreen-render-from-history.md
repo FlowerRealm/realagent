@@ -87,6 +87,6 @@ ADR-0008 的核心不变量（*追加式文本的贪心折行是前缀稳定的*
 
 ## 迁移
 
-`tui/cmd/realagent-tui` 的渲染路径整体重写：`tea.Println` + `outbox` 拆掉，换成 `viewport` + 每帧全量 `View()`。core 侧新增一个端点（`GET /history`）与一段「JSONL → 事件帧」的转换（`core/src/agent/history.cpp`）。
+`tui/cmd/realagent-tui` 的渲染路径整体重写：`tea.Println` + `outbox` 拆掉，换成 `viewport` + 每帧全量 `View()`。core 侧新增端点（`GET /session`，兼容 `GET /history`）与一段「JSONL → 事件帧」的转换（`Session::to_frames`，`core/src/agent/session.cpp`）。
 
 ADR-0008 的单元测试 `TestFreezeIncrementalEqualsWhole` 随「定型」一起删除——它压的那条不变量不再有消费方。

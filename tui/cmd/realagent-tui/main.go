@@ -130,7 +130,7 @@ type historyMsg struct {
 // 已经又切走了，那份历史就该丢掉，而不是画到别人的屏幕上
 func fetchHistoryCmd(c *client.Client, agentID int) tea.Cmd {
 	return func() tea.Msg {
-		f, err := c.FetchHistory(agentID)
+		f, err := c.FetchSession(agentID)
 		return historyMsg{agentID: agentID, frames: f, err: err}
 	}
 }
@@ -740,12 +740,11 @@ func (m *model) handleEvent(ev client.Event) tea.Cmd {
 		m.approval = nil
 
 	case "turn_end":
+		// 一个 turn 结束**从来不是**收工：模型不调 `stop` 工具，下一轮接着跑
+		// （ADR-0019 §5）。读秒因此跨 turn 连续，只认 agent_end。
 		m.closeLine()
-		// 带 tool_uses 的 turn_end 只是本轮结束（下一轮继续跑，读秒不断）；
-		// stop_reason / error 才是真正收工。
 		var d struct {
-			ToolUses int    `json:"tool_uses"`
-			Error    string `json:"error"`
+			Error string `json:"error"`
 		}
 		jsonUnmarshal(ev.Payload, &d)
 		// core 报的失败必须落到对话流里：只写 stderr 等于没人知道
@@ -753,10 +752,12 @@ func (m *model) handleEvent(ev client.Event) tea.Cmd {
 		if d.Error != "" {
 			m.emit("error", "✗ "+d.Error)
 		}
-		if d.ToolUses == 0 {
-			m.awaiting = false
-			m.busy.stop()
-		}
+
+	case "agent_end":
+		// 唯一的收工信号。模型打了 `stop`、出错、被中断——四条路最后都到这一帧
+		m.closeLine()
+		m.awaiting = false
+		m.busy.stop()
 
 	case "message_end":
 		m.closeLine()

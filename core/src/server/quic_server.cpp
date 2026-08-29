@@ -386,9 +386,9 @@ void QuicServer::run()
                         {
                             send_json(c, sid, impl_->cbs.on_agents ? impl_->cbs.on_agents(req.body) : "[]");
                         }
-                        else if (req.method == "GET" && req.path == "/history")
+                        else if (req.method == "GET" && (req.path == "/session" || req.path == "/history"))
                         {
-                            send_json(c, sid, impl_->cbs.on_history ? impl_->cbs.on_history(req.body) : "[]");
+                            send_json(c, sid, impl_->cbs.on_session_get ? impl_->cbs.on_session_get(req.body) : "[]");
                         }
                         else if (req.method == "POST" && req.path == "/message")
                         {

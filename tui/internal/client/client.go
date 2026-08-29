@@ -91,25 +91,30 @@ func (c *Client) AgentID() int { return c.agentID }
 // Attach 改连到本组的另一个 agent。
 func (c *Client) Attach(agentID int) { c.agentID = agentID }
 
-// Frame 是一条回放帧（GET /history）。**与推送流的帧同形**，所以客户端拿同一个
+// Frame 是一条回放帧（GET /session 或 GET /history）。**与推送流的帧同形**，所以客户端拿同一个
 // 渲染器吃它——一份代码，实时看和翻历史看长得一样（ADR-0020）。
 type Frame struct {
 	Type string          `json:"type"`
 	Data json.RawMessage `json:"data"`
 }
 
-// FetchHistory 取一个 agent 的历史，回放成事件帧（GET /history）。
+// FetchSession 取一个 agent 当前会话的内容，回放成事件帧（GET /session）。
 //
 // 读的是盘上那份，接缝在「最后一条已落盘的消息」：视图 = 这段回放 + 推送流
-// 喂进来的活尾巴（ADR-0020）。每个 agent 都有历史可读，subagent 也不例外——
+// 喂进来的活尾巴（ADR-0020）。每个 agent 都有会话可读，subagent 也不例外——
 // 它的会话落在 sessions/sub/，只是不进会话清单。
-func (c *Client) FetchHistory(agentID int) ([]Frame, error) {
+func (c *Client) FetchSession(agentID int) ([]Frame, error) {
 	var f []Frame
 	body := map[string]any{"agent_id": agentID}
-	if err := c.getJSON("/history", &f, body); err != nil {
+	if err := c.getJSON("/session", &f, body); err != nil {
 		return nil, err
 	}
 	return f, nil
+}
+
+// FetchHistory 是 FetchSession 的兼容别名。
+func (c *Client) FetchHistory(agentID int) ([]Frame, error) {
+	return c.FetchSession(agentID)
 }
 
 // SendTo 往指定 agent 发。
