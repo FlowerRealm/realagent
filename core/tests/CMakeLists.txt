@@ -1,6 +1,7 @@
 # 配置与模型档位测试（不起服务、不碰网络）
 add_executable(test_config test_config.cpp ../src/config.cpp)
 target_include_directories(test_config PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
+target_link_libraries(test_config PRIVATE Folly::folly)
 add_test(NAME config COMMAND test_config)
 
 # llm 模块测试（三套协议各自的造请求与解析 / 计价 / 端点配置校验）
@@ -14,11 +15,13 @@ add_executable(test_llm test_llm.cpp
   ../src/llm/downstream/openai_responses.cpp
   ../src/config.cpp)
 target_include_directories(test_llm PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
+target_link_libraries(test_llm PRIVATE Folly::folly)
 add_test(NAME llm COMMAND test_llm)
 
 # 会话持久化测试（JSONL 读写；cwd 指到临时目录，会话目录相对 cwd）
 add_executable(test_session test_session.cpp ../src/agent/session.cpp ../src/config.cpp)
 target_include_directories(test_session PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
+target_link_libraries(test_session PRIVATE Folly::folly)
 add_test(NAME session COMMAND test_session)
 
 # 会话历史 → 事件帧（ADR-0020）。纯函数，不起服务、不碰盘
@@ -37,7 +40,7 @@ add_executable(test_tools test_tools.cpp ../src/tools/tools.cpp ../src/agent/exe
                           ../src/llm/downstream/openai_responses.cpp
                           ../src/agent/approval.cpp ../src/config.cpp)
 target_include_directories(test_tools PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
-target_link_libraries(test_tools PRIVATE ${CURL_LIBRARIES})
+target_link_libraries(test_tools PRIVATE ${CURL_LIBRARIES} Folly::folly)
 add_test(NAME tools COMMAND test_tools)
 
 # agent 的收件箱与线程生命周期（ADR-0019）。端点没配，LLM 调用当场失败——
@@ -50,5 +53,5 @@ add_executable(test_agent test_agent.cpp
   ../src/llm/downstream/openai_chat.cpp ../src/llm/downstream/openai_responses.cpp
   ../src/config.cpp)
 target_include_directories(test_agent PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
-target_link_libraries(test_agent PRIVATE ${CURL_LIBRARIES})
+target_link_libraries(test_agent PRIVATE ${CURL_LIBRARIES} Folly::folly)
 add_test(NAME agent COMMAND test_agent)

@@ -8,9 +8,12 @@
 #include <array>
 #include <cstdio>
 #include <filesystem>
-#include <fstream>
 #include <map>
 #include <mutex>
+
+#include <folly/File.h>
+#include <folly/FileUtil.h>
+#include <folly/gen/File.h>
 
 namespace realagent {
 
@@ -45,23 +48,8 @@ std::string resolve(const std::string &workdir, const std::string &path)
     return p.is_absolute() ? path : (std::filesystem::path(workdir) / p).string();
 }
 
-std::vector<std::string> read_lines(const std::string &path)
-{
-    std::vector<std::string> lines;
-    std::ifstream f(path);
-    for (std::string l; std::getline(f, l);) lines.push_back(l);
-    return lines;
-}
-
-bool write_lines(const std::string &path, const std::vector<std::string> &lines)
-{
-    std::ofstream f(path, std::ios::trunc);
-    for (const std::string &l : lines) f << l << '\n';
-    return f.good();
-}
-
 /* 一行的 hash：FNV-1a，3 个十六进制字符。空白不算——跑一遍格式化不该让它变。 */
-std::string hash_line(const std::string &s)
+std::string hash_line(folly::StringPiece s)
 {
     uint32_t h = 2166136261u;
     for (unsigned char c : s)
@@ -79,9 +67,10 @@ nlohmann::json do_read(const nlohmann::json &params, const std::string &workdir)
     if (!std::filesystem::exists(path)) return fail("cannot open: " + path);
 
     std::string out;
-    const auto lines = read_lines(path);
-    for (size_t i = 0; i < lines.size(); ++i)
-        out += std::to_string(i + 1) + ' ' + hash_line(lines[i]) + ' ' + lines[i] + '\n';
+    size_t i = 0;
+    folly::gen::byLine(folly::File(path)).foreach ([&](folly::StringPiece line) {
+        out += std::to_string(++i) + ' ' + hash_line(line) + ' ' + line.str() + '\n';
+    });
     return result(0, std::move(out));
 }
 
@@ -94,21 +83,41 @@ std::string edit_one(const nlohmann::json &e, const std::string &workdir)
     if (!arg_path || !text) return "edit 缺 file_path 或 new_text";
 
     const std::string path = resolve(workdir, *arg_path);
-    auto lines = read_lines(path);
+
+    // 读所有行；文件不存在时（创建模式）保持 lines 为空
+    std::vector<std::string> lines;
+    try
+    {
+        folly::gen::byLine(folly::File(path)).foreach ([&](folly::StringPiece line) {
+            lines.emplace_back(line.str());
+        });
+    } catch (const std::system_error &)
+    {
+    }
+
     const auto n = e.find("line");
     const size_t id = n != e.end() && n->is_number_unsigned() ? n->get<size_t>() : 0;
     if (id == 0) // 不给行号 = 写整个文件（创建）
-        return write_lines(path, {*text}) ? "" : "写不了: " + path;
+        return folly::writeFile(*text + '\n', path.c_str()) ? "" : "写不了: " + path;
     if (id > lines.size()) return "行号越界: " + path;
     if (hash_line(lines[id - 1]) != arg(e, "hash").value_or(""))
         return "第 " + std::to_string(id) + " 行的 hash 对不上，它变了，重新 read: " + path;
 
-    // 新内容为空即删掉这一行；带换行就是多行，write_lines 拼回去时自然展开
+    // 新内容为空即删掉这一行；否则替换
     if (text->empty())
         lines.erase(lines.begin() + static_cast<long>(id) - 1);
     else
         lines[id - 1] = *text;
-    return write_lines(path, lines) ? "" : "写不了: " + path;
+
+    // 拼回并整体写入（O_TRUNC）
+    std::string content;
+    content.reserve(lines.size() * 80);
+    for (const auto &l : lines)
+    {
+        content += l;
+        content += '\n';
+    }
+    return folly::writeFile(content, path.c_str()) ? "" : "写不了: " + path;
 }
 
 nlohmann::json do_edit(const nlohmann::json &params, const std::string &workdir)

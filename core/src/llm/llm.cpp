@@ -9,7 +9,8 @@
 
 #include <cstdio>
 #include <filesystem>
-#include <fstream>
+
+#include <folly/FileUtil.h>
 
 namespace realagent {
 namespace fs = std::filesystem;
@@ -240,13 +241,11 @@ Pricing Pricing::load(const Config &cfg, std::string *error)
     const std::string path = cfg.models_path();
     if (std::error_code ec; fs::exists(path, ec))
     {
-        std::ifstream f(path);
-        if (!f)
+        if (!folly::readFile(path.c_str(), text))
         {
             if (error) *error = "模型数据表打不开: " + path;
             return {};
         }
-        text.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
     }
 
     const nlohmann::json parsed = nlohmann::json::parse(text, nullptr, false);
