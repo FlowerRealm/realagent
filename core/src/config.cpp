@@ -3,8 +3,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
-
-#include <folly/FileUtil.h>
+#include <fstream>
 
 namespace realagent {
 namespace fs = std::filesystem;
@@ -32,9 +31,9 @@ fs::path global_dir() { return fs::path(getenv_or("HOME", ".")); }
 std::expected<std::optional<nlohmann::json>, std::string> read_settings(const fs::path &path)
 {
     if (!fs::exists(path)) return std::optional<nlohmann::json>{};
-    std::string text;
-    if (!folly::readFile(path.c_str(), text))
-        return std::unexpected(path.string() + " 打不开");
+    std::ifstream f(path);
+    if (!f) return std::unexpected(path.string() + " 打不开");
+    std::string text((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
     // 第三个参数 false = 解析失败不抛，返回一个 discarded 值
     nlohmann::json j = nlohmann::json::parse(text, nullptr, false);
     if (j.is_discarded()) return std::unexpected(path.string() + " 不是合法 JSON");
@@ -48,6 +47,36 @@ void merge_into(nlohmann::json &dst, const nlohmann::json &src)
 {
     if (!src.is_object()) return; // settings.json 是合法 JSON 但不是对象：当没配
     for (const auto &[k, v] : src.items()) dst[k] = v;
+}
+
+// tmp + rename 原子写。断电或进程被杀只会留下临时文件，不会留半截的 settings.json
+bool write_atomic(const fs::path &target, const std::string &text)
+{
+    std::error_code ec;
+    fs::create_directories(target.parent_path(), ec);
+    if (ec)
+    {
+        fprintf(stderr, "[config] persist: 创建目录失败 %s\n", ec.message().c_str());
+        return false;
+    }
+    const fs::path tmp = target.string() + ".tmp";
+    {
+        std::ofstream f(tmp);
+        if (!f)
+        {
+            fprintf(stderr, "[config] persist: 无法写 %s\n", tmp.c_str());
+            return false;
+        }
+        f << text << "\n";
+    }
+    fs::rename(tmp, target, ec);
+    if (ec)
+    {
+        fprintf(stderr, "[config] persist: rename 失败 %s\n", ec.message().c_str());
+        fs::remove(tmp, ec);
+        return false;
+    }
+    return true;
 }
 
 } // namespace
@@ -105,22 +134,7 @@ bool Config::persist(std::string_view key, const nlohmann::json &v)
     }
     nlohmann::json tree = file->value_or(nlohmann::json::object()); // 文件不存在 → 空对象起头
     tree[std::string(key)] = v;                                     // 只动这一个键，用户配的其余键原样留在文件里
-
-    std::error_code ec;
-    fs::create_directories(target.parent_path(), ec);
-    if (ec)
-    {
-        fprintf(stderr, "[config] persist: 创建目录失败 %s\n", ec.message().c_str());
-        return false;
-    }
-    try
-    {
-        folly::writeFileAtomic(target.string(), tree.dump() + "\n");
-    } catch (const std::exception &ex)
-    {
-        fprintf(stderr, "[config] persist: 写入失败 %s\n", ex.what());
-        return false;
-    }
+    if (!write_atomic(target, tree.dump())) return false;
 
     // 落盘成功才改内存：失败时内存与文件都没变，不会出现"切了档但没写进去"
     std::lock_guard<std::mutex> lk(*mutex_);

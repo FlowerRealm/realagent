@@ -4,11 +4,8 @@
 #include <chrono>
 #include <cstdio>
 #include <filesystem>
+#include <fstream>
 #include <random>
-
-#include <folly/File.h>
-#include <folly/FileUtil.h>
-#include <folly/gen/File.h>
 
 #include "config.hpp"
 
@@ -79,9 +76,14 @@ void Session::append(const nlohmann::json &msg)
 {
     std::error_code ec;
     fs::create_directories(fs::path(path_).parent_path(), ec);
-    const std::string line = msg.dump() + '\n';
-    if (!folly::writeFile(line, path_.c_str(), O_WRONLY | O_CREAT | O_APPEND))
+    std::ofstream f(path_, std::ios::app);
+    if (!f)
+    {
         fprintf(stderr, "[session] 写不进 %s，本条未落盘\n", path_.c_str());
+        return;
+    }
+    // 一行一条，不缩进——JSONL 的行边界就是记录边界，dump 里出现换行就全散了
+    f << msg.dump() << '\n';
 }
 
 bool Session::resume(const std::string &id, nlohmann::json &out)
@@ -95,26 +97,25 @@ bool Session::resume(const std::string &id, nlohmann::json &out)
 bool Session::read(const std::string &dir, const std::string &id, nlohmann::json &out)
 {
     const fs::path p = path_of(dir, id);
+    std::ifstream f(p);
+    if (!f) return false;
+
     nlohmann::json msgs = nlohmann::json::array();
-    try
+    std::string line;
+    long long lineno = 0;
+    while (std::getline(f, line))
     {
-        long long lineno = 0;
-        folly::gen::byLine(folly::File(p.c_str())).foreach ([&](folly::StringPiece sv) {
-            ++lineno;
-            if (sv.empty()) return;
-            nlohmann::json parsed = nlohmann::json::parse(sv.begin(), sv.end(), nullptr, false);
-            if (parsed.is_discarded())
-            {
-                // 坏行跳过而不是整个会话作废：append-only 文件的末尾可能是断电时写了一半的，
-                // 为了那一行丢掉前面几百条对话是本末倒置
-                fprintf(stderr, "[session] %s:%lld 不是合法 JSON，跳过\n", p.c_str(), lineno);
-                return;
-            }
-            msgs.push_back(std::move(parsed));
-        });
-    } catch (const std::system_error &)
-    {
-        return false;
+        ++lineno;
+        if (line.empty()) continue;
+        nlohmann::json parsed = nlohmann::json::parse(line, nullptr, false);
+        if (parsed.is_discarded())
+        {
+            // 坏行跳过而不是整个会话作废：append-only 文件的末尾可能是断电时写了一半的，
+            // 为了那一行丢掉前面几百条对话是本末倒置
+            fprintf(stderr, "[session] %s:%lld 不是合法 JSON，跳过\n", p.c_str(), lineno);
+            continue;
+        }
+        msgs.push_back(std::move(parsed));
     }
     out = std::move(msgs);
     return true;
@@ -132,24 +133,20 @@ std::vector<SessionInfo> Session::list(const std::string &dir_arg)
         if (ec) break;
         if (!e.is_regular_file() || e.path().extension() != ".jsonl") continue;
 
+        std::ifstream f(e.path());
+        if (!f) continue;
         SessionInfo info;
         info.id = e.path().stem().string();
         info.messages = 0;
-        try
+        std::string line;
+        while (std::getline(f, line))
         {
-            folly::gen::byLine(folly::File(e.path().c_str())).foreach ([&](folly::StringPiece sv) {
-                if (sv.empty()) return;
-                ++info.messages;
-                if (!info.title.empty()) return;
-                if (const nlohmann::json m = nlohmann::json::parse(sv.begin(), sv.end(), nullptr, false);
-                    !m.is_discarded())
-                    info.title = title_of(m);
-            });
-        } catch (const std::system_error &)
-        {
-            continue;
+            if (line.empty()) continue;
+            ++info.messages;
+            if (!info.title.empty()) continue;
+            if (const nlohmann::json m = nlohmann::json::parse(line, nullptr, false); !m.is_discarded())
+                info.title = title_of(m);
         }
-
         // file_clock → system_clock：这个 libc++ 没有 clock_cast，用两个时钟的"此刻"
         // 之差换算。误差在两次 now() 之间，对"最近改过的排前面"绰绰有余。
         const auto tp = fs::last_write_time(e.path(), ec);
