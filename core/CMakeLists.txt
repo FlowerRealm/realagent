@@ -33,6 +33,7 @@ add_library(realagent_core_lib STATIC
   src/agent/approval.cpp
   src/agent/agent.cpp
   src/agent/agents.cpp
+  src/agent/command.cpp
   src/agent/session.cpp
   src/agent/history.cpp
 )
