@@ -344,7 +344,8 @@ nlohmann::json Agent::build_dialog(ModelTier tier) const
 {
     nlohmann::json dialog;
     dialog["model"] = ctx_.config->model(tier);
-    dialog["system"] = "You are a helpful coding agent. Your agent id is " + std::to_string(id_) + ".";
+    dialog["system"] = "You are a helpful coding agent. Your agent id is " + std::to_string(id_) +
+                       ". Your working directory is " + workdir_ + ".";
     // 工具定义：静态表，LLM 见到的名字与 executor 查表用的名字是同一个
     nlohmann::json tools = nlohmann::json::array();
     for (const auto &t : tool_defs())
