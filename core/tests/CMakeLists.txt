@@ -21,12 +21,18 @@ add_executable(test_session test_session.cpp ../src/agent/session.cpp ../src/con
 target_include_directories(test_session PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
 add_test(NAME session COMMAND test_session)
 
+# skill 扫盘与 frontmatter 解析（ADR-0022：两处来源、近的覆盖远的、坏的跳过）
+add_executable(test_skills test_skills.cpp ../src/agent/skills.cpp ../src/config.cpp)
+target_include_directories(test_skills PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
+add_test(NAME skills COMMAND test_skills)
+
 # 内置工具 + 权限裁决测试（ADR-0016 真正换掉的那半边：静态工具表 + permission 三值）
 add_executable(test_tools test_tools.cpp
                           ../src/tools/tools.cpp ../src/tools/read.cpp ../src/tools/edit.cpp
                           ../src/tools/bash.cpp ../src/tools/spawn.cpp ../src/tools/send_message.cpp ../src/tools/stop.cpp
                           ../src/agent/executor.cpp
                           ../src/agent/agents.cpp ../src/agent/agent.cpp ../src/agent/session.cpp
+                          ../src/agent/skills.cpp
                           ../src/llm/llm.cpp
                           ../src/llm/upstream/anthropic_messages.cpp ../src/llm/upstream/openai_chat.cpp
                           ../src/llm/upstream/openai_responses.cpp
@@ -42,7 +48,7 @@ add_test(NAME tools COMMAND test_tools)
 # 这里验的是消息进出收件箱，不是模型回了什么，所以不碰网络。
 add_executable(test_agent test_agent.cpp
   ../src/agent/agent.cpp ../src/agent/agents.cpp ../src/agent/executor.cpp ../src/agent/approval.cpp
-  ../src/agent/session.cpp ../src/llm/llm.cpp
+  ../src/agent/session.cpp ../src/agent/skills.cpp ../src/llm/llm.cpp
   ../src/tools/tools.cpp ../src/tools/read.cpp ../src/tools/edit.cpp
   ../src/tools/bash.cpp ../src/tools/spawn.cpp ../src/tools/send_message.cpp ../src/tools/stop.cpp
   ../src/llm/upstream/anthropic_messages.cpp ../src/llm/upstream/openai_chat.cpp

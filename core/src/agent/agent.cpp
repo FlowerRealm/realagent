@@ -25,7 +25,7 @@ Agent::Agent(CoreContext &ctx, ApprovalCoordinator &approval, std::string workdi
     : ctx_(ctx), pool_(pool), id_(id), workdir_(std::move(workdir)),
       exe_(ctx, approval, workdir_, pool_, id_),
       session_dir_(session_dir_of(workdir_, sub)),
-      session_(session_dir_)
+      session_(session_dir_), skills_(scan_skills(workdir_))
 {
     messages_ = nlohmann::json::array();
     loop_ = std::thread([this] { loop(); });
@@ -300,7 +300,9 @@ nlohmann::json Agent::build_dialog(ModelTier tier) const
                                                     "You run in an autonomous loop: calling `stop` is the only way to end your run. Whenever you finish answering a question or completing a task, output your response and call `stop` in the same turn. Do not invent tasks the user did not request.\n\n"
                                                     "Example:\n"
                                                     "User: Explain this function.\n"
-                                                    "Assistant: [Explains the function] + tool_call: stop()";
+                                                    "Assistant: [Explains the function] + tool_call: stop()" +
+        // skill 清单（ADR-0022）。一个都没有时这里是空串——system prompt 与加这个功能之前一个字不差
+        skills_prompt(skills_);
     // 工具定义：静态表，LLM 见到的名字与 executor 查表用的名字是同一个
     nlohmann::json tools = nlohmann::json::array();
     for (const auto &t : tool_defs())

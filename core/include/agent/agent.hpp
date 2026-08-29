@@ -21,6 +21,7 @@
 #include "agent/context.hpp"
 #include "agent/executor.hpp"
 #include "agent/session.hpp"
+#include "agent/skills.hpp"
 #include "json.hpp"
 #include "llm/llm.hpp"
 
@@ -159,7 +160,10 @@ class Agent {
     bool loaded_ = true;      // 新 agent 盘上本来就没有，空历史就是对的
     std::string session_dir_; // <workdir>/.realagent/sessions
     Session session_;         // 当前会话的落盘去处（JSONL，append-only）
-    double run_cost_ = 0;     // 本次 run 累计花费（USD），一次用户输入起算清零
+    /* 这个 agent 看得见的 skill（ADR-0022）。**创建时扫一次**，与 workdir 同期确定、
+     * 同期不变：改了 skill 开个新 agent，跟配置「启动读一次」（ADR-0010）同一个作风。 */
+    std::vector<Skill> skills_;
+    double run_cost_ = 0; // 本次 run 累计花费（USD），一次用户输入起算清零
     std::atomic<bool> abort_{false};
 
     // 收件箱与跑它的那条线程。idle 就是阻塞在 cv_ 上——不占 CPU，也不需要"空闲"这个状态

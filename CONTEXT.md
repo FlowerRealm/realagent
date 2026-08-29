@@ -58,6 +58,25 @@ _Avoid_: `function`、`command`（Tool ≠ 用户斜杠命令）、`write`、`SW
 
 _Avoid_: `old_string`（已被取代，不并存）、`anchor`（起草时的叫法，它当时还带邻域和全表唯一性）、`ETag`、`整文件 hash`
 
+### **Skill（技能）**:
+
+一份写给模型看的指令文档：一个目录、一份 `SKILL.md`（[[ADR-0022]]）。**它不是代码**——core 不加载它、不执行它、不给它任何执行语义，只把它的存在告诉模型。
+
+两处来源，同名时**近的覆盖远的**：
+
+- `~/.realagent/skills/<name>/SKILL.md` —— 跟着人走
+- `<workdir>/.realagent/skills/<name>/SKILL.md` —— 跟着仓库走，可进版本库、团队共享
+
+按 [[工作目录（Workdir）]]取，不按 core 的 cwd。项目级 `settings.json` 当初被砍是因为「同一个 core 里 N 个 agent，N 份项目配置合并给谁用」答不上来；skill 的消费者是一个 [[Agent（代理）]]，而 agent 恰好有一个 workdir，同一个问题在这里有唯一答案——和 `<workdir>/.realagent/sessions` 落在哪儿是同一条判据。
+
+system prompt 里每个 skill 只占一行：名字、描述、绝对路径。正文读不读由模型决定，用现成的 `read` 读，**没有 `skill` 工具，也没有 `read_skill`**——[[ADR-0018]] 拒绝过后者，理由（工具每多一个，模型每次调用就多一次选错的机会）在这里一字未改。代价是模型读正文时会看见行号与[[行 hash（Line Hash）]]前缀，那是读那一次的噪声，不是每次调用都付的成本。
+
+`SKILL.md` 的形状不由本项目定义。[Agent Skills 规范](https://agentskills.io/specification)写的是「YAML frontmatter + Markdown 正文」，必需字段两个（`name`、`description`），且 `name` 必须与父目录名一致——所以 core 的名字**直接取目录名**，文件系统已经保证它唯一，读出来再比对只是给自己造一类要处理的错误。解析器存在的唯一理由是拿到 `description`。
+
+解析用 vendored 的 fkYAML 单头文件（`core/include/fkYAML.hpp`），与 `json.hpp` 同一条路子：不必安装、不必链库、`find_package` 仍旧是三个。**不手写 frontmatter 解析器**——skill 是从互联网抄来的第三方输入，形状不由 core 说了算；手写的那种不会报错，它会在没见过的写法上安静地给出错值（`description: >` 这种折叠标量在现实里占三成）。「不兜底」反对的是替用户擦屁股，不是反对按格式的真实定义去解析它。
+
+_Avoid_: `插件`、`plugin`、`扩展`、`extension`（[[ADR-0016]] 铲掉的是可加载的可执行体，skill 一行代码都不加载，两者不是一回事）、`read_skill`
+
 ### **Event（事件）**:
 
 Loop 向客户端发布的生命周期消息。典型序列：
@@ -343,6 +362,7 @@ _Avoid_: `定型`、`提交`、`freeze`、`finalize`（都不再指任何东西�
 - **hook** 的订阅者名单由**边**推导，不单独存；「注册 hook」= 建一条边
 - 一个 **Session** 可以先后被两个 **Agent** 打开（close 之后再 `POST /agent {session_id}`）；反过来一个 Agent 恰好一个 Session
 - 一个**客户端**拥有一个**组**，一个**组**拥有若干 **Agent**；**边**只在组内；跨组不可见、不可达
+- 一个 **Agent** 看得见的 **Skill** 由它的**工作目录**决定：全局一份、workdir 一份，同名近的赢；skill 正文用 **read** 读，没有专用工具
 - **read** 印出行号与**行 hash**，**edit** 用这两个值指位置；改一行不影响别行的 hash
 
 ## Example dialogue
@@ -402,6 +422,7 @@ _Avoid_: `定型`、`提交`、`freeze`、`finalize`（都不再指任何东西�
 - 内置工具（第一版）：**read / edit / bash**，core 里一张静态表（`core/src/tools/tools.cpp`）。write 不单独存在——write 是 edit 的特例（空范围 = 创建），LLM 创建文件用 edit。
   - 实况注（2026-08-28）：`edit` 改为**行号 + [[行 hash（Line Hash）]]**，`old_string` 废除（[[ADR-0018]]）。一个操作（把第 `line` 行换成 `new_text`）四种用法；`edits` 是数组，可跨多文件，逐条执行、遇错即停、报错说清停在第几条。`+x-0` 那个写法随 `old_string` 一起没了，但 write 不单独存在这条结论没变。
   - `read` **不限大小、不截断、不分页**：本地读一遍内存，限制的是不存在的问题。`bash` 的 50KB 截断保留——那条是管道，性质不同。
+- [[Skill（技能）]]（[[ADR-0022]]）：一个目录 + 一份 `SKILL.md`，纯提示词，core 不加载、不执行、不给它任何执行语义。两处来源（`~/.realagent/skills/` 与 `<workdir>/.realagent/skills/`），同名近的覆盖远的；**agent 创建时扫一次**，清单挂在 `Agent` 上——与 [[工作目录（Workdir）]]同期确定、同期不变。system prompt 里每个 skill 一行（名字 + 描述 + 绝对路径），正文由模型用 `read` 自己读，**不加第七个工具**（[[ADR-0018]] 拒过 `read_skill`）。frontmatter 用 vendored fkYAML 解析，`name` 取目录名。规范里的 `scripts/` 不需要 core 做任何事：跑脚本的是模型手上的 `bash`。
 - Provider（第一版）：只做 `/v1/messages` 协议，目标模型 DeepSeek。换供应商 = 改 `base_url`，不装东西。
 - 权限（第一版）：配置键 `permission`——`ask`（默认）/ `allow-all` / `deny`，一个 switch（[[ADR-0016]]）。`allow-all` 只为打通链路，非真实安全。
 - 审批链路：core 永远是发起方。裁决为 ask 时 core 向用户交互界面（TUI/gui）发询问，界面回传裁决。gui 与 TUI 是平等的 HTTP 客户端，接口按多客户端设计。
@@ -436,15 +457,15 @@ _Avoid_: `定型`、`提交`、`freeze`、`finalize`（都不再指任何东西�
 ```
 realagent/                  # 主仓库（core + tui + docs）
 ├── core/                   # C++ QUIC/HTTP3 服务（ADR-0006）
-│   ├── include/            #   公共头：config.hpp / json.hpp + agent/ llm/ tools/ server/
+│   ├── include/            #   公共头：config.hpp + vendored json.hpp / fkYAML.hpp + agent/ llm/ tools/ server/
 │   ├── src/
 │   │   ├── llm/            #   一次 LLM 调用：造请求 + SSE 解析 + 计价（llm.cpp）
 │   │   ├── tools/          #   内置工具静态表：read / edit / bash（tools.cpp）
-│   │   ├── agent/          #   agent loop、事件流、状态、工具执行、审批
+│   │   ├── agent/          #   agent loop、事件流、状态、工具执行、审批、skill 扫盘
 │   │   ├── server/         #   QUIC/HTTP3 服务（quiche）、推送流、审批端点
 │   │   ├── config.cpp      #   配置：默认树 + settings.json 覆盖 + 点对点写回
 │   │   └── main.cpp        #   启动、事件循环、端点回调、斜杠命令
-│   ├── tests/              #   test_config / test_llm / test_session
+│   ├── tests/              #   test_config / test_llm / test_session / test_skills / test_tools / test_agent
 │   └── CMakeLists.txt
 ├── tui/                    # Go + Bubble Tea 客户端（ADR-0007）
 │   ├── cmd/realagent-tui/

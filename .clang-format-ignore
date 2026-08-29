@@ -1,2 +1,3 @@
 # vendored 单头，不归我们管
 core/include/json.hpp
+core/include/fkYAML.hpp

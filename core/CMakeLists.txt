@@ -41,6 +41,7 @@ add_library(realagent_core_lib STATIC
   src/agent/agents.cpp
   src/agent/command.cpp
   src/agent/session.cpp
+  src/agent/skills.cpp
 )
 target_include_directories(realagent_core_lib PUBLIC include)
 target_link_libraries(realagent_core_lib PRIVATE ${CURL_LIBRARIES})

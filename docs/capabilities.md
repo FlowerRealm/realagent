@@ -144,6 +144,29 @@ ASK 走审批协调器（`approval.hpp`）：agent 线程真等裁决（30s 超�
 > `/quit` 与 `/statusline` 不归 core：退出的是客户端进程，core 是常驻服务、还连着别的客户端。
 > 它们是 TUI 本地命令，照常出现在斜杠菜单里，但从不发给 core。
 
+## 5. Skill（`core/src/agent/skills.cpp`）
+
+一个目录 + 一份 `SKILL.md`，**纯提示词**（ADR-0022）。core 不加载、不执行、不给它任何执行语义——
+只把名字、描述、绝对路径写进 system prompt，正文要不要读由模型决定，用现成的 `read` 读。
+**没有第七个工具**。
+
+```
+~/.realagent/skills/<name>/SKILL.md            全局，跟着人走
+<workdir>/.realagent/skills/<name>/SKILL.md    项目，跟着仓库走（同名时它赢）
+        │
+        └─ agent 创建时扫一次 ─▶ Skill{name, description, path} ─▶ system prompt 每个一行
+```
+
+形状照抄公开的 [Agent Skills 规范](https://agentskills.io/specification)：YAML frontmatter +
+Markdown 正文，`name` 必须与父目录名一致——所以名字直接取目录名，解析器唯一的活是拿 `description`。
+frontmatter 用 vendored 的 fkYAML（`core/include/fkYAML.hpp`，单头文件，与 `json.hpp` 同一条路子，
+`find_package` 仍旧是三个）。
+
+坏 skill（没有 frontmatter、解析失败、没有 description）不进清单，错误原文进 stderr，
+**agent 照常创建**——挑的是 `models.json` 那条先例，不是 `settings.json` 那条。
+
+规范里的 `scripts/` core 不管：跑脚本的是模型手上的 `bash`，照 `dangerous` 那条走权限检查。
+
 ## 验证闭环
 
 ```
@@ -156,4 +179,5 @@ core → build_request（对话 → /v1/messages 请求，端点凭证取自配�
 ```
 
 单元测试：`core/tests/test_llm.cpp`（造请求 / SSE 解析 / 计价，不碰网络）、
+`core/tests/test_skills.cpp`（扫盘 / frontmatter / 同名覆盖 / 坏 skill 跳过）、
 `realagent-core test-tools`（工具执行 + 权限全链路）。
