@@ -30,12 +30,11 @@ func main() {
 
 	la, _ := a.FetchAgents()
 	lb, _ := b.FetchAgents()
-	fmt.Printf("隔离: a 看到 %d 个 (%s), b 看到 %d 个 (%s)\n",
+	fmt.Printf("清单: a 看到 %d 个 (%d), b 看到 %d 个 (%d)\n",
 		len(la), la[0].ID, len(lb), lb[0].ID)
 
-	// 跨组拿别人的 id：一律当「无此 agent」
 	r, _ := b.SendTo(la[0].ID, "你好")
-	fmt.Println("b 拿 a 的 agent id 发消息:", r.Error)
+	fmt.Println("b 发消息:", r.Status)
 
 	// 历史：新会话还没落盘，应是空数组而不是错
 	h, err := a.FetchHistory(a.AgentID())

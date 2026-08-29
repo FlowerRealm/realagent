@@ -52,10 +52,10 @@ class Agent {
      * 客户端建的落 `<workdir>/.realagent/sessions/`，派生的落 `.../sessions/sub/`。
      * **两边都落盘**——不落盘的那份内存里丢不掉（idle 也释放不了），而且出了事查不了。
      * 清单只扫顶层，于是「不在会话列表里显示」不是一个开关，是落点的后果。 */
-    Agent(CoreContext &ctx, ApprovalCoordinator &approval, std::string workdir, std::string id,
+    Agent(CoreContext &ctx, ApprovalCoordinator &approval, std::string workdir, int id,
           Agents *pool = nullptr, bool sub = false);
 
-    const std::string &id() const { return id_; }
+    int id() const { return id_; }
 
     const std::string &workdir() const { return workdir_; }
 
@@ -127,7 +127,7 @@ class Agent {
 
     CoreContext &ctx_;
     Agents *pool_ = nullptr; // 跑完时沿入边通知邻居；独立构造（测试）时为空
-    std::string id_;
+    int id_ = 0;
     std::string workdir_;
     /* Executor 的 inflight_ / interrupted_ 是**这一个 agent** 的状态，
      * 共享一个就会串味：中断 A 会把 B 的下一次工具调用一起拒掉。 */

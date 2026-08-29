@@ -75,10 +75,9 @@ static nlohmann::json models_payload(const CoreContext &ctx)
  *
  * 打开着的会话可能一条消息都还没有（文件尚未落地），此时它不在扫描结果里——
  * 补一条空的进去，客户端才看得到自己在哪儿。 */
-static nlohmann::json sessions_payload(const Agents &pool, const std::string &client,
-                                       const Agent &agent)
+static nlohmann::json sessions_payload(const Agents &pool, const Agent &agent)
 {
-    const std::map<std::string, std::string> opened = pool.openers(client);
+    const std::map<std::string, int> opened = pool.openers();
     nlohmann::json arr = nlohmann::json::array();
     bool seen_self = false;
     for (const auto &s : Session::list(agent.session_dir()))
@@ -197,14 +196,6 @@ int main(int argc, char **argv)
         return arr.dump();
     };
 
-    /* 体是客户端给的，形状不由 core 说了算：不是对象、没这个键、值不是字符串——
-     * 都按"没说话"处理，绝不为此崩在事件循环线程里。
-     * （const operator[] 撞上缺键是未定义行为，所以按迭代器查；find 在非对象上恒返回 end） */
-    const auto field = [](const std::string &body, const char *key) {
-        const nlohmann::json j = nlohmann::json::parse(body, nullptr, false);
-        const auto it = j.find(key);
-        return it != j.end() && it->is_string() ? it->get<std::string>() : std::string();
-    };
     const auto err_json = [](const std::string &msg) {
         return nlohmann::json{{"ok", false}, {"error", msg}}.dump();
     };
@@ -225,14 +216,13 @@ int main(int argc, char **argv)
     // 斜杠命令的唯一实现。两个门进来（`POST /message` 的 `/` 前缀、`POST /command`），
     // 一份代码——两份实现迟早只改一边，那时同一条命令在两个端点上行为不同，
     // 谁都查不出为什么。命令不投收件箱，直接返回结果。
-    auto handle_command = [&](const std::string &client, Agent &agent,
-                              const std::string &user_input) -> std::string {
+    auto handle_command = [&](Agent &agent, const std::string &user_input) -> std::string {
         auto lk = agent.try_lock();
         if (!lk.owns_lock()) return err_json(agent_busy);
         if (user_input == "/new")
         {
             agent.reset(); // 新建会话：清空历史 + 换一个 JSONL 文件（旧的留在盘上）
-            return nlohmann::json{{"ok", true}, {"command", "new"}, {"data", sessions_payload(pool, client, agent)}}
+            return nlohmann::json{{"ok", true}, {"command", "new"}, {"data", sessions_payload(pool, agent)}}
                 .dump();
         }
         // 首空白分词为命令名：/resume[ <id>]、/model[ <name>]
@@ -247,7 +237,7 @@ int main(int argc, char **argv)
             // 无参 = 列会话（清单里 current 标出自己在哪儿）；带 id = 恢复那一个。
             // 恢复失败保持原会话不动：宁可这条命令没生效，也不能把人扔进一段空白历史
             if (!arg.empty() && !agent.resume(arg)) return err_json("unknown session: " + arg);
-            return nlohmann::json{{"ok", true}, {"command", "resume"}, {"data", sessions_payload(pool, client, agent)}}
+            return nlohmann::json{{"ok", true}, {"command", "resume"}, {"data", sessions_payload(pool, agent)}}
                 .dump();
         }
         if (cmd == "/model")
@@ -272,44 +262,25 @@ int main(int argc, char **argv)
         return err_json("unknown command: " + cmd);
     };
 
-    /* 每个要动某个 agent 的端点都从这里取它。**agent_id 与 client_id 都必填、无默认**：
-     * agent_id 猜"就那一个吧"，在第二个 agent 出现的当天就会变成"刚才那条消息发给谁了"
-     * （ADR-0019）；client_id 决定这个 agent 在不在你那一组，跨组一律当不存在（ADR-0021）。 */
-    const auto pick = [&](const std::string &body) {
-        return pool.find(field(body, "client_id"), field(body, "agent_id"));
-    };
-
-    // POST /agent：建一个 agent。workdir 必传，core 不猜——它是全机单实例，
-    // 自己的 cwd 是"启动它那个 shell 当时在哪"，跟任何 agent 都无关（ADR-0019）。
-    // 客户端可以替用户填（它知道用户站在哪），那是客户端的默认值，不是 core 的。
-    // 人不是图上的节点，所以这道门建出来的 agent 没有边。
+    // POST /agent：建一个 agent。workdir 必传，core 不猜
     cbs.on_agent = [&](const std::string &body) {
+        const nlohmann::json j = nlohmann::json::parse(body, nullptr, false);
         std::string err;
-        const std::string id =
-            pool.create(field(body, "client_id"), field(body, "workdir"), "", {}, {}, err);
-        if (id.empty()) return err_json(err);
+        const int id = pool.create(j.value("workdir", ""), 0, {}, {}, err);
+        if (id <= 0) return err_json(err);
         return nlohmann::json{{"ok", true}, {"agent_id", id}}.dump();
     };
-    // GET /agents：人看得见全部——TUI 不是图上的节点，不受边的约束
-    cbs.on_agents = [&pool](const std::string &body) {
-        const nlohmann::json j = nlohmann::json::parse(body, nullptr, false);
-        const auto it = j.find("client_id");
-        return pool.list(it != j.end() && it->is_string() ? it->get<std::string>() : "").dump();
+    // GET /agents：列出所有 agent
+    cbs.on_agents = [&pool](const std::string &) {
+        return pool.list().dump();
     };
 
-    /* GET /history：一个 agent 的历史，回放成事件帧（ADR-0020）。
-     *
-     * 读的是**盘上那份**，不是内存里的 messages_：Session::append 每条消息完成时即时
-     * 追加，所以文件永远是「最后一条已落盘的消息」为止那一段——正好就是接缝的位置。
-     * 客户端的视图 = 这段回放 + 推送流喂进来的活尾巴。
-     *
-     * 顺带把内存那份从这条路上摘干净：idle 的 agent 早晚要丢掉 messages_（ADR-0019 §7），
-     * 到那时这个端点一个字都不用改。
-     *
-     * 新会话还没写过盘 → 空数组，不是错。 */
+    /* GET /history：一个 agent 的历史，回放成事件帧（ADR-0020）。 */
     cbs.on_history = [&](const std::string &body) {
-        Agent *a = pick(body);
-        if (!a) return err_json("无此 agent（GET /history 要带 agent_id）");
+        const nlohmann::json j = nlohmann::json::parse(body, nullptr, false);
+        const int id = j.value("agent_id", 0);
+        Agent *a = pool.find(id);
+        if (!a) return err_json("无此 agent: " + std::to_string(id));
         nlohmann::json msgs;
         if (!Session::read(a->session_dir(), a->session_id(), msgs))
             msgs = nlohmann::json::array();
@@ -317,77 +288,66 @@ int main(int argc, char **argv)
     };
 
     cbs.on_message = [&](const std::string &body) {
-        const std::string user_input = field(body, "message");
+        const nlohmann::json j = nlohmann::json::parse(body, nullptr, false);
+        const std::string user_input = j.value("message", "");
         if (user_input.empty()) return err_json("empty message");
-        Agent *a = pick(body);
-        if (!a) return err_json("无此 agent（POST /message 要带 agent_id）");
-        if (user_input[0] == '/') return handle_command(field(body, "client_id"), *a, user_input);
-        // 端点没配齐就别投：投了也是当场失败，而这段话比那句失败清楚得多
+        const int id = j.value("agent_id", 0);
+        Agent *a = pool.find(id);
+        if (!a) return err_json("无此 agent: " + std::to_string(id));
+        if (user_input[0] == '/') return handle_command(*a, user_input);
         if (!cfg_error.empty()) return err_json(cfg_error);
-        // 投进收件箱就返回。agent 自己有一条线程在等（ADR-0019）
         a->post(user_input);
         return std::string("{\"status\":\"processing\"}");
     };
-    // POST /command：体 {"agent_id","command"}。与上面 `/` 前缀那条走同一份实现——
-    // 存在两个端点是历史形态（PROTOCOL.md），不是两套行为。命令名可以不带 '/'。
     cbs.on_command = [&](const std::string &body) {
-        std::string cmd = field(body, "command");
+        const nlohmann::json j = nlohmann::json::parse(body, nullptr, false);
+        std::string cmd = j.value("command", "");
         if (cmd.empty()) return err_json("empty command");
         if (cmd[0] != '/') cmd.insert(cmd.begin(), '/');
-        Agent *a = pick(body);
-        if (!a) return err_json("无此 agent（POST /command 要带 agent_id）");
-        return handle_command(field(body, "client_id"), *a, cmd);
+        const int id = j.value("agent_id", 0);
+        Agent *a = pool.find(id);
+        if (!a) return err_json("无此 agent: " + std::to_string(id));
+        return handle_command(*a, cmd);
     };
     // GET /sessions 与 POST /session 都要指名道姓：会话目录跟着 agent 的 workdir 走
     cbs.on_sessions = [&](const std::string &body) {
-        Agent *a = pick(body);
-        if (!a) return err_json("无此 agent（GET /sessions 要带 agent_id）");
+        const nlohmann::json j = nlohmann::json::parse(body, nullptr, false);
+        const int id = j.value("agent_id", 0);
+        Agent *a = pool.find(id);
+        if (!a) return err_json("无此 agent: " + std::to_string(id));
         auto lk = a->try_lock();
         if (!lk.owns_lock()) return err_json(agent_busy);
-        return sessions_payload(pool, field(body, "client_id"), *a).dump();
+        return sessions_payload(pool, *a).dump();
     };
     cbs.on_session = [&](const std::string &body) {
-        Agent *a = pick(body);
-        if (!a) return err_json("无此 agent（POST /session 要带 agent_id）");
+        const nlohmann::json j = nlohmann::json::parse(body, nullptr, false);
+        const int id = j.value("agent_id", 0);
+        Agent *a = pool.find(id);
+        if (!a) return err_json("无此 agent: " + std::to_string(id));
         auto lk = a->try_lock();
         if (!lk.owns_lock()) return err_json(agent_busy);
-        const std::string id = field(body, "id");
-        if (id.empty())
+        const std::string sid = j.value("id", "");
+        if (sid.empty())
             a->reset();
-        else if (!a->resume(id))
-            return err_json("unknown session: " + id);
+        else if (!a->resume(sid))
+            return err_json("unknown session: " + sid);
         return nlohmann::json{{"ok", true},
-                              {"data", sessions_payload(pool, field(body, "client_id"), *a)}}
+                              {"data", sessions_payload(pool, *a)}}
             .dump();
     };
     cbs.on_interrupt = [&](const std::string &body) {
-        Agent *a = pick(body);
+        const nlohmann::json j = nlohmann::json::parse(body, nullptr, false);
+        Agent *a = pool.find(j.value("agent_id", 0));
         if (!a) return;
         a->interrupt();
-        // 按 agent 取消，不是一刀切：中断 A 掐掉 B 正等着的审批，
-        // 是把「停下这一个」办成了「全场停摆」（ADR-0019 §8）
         approval.cancel(a->id());
     };
 
-    // 客户端正常退出：显式关组。断线那条路是兜底，不是主路
-    cbs.on_group_close = [&pool](const std::string &body) {
-        const nlohmann::json j = nlohmann::json::parse(body, nullptr, false);
-        const auto it = j.find("client_id");
-        if (it != j.end() && it->is_string()) pool.close_group(it->get<std::string>());
+    // 客户端正常退出
+    cbs.on_group_close = [](const std::string &) {
         return std::string("{\"ok\":true}");
     };
 
-    /* 组的生命周期（ADR-0021）：客户端主动建，退出前显式关，**断线满 60 秒即关**。
-     *
-     * 测活不自己造：QUIC 有原生的 max_idle_timeout，连接死了 quic_server 立刻知道，
-     * 这里只记一张表。断线不等于关组——网抖一下就杀掉一组正在干活的 agent，
-     * 那是把丢包变成了 kill。 */
-    std::map<std::string, std::chrono::steady_clock::time_point> gone_since;
-    cbs.on_client_here = [&gone_since](const std::string &c) { gone_since.erase(c); };
-    cbs.on_client_gone = [&gone_since](const std::string &c) {
-        gone_since[c] = std::chrono::steady_clock::now();
-        fprintf(stderr, "[group] 客户端 %s 断开，60 秒内不回来就关掉它那一组\n", c.c_str());
-    };
     cbs.on_approval_response = [&approval](const std::string &id, bool allow) {
         approval.respond(id, allow);
     };
@@ -400,21 +360,6 @@ int main(int argc, char **argv)
         {
             last_statusline = std::move(cur);
             server.push_event("statusline", last_statusline);
-        }
-
-        // 断线满 60 秒的组关掉。60 是个选定的数不是推导出来的：要容得下网线抖一下，
-        // 又短到不至于让忘关的窗口一直占着内存。不合适就改这一个常量
-        const auto now = std::chrono::steady_clock::now();
-        for (auto it = gone_since.begin(); it != gone_since.end();)
-        {
-            if (now - it->second < std::chrono::seconds(60))
-            {
-                ++it;
-                continue;
-            }
-            fprintf(stderr, "[group] 客户端 %s 超过 60 秒没回来，关组\n", it->first.c_str());
-            pool.close_group(it->first);
-            it = gone_since.erase(it);
         }
 
         std::deque<std::pair<std::string, std::string>> batch;

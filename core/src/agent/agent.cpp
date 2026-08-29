@@ -20,9 +20,9 @@ std::string session_dir_of(const std::string &workdir, bool sub)
 }
 } // namespace
 
-Agent::Agent(CoreContext &ctx, ApprovalCoordinator &approval, std::string workdir, std::string id,
+Agent::Agent(CoreContext &ctx, ApprovalCoordinator &approval, std::string workdir, int id,
              Agents *pool, bool sub)
-    : ctx_(ctx), pool_(pool), id_(std::move(id)), workdir_(std::move(workdir)),
+    : ctx_(ctx), pool_(pool), id_(id), workdir_(std::move(workdir)),
       exe_(ctx, approval, workdir_, pool_, id_),
       session_dir_(session_dir_of(workdir_, sub)),
       session_(session_dir_)
@@ -344,7 +344,7 @@ nlohmann::json Agent::build_dialog(ModelTier tier) const
 {
     nlohmann::json dialog;
     dialog["model"] = ctx_.config->model(tier);
-    dialog["system"] = "You are a helpful coding agent.";
+    dialog["system"] = "You are a helpful coding agent. Your agent id is " + std::to_string(id_) + ".";
     // 工具定义：静态表，LLM 见到的名字与 executor 查表用的名字是同一个
     nlohmann::json tools = nlohmann::json::array();
     for (const auto &t : tool_defs())

@@ -9,9 +9,9 @@
 namespace realagent {
 
 Executor::Executor(CoreContext &ctx, ApprovalCoordinator &approval, std::string workdir,
-                   Agents *pool, std::string owner)
+                   Agents *pool, int agent_id)
     : ctx_(ctx), approval_(approval), workdir_(std::move(workdir)), pool_(pool),
-      owner_(std::move(owner)) {}
+      agent_id_(agent_id) {}
 
 namespace {
 /* 权限策略：一个配置键，一个 switch（ADR-0016）。
@@ -53,7 +53,7 @@ bool Executor::check_permission(const ToolDef &tool, const std::string &params_j
             }
             // 审批链路（ADR-0005）：core 发 permission_request → 用户裁决 → 回传。
             // agent 线程真等裁决（30s 超时 deny），事件循环线程收 /approval-response 唤醒
-            if (approval_.await(owner_, tool.name, params_json) != Verdict::Allow)
+            if (approval_.await(agent_id_, tool.name, params_json) != Verdict::Allow)
             {
                 if (denied_reason) *denied_reason = "denied by user";
                 return false;
@@ -108,14 +108,17 @@ nlohmann::json Executor::execute(const std::string &call_id, const std::string &
     return r;
 }
 
-/* 取一个字符串数组参数；缺失/形状不对当空。参数是模型给的，形状不由 core 说了算。 */
-static std::vector<std::string> str_list(const nlohmann::json &p, std::string_view key)
+/* 取一个整数数组参数；缺失/形状不对当空。参数是模型给的，形状不由 core 说了算。 */
+static std::vector<int> id_list(const nlohmann::json &p, std::string_view key)
 {
-    std::vector<std::string> out;
+    std::vector<int> out;
     const auto it = p.find(key);
     if (it == p.end() || !it->is_array()) return out;
     for (const auto &v : *it)
-        if (v.is_string()) out.push_back(v.get<std::string>());
+    {
+        if (v.is_number_integer() || v.is_number_unsigned())
+            out.push_back(v.get<int>());
+    }
     return out;
 }
 
@@ -133,22 +136,22 @@ nlohmann::json Executor::agent_tool(const std::string &name, const nlohmann::jso
 
     if (name == "send_message")
     {
-        const std::string to = str("to");
-        // 没有边就不知道它存在——先问边，再问它在不在，两个理由都归到同一句话上：
-        // 区分"不存在"与"你不认识"等于告诉调用方图里还有别的东西
-        if (!pool_->has_edge(owner_, to) || !pool_->post(to, owner_, str("text")))
-            return fail("无此 agent: " + to);
-        return nlohmann::json{{"status", 0}, {"output", "sent to " + to}};
+        const auto it_to = params.find("to");
+        if (it_to == params.end() || (!it_to->is_number_integer() && !it_to->is_number_unsigned()))
+            return fail("send_message 缺少或无效的目标 agent id: to");
+        const int to = it_to->get<int>();
+        if (!pool_->post(to, str("text")))
+            return fail("无此 agent: " + std::to_string(to));
+        return nlohmann::json{{"status", 0}, {"output", "sent to " + std::to_string(to)}};
     }
 
     // spawn：派生方决定新 agent 的全部出入边（ADR-0019）
     std::string err;
-    // 组随创建者，agent 这边给不出也不需要给 client（ADR-0021）
-    const std::string id = pool_->create("", str("workdir"), owner_, str_list(params, "in_edges"),
-                                         str_list(params, "out_edges"), err);
-    if (id.empty()) return fail(err);
-    pool_->post(id, owner_, str("prompt"));
-    return nlohmann::json{{"status", 0}, {"output", id}};
+    const int id = pool_->create(str("workdir"), agent_id_, id_list(params, "in_edges"),
+                                 id_list(params, "out_edges"), err);
+    if (id <= 0) return fail(err);
+    pool_->post(id, str("prompt"));
+    return nlohmann::json{{"status", 0}, {"output", std::to_string(id)}};
 }
 
 } // namespace realagent

@@ -25,7 +25,7 @@ type Client struct {
 
 	// 这个客户端在跟哪个 agent 说话。core 里同时活着多个（ADR-0019），
 	// 每个动 agent 的端点都要指名道姓——core 不猜"就那一个吧"。
-	agentID string
+	agentID int
 
 	// 这个客户端拥有的那一组 agent（ADR-0021）。**每个进程一个、不落盘**：
 	// 三个终端窗口就是三个 id、三组，互不干扰。core 里不存在没有所有者的 agent。
@@ -41,7 +41,7 @@ type Reply struct {
 	Command  string          `json:"command,omitempty"`
 	Data     json.RawMessage `json:"data,omitempty"` // 斜杠命令结果载荷（如 /model 的 []ModelInfo JSON）
 	Messages int             `json:"messages,omitempty"`
-	AgentID  string          `json:"agent_id,omitempty"`
+	AgentID  int             `json:"agent_id,omitempty"`
 }
 
 // Command 是一条可用的斜杠命令（GET /commands，core 是唯一真相源）
@@ -74,11 +74,11 @@ func (c *Client) ClientID() string { return c.clientID }
 // 跟任何 agent 都无关（ADR-0019）。**这是客户端替用户填的默认值，不是 core 的默认值**——
 // 客户端知道用户站在哪，core 不知道。
 func (c *Client) CreateAgent(workdir string) error {
-	r, err := c.postJSON("/agent", map[string]string{"client_id": c.clientID, "workdir": workdir})
+	r, err := c.postJSON("/agent", map[string]any{"workdir": workdir})
 	if err != nil {
 		return err
 	}
-	if r.AgentID == "" {
+	if r.AgentID <= 0 {
 		return fmt.Errorf("建 agent 失败: %s", r.Error)
 	}
 	c.agentID = r.AgentID
@@ -86,11 +86,10 @@ func (c *Client) CreateAgent(workdir string) error {
 }
 
 // AgentID 是当前连着的那个 agent
-func (c *Client) AgentID() string { return c.agentID }
+func (c *Client) AgentID() int { return c.agentID }
 
-// Attach 改连到本组的另一个 agent。跨组的 id core 一律当「无此 agent」，
-// 所以这里不校验——校验一遍等于把隔离判断抄成两份（ADR-0021）。
-func (c *Client) Attach(agentID string) { c.agentID = agentID }
+// Attach 改连到本组的另一个 agent。
+func (c *Client) Attach(agentID int) { c.agentID = agentID }
 
 // Frame 是一条回放帧（GET /history）。**与推送流的帧同形**，所以客户端拿同一个
 // 渲染器吃它——一份代码，实时看和翻历史看长得一样（ADR-0020）。
@@ -104,24 +103,24 @@ type Frame struct {
 // 读的是盘上那份，接缝在「最后一条已落盘的消息」：视图 = 这段回放 + 推送流
 // 喂进来的活尾巴（ADR-0020）。每个 agent 都有历史可读，subagent 也不例外——
 // 它的会话落在 sessions/sub/，只是不进会话清单。
-func (c *Client) FetchHistory(agentID string) ([]Frame, error) {
+func (c *Client) FetchHistory(agentID int) ([]Frame, error) {
 	var f []Frame
-	body := map[string]string{"client_id": c.clientID, "agent_id": agentID}
+	body := map[string]any{"agent_id": agentID}
 	if err := c.getJSON("/history", &f, body); err != nil {
 		return nil, err
 	}
 	return f, nil
 }
 
-// SendTo 往指定 agent 发。跨组会得到「无此 agent」。
-func (c *Client) SendTo(agentID, message string) (Reply, error) {
-	return c.postJSON("/message", map[string]string{
-		"client_id": c.clientID, "agent_id": agentID, "message": message})
+// SendTo 往指定 agent 发。
+func (c *Client) SendTo(agentID int, message string) (Reply, error) {
+	return c.postJSON("/message", map[string]any{
+		"agent_id": agentID, "message": message})
 }
 
 // Send 提交用户消息。core 立即返回 {"status":"processing"}，完整回复经 /events 推送流送达。
 func (c *Client) Send(message string) (Reply, error) {
-	body, _ := json.Marshal(map[string]string{"client_id": c.clientID, "agent_id": c.agentID, "message": message})
+	body, _ := json.Marshal(map[string]any{"agent_id": c.agentID, "message": message})
 	resp, err := c.hc.Post(c.url+"/message", "application/json", bytes.NewReader(body))
 	if err != nil {
 		return Reply{}, fmt.Errorf("发送失败: %w", err)
@@ -140,7 +139,7 @@ func (c *Client) Send(message string) (Reply, error) {
 
 // Interrupt 请求中断当前 agent run（POST /interrupt）
 func (c *Client) Interrupt() error {
-	body, _ := json.Marshal(map[string]string{"client_id": c.clientID, "agent_id": c.agentID})
+	body, _ := json.Marshal(map[string]any{"agent_id": c.agentID})
 	resp, err := c.hc.Post(c.url+"/interrupt", "application/json", bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("中断请求失败: %w", err)
@@ -259,25 +258,23 @@ type SessionInfo struct {
 	Title    string `json:"title"`
 	Messages int64  `json:"messages"`
 	Mtime    int64  `json:"mtime"`
-	OpenedBy string `json:"opened_by"`
+	OpenedBy int    `json:"opened_by"`
 }
 
-// AgentInfo 是一条 agent 记录（GET /agents）。边也给——人不是图上的节点，
-// 看得见全部；agent 只看得见自己的出边邻居（ADR-0019）。
+// AgentInfo 是一条 agent 记录（GET /agents）。
 type AgentInfo struct {
-	ID        string   `json:"id"`
-	Workdir   string   `json:"workdir"`
-	State     string   `json:"state"` // running | idle
-	SessionID string   `json:"session_id"`
-	InEdges   []string `json:"in_edges"`
-	OutEdges  []string `json:"out_edges"`
+	ID        int   `json:"id"`
+	Workdir   string `json:"workdir"`
+	State     string `json:"state"` // running | idle
+	SessionID string `json:"session_id"`
+	InEdges   []int  `json:"in_edges"`
+	OutEdges  []int  `json:"out_edges"`
 }
 
-// FetchAgents 拉取 agent 清单（GET /agents）。只列自己那一组——
-// 客户端看得见本组全部，agent 只看得见自己的出边邻居，两层（ADR-0021）。
+// FetchAgents 拉取 agent 清单（GET /agents）。
 func (c *Client) FetchAgents() ([]AgentInfo, error) {
 	var a []AgentInfo
-	if err := c.getJSON("/agents", &a, map[string]string{"client_id": c.clientID}); err != nil {
+	if err := c.getJSON("/agents", &a); err != nil {
 		return nil, err
 	}
 	return a, nil

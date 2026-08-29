@@ -28,8 +28,8 @@ enum class Verdict { Allow,
                      Ask };
 
 struct PendingApproval {
-    std::string id;    // 请求 ID（permission_request / approval-response 关联）
-    std::string agent; // 谁在问。中断 A 不能掐掉 B 挂着的这一条（ADR-0019）
+    std::string id;   // 请求 ID（permission_request / approval-response 关联）
+    int agent_id = 0; // 谁在问。中断 A 不能掐掉 B 挂着的这一条（ADR-0019）
     std::string tool_name;
     std::string params;
     Verdict verdict = Verdict::Deny;
@@ -54,9 +54,9 @@ class ApprovalCoordinator {
     bool online() const { return !online_ || online_(); }
 
     /* agent 线程：请求审批，阻塞直到裁决。30s 超时按 deny（危险工具默认拒绝）。
-     * agent 是提问方的 id，随 permission_request 帧下发——两个 agent 同时问，
+     * agent_id 是提问方的 id，随 permission_request 帧下发——两个 agent 同时问，
      * 用户得知道是谁在问（ADR-0019 §8）。 */
-    Verdict await(const std::string &agent, const std::string &tool_name,
+    Verdict await(int agent_id, const std::string &tool_name,
                   const std::string &params);
 
     /* 事件循环线程：收到 /approval-response 裁决 */
@@ -65,7 +65,7 @@ class ApprovalCoordinator {
     /* 取消某个 agent 挂着的全部审批（按 deny 唤醒）。
      * **按 agent，不是一刀切**：POST /interrupt 现在指名道姓，中断 A 却掐掉 B 正等着的
      * 那条审批，是把「停下这一个」办成了「全场停摆」（ADR-0019 §8）。 */
-    void cancel(const std::string &agent);
+    void cancel(int agent_id);
 
   private:
     /* 析构：谁也不剩了，全部按 deny 放掉，别让线程悬在条件变量上 */

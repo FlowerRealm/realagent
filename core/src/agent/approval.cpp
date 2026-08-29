@@ -9,7 +9,7 @@ namespace realagent {
 
 ApprovalCoordinator::~ApprovalCoordinator() { cancel_all(); }
 
-Verdict ApprovalCoordinator::await(const std::string &agent, const std::string &tool_name,
+Verdict ApprovalCoordinator::await(int agent_id, const std::string &tool_name,
                                    const std::string &params)
 {
     std::shared_ptr<PendingApproval> p;
@@ -17,7 +17,7 @@ Verdict ApprovalCoordinator::await(const std::string &agent, const std::string &
         std::lock_guard<std::mutex> lk(mtx_);
         p = std::make_shared<PendingApproval>();
         p->id = "appr_" + std::to_string(next_id_++);
-        p->agent = agent;
+        p->agent_id = agent_id;
         p->tool_name = tool_name;
         p->params = params;
         pending_[p->id] = p;
@@ -28,7 +28,7 @@ Verdict ApprovalCoordinator::await(const std::string &agent, const std::string &
     // 静默地拿不到任何权限，而用户根本不知道有人问过（ADR-0019 §8）
     nlohmann::json ev;
     ev["id"] = p->id;
-    ev["agent_id"] = agent;
+    ev["agent_id"] = agent_id;
     ev["tool"] = tool_name;
     if (nlohmann::json args = nlohmann::json::parse(params, nullptr, false); !args.is_discarded())
         ev["params"] = std::move(args);
@@ -72,14 +72,14 @@ static void release(std::vector<std::shared_ptr<PendingApproval>> &all)
     }
 }
 
-void ApprovalCoordinator::cancel(const std::string &agent)
+void ApprovalCoordinator::cancel(int agent_id)
 {
     std::vector<std::shared_ptr<PendingApproval>> mine;
     {
         std::lock_guard<std::mutex> lk(mtx_);
         for (auto it = pending_.begin(); it != pending_.end();)
         {
-            if (it->second->agent != agent)
+            if (it->second->agent_id != agent_id)
             {
                 ++it;
                 continue;

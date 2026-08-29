@@ -121,14 +121,14 @@ func sendCmd(c *client.Client, input string) tea.Cmd {
 
 // historyMsg 携带 GET /history 的回放帧
 type historyMsg struct {
-	agentID string
+	agentID int
 	frames  []client.Frame
 	err     error
 }
 
 // fetchHistoryCmd 拉一个 agent 的历史。带上 agentID 一起回来——回来时用户可能
 // 已经又切走了，那份历史就该丢掉，而不是画到别人的屏幕上
-func fetchHistoryCmd(c *client.Client, agentID string) tea.Cmd {
+func fetchHistoryCmd(c *client.Client, agentID int) tea.Cmd {
 	return func() tea.Msg {
 		f, err := c.FetchHistory(agentID)
 		return historyMsg{agentID: agentID, frames: f, err: err}
@@ -572,12 +572,14 @@ func (m model) submitInput(fromPanel bool) (model, tea.Cmd) {
 	}
 
 	// /agents 也是纯客户端命令：切的是"我在看谁"，core 那头一个字节都不变。
-	// 无参 = 拿清单开面板选，带 id = 直接切过去
+	// 无参 = 拿清单开面板选，带 id = 直接切过去（校验交给 core）
 	if cmd, rest := splitCommand(input); cmd == "/agents" {
 		if rest == "" {
 			return m, fetchAgentsCmd(m.client)
 		}
-		return m.attach(rest)
+		var id int
+		_, _ = fmt.Sscanf(rest, "%d", &id)
+		return m.attach(id)
 	}
 
 	m.awaiting = true
@@ -590,7 +592,7 @@ func (m model) submitInput(fromPanel bool) (model, tea.Cmd) {
 // 内存里那份是副本（盘上那份逐字相同），所以丢得掉——判据与 core 侧 idle 释放
 // 对话历史的那条逐字相同（ADR-0019 §7、ADR-0020 §3）。于是不管组里有 2 个还是
 // 200 个 agent，TUI 的行缓冲一样大。
-func (m model) attach(id string) (model, tea.Cmd) {
+func (m model) attach(id int) (model, tea.Cmd) {
 	if id == m.client.AgentID() {
 		return m, nil
 	}
@@ -599,7 +601,7 @@ func (m model) attach(id string) (model, tea.Cmd) {
 	m.open = false
 	m.busy.stop()
 	m.awaiting = false
-	m.emit("info", "⇄ 切到 agent "+id)
+	m.emit("info", fmt.Sprintf("⇄ 切到 agent %d", id))
 	return m, fetchHistoryCmd(m.client, id)
 }
 
@@ -631,10 +633,10 @@ func (m *model) handleEvent(ev client.Event) tea.Cmd {
 	// 静默地拿不到任何权限，而用户根本不知道有人问过（ADR-0019 §8）。
 	// 没有 agent_id 的帧（statusline）是进程级的，也不分拣。
 	var who struct {
-		AgentID string `json:"agent_id"`
+		AgentID int `json:"agent_id"`
 	}
 	jsonUnmarshal(ev.Payload, &who)
-	if ev.Type != "permission_request" && who.AgentID != "" && who.AgentID != m.client.AgentID() {
+	if ev.Type != "permission_request" && who.AgentID != 0 && who.AgentID != m.client.AgentID() {
 		return nil
 	}
 
@@ -845,7 +847,7 @@ func describeCommand(name string, messages int) string {
 
 // renderSessions 把 /new /resume 的会话清单渲染为多行 info 文本。
 // 当前会话打 ▸，其余只是列出来——真要挑一个走的是面板（panel.go sessionPanel）。
-func renderSessions(command string, data json.RawMessage, agentID string) string {
+func renderSessions(command string, data json.RawMessage, agentID int) string {
 	var list []client.SessionInfo
 	if err := json.Unmarshal(data, &list); err != nil {
 		return describeCommand(command, 0)

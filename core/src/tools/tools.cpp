@@ -270,15 +270,15 @@ const ToolDef k_tools[] = {
      * 而 tools/ 在 agent/ 下面，反过来包含就是层级倒挂。
      * 定义留在这张表里：LLM 看见的工具清单只有一份。 */
     {"spawn", "派生 agent",
-     "派生一个新 agent 去干一件事，立刻返回它的 id，不等它跑完。\n"
+     "派生一个新 agent 去干一件事，立刻返回它的数字 id，不等它跑完。\n"
      "in_edges 是谁能给它发消息、谁收它的完成通知；out_edges 是它能给谁发消息。\n"
-     "要收它的产出就把自己的 id 写进 in_edges；两个列表都填同一组人就是互相能发。\n"
-     "两个列表里只能填你自己或你已经认识的 agent——授不出自己没有的能力。",
-     R"({"type":"object","properties":{"workdir":{"type":"string","description":"它的工作目录，必填"},"prompt":{"type":"string","description":"派给它的第一条消息"},"in_edges":{"type":"array","items":{"type":"string"}},"out_edges":{"type":"array","items":{"type":"string"}}},"required":["workdir","prompt"]})",
+     "要收它的产出就把自己的数字 id 写进 in_edges；两个列表都填同一组人就是互相能发。\n"
+     "两个列表里只能填你自己或你已经认识的 agent 数字 id——授不出自己没有的能力。",
+     R"({"type":"object","properties":{"workdir":{"type":"string","description":"它的工作目录，必填"},"prompt":{"type":"string","description":"派给它的第一条消息"},"in_edges":{"type":"array","items":{"type":"integer"}},"out_edges":{"type":"array","items":{"type":"integer"}}},"required":["workdir","prompt"]})",
      true},
     {"send_message", "给别的 agent 发消息",
-     "把一条消息投进另一个 agent 的收件箱。只能发给你有出边的那些——没有边就不知道它存在。",
-     R"({"type":"object","properties":{"to":{"type":"string"},"text":{"type":"string"}},"required":["to","text"]})",
+     "把一条消息投进另一个 agent 的收件箱。只能发给你有出边的那些 agent 数字 id——没有边就不知道它存在。",
+     R"({"type":"object","properties":{"to":{"type":"integer"},"text":{"type":"string"}},"required":["to","text"]})",
      false},
     {"bash", "执行命令", "在 shell 中执行命令，返回标准输出与标准错误（合流）。危险操作需用户确认。",
      R"({"type":"object","properties":{"command":{"type":"string"}},"required":["command"]})",
