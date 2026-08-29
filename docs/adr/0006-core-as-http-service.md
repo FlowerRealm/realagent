@@ -42,7 +42,15 @@ TUI 与未来的 **gui 是平等的 QUIC 客户端**，共享 core 的同一接�
 
 ## 后果
 
-- core 需要一个 QUIC/HTTP3 服务模块（ngtcp2 + nghttp3）。
+- core 需要一个 QUIC/HTTP3 服务模块（~~ngtcp2 + nghttp3~~ → **Cloudflare quiche**，见下）。
+
+## 实况注（2026-08-28）：库最终是 Cloudflare quiche
+
+上面选定的 ngtcp2 + nghttp3 **没有落地**。实际实现用的是 **Cloudflare quiche**（QUIC + HTTP/3 一体，`core/CMakeLists.txt:17-19`），Go 侧仍是 quic-go。
+
+原因：**原定组合的实现满足不了需求。** 换库当时没有单独记 ADR，这条实况注是补记；具体是哪一条不满足未留下记录。
+
+后续 ADR 已在以 quiche 的性质为论据（ADR-0002 的线程模型：「quiche 非线程安全，agent 线程不能直接调推送流」），本条把那个前提落到纸面上。
 - **推送流（SSE 语义）为长生命周期单向流**：GET /events 流式响应，事件帧按序写入。
 - core 与 TUI 的所有交互走 QUIC/HTTP3 + JSON。
 - 单进程的"进程内直调"优势（低延迟、共享内存）让位于接口清晰。
