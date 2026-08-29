@@ -25,13 +25,13 @@ int Agents::create(const std::string &workdir, int by,
     err.clear();
     if (workdir.empty())
     {
-        err = "workdir 必填";
+        err = "workdir is required";
         return 0;
     }
     std::lock_guard<std::mutex> lk(mtx_);
     if (cnt_ + 1 >= MAX_SIZE)
     {
-        err = "agent 池已满";
+        err = "agent pool is full";
         return 0;
     }
 
@@ -66,7 +66,7 @@ void Agents::on_done(int id, const std::string &summary)
         {
             if (to == id)
             {
-                nodes_[from]->post("[" + std::to_string(id) + " 已完成] " + summary);
+                nodes_[from]->post("[" + std::to_string(id) + " done] " + summary);
                 break;
             }
         }

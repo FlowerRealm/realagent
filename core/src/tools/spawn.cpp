@@ -12,11 +12,15 @@ ToolDef spawn_def()
 {
     return {
         "spawn", "派生 agent",
-        "派生一个新 agent 去干一件事，立刻返回它的数字 id，不等它跑完。\n"
-        "in_edges 是谁能给它发消息、谁收它的完成通知；out_edges 是它能给谁发消息。\n"
-        "要收它的产出就把自己的数字 id 写进 in_edges；两个列表都填同一组人就是互相能发。\n"
-        "两个列表里只能填你自己或你已经认识的 agent 数字 id——授不出自己没有的能力。",
-        R"({"type":"object","properties":{"workdir":{"type":"string","description":"它的工作目录，必填"},"prompt":{"type":"string","description":"派给它的第一条消息"},"in_edges":{"type":"array","items":{"type":"integer"}},"out_edges":{"type":"array","items":{"type":"integer"}}},"required":["workdir","prompt"]})",
+        "Spawn a new agent to do one thing; returns its numeric id at once, without waiting\n"
+        "for it to finish.\n"
+        "in_edges is who may send it messages and who receives its completion notice;\n"
+        "out_edges is who it may send messages to.\n"
+        "To receive its output, put your own numeric id in in_edges; the same ids in both\n"
+        "lists means messages flow both ways.\n"
+        "Both lists may only contain your own id or agent ids you already know — you cannot\n"
+        "grant a capability you do not have yourself.",
+        R"({"type":"object","properties":{"workdir":{"type":"string","description":"its working directory, required"},"prompt":{"type":"string","description":"the first message handed to it"},"in_edges":{"type":"array","items":{"type":"integer"}},"out_edges":{"type":"array","items":{"type":"integer"}}},"required":["workdir","prompt"]})",
         true};
 }
 

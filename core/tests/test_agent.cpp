@@ -173,7 +173,7 @@ int main()
         }
         CHECK(m.size() > before, "b 跑完，a 的收件箱里多了一条");
         const std::string got = m.empty() ? "" : m.back()["content"][0]["text"].get<std::string>();
-        CHECK(got.find(std::to_string(b)) != std::string::npos && got.find("已完成") != std::string::npos,
+        CHECK(got.find(std::to_string(b)) != std::string::npos && got.find("done") != std::string::npos,
               "通知点名是谁跑完了");
         CHECK(!m.empty() && m.back()["role"] == "user",
               "role 是 user——凡是从 agent 外面来的输入都是 user");

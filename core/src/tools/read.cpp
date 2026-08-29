@@ -12,7 +12,8 @@ ToolDef read_def()
 {
     return {
         "read", "读文件",
-        "读取文件内容。每行开头是 `行号 hash `——那两个值就是 edit 的 line 与 hash 参数。",
+        "Read a file. Every line starts with `line hash ` — those two values are exactly the\n"
+        "line and hash arguments of the edit tool.",
         R"({"type":"object","properties":{"file_path":{"type":"string"}},"required":["file_path"]})",
         false};
 }

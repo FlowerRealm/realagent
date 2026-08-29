@@ -127,7 +127,7 @@ nlohmann::json Executor::agent_tool(const std::string &name, const nlohmann::jso
     const auto fail = [](const std::string &m) {
         return nlohmann::json{{"status", 1}, {"output", m}};
     };
-    if (!pool_) return fail("这里没有 agent 图");
+    if (!pool_) return fail("no agent graph here");
 
     const auto str = [&params](std::string_view k) {
         const auto it = params.find(k);
@@ -138,10 +138,10 @@ nlohmann::json Executor::agent_tool(const std::string &name, const nlohmann::jso
     {
         const auto it_to = params.find("to");
         if (it_to == params.end() || (!it_to->is_number_integer() && !it_to->is_number_unsigned()))
-            return fail("send_message 缺少或无效的目标 agent id: to");
+            return fail("send_message is missing or has an invalid target agent id: to");
         const int to = it_to->get<int>();
         if (!pool_->post(to, str("text")))
-            return fail("无此 agent: " + std::to_string(to));
+            return fail("no such agent: " + std::to_string(to));
         return nlohmann::json{{"status", 0}, {"output", "sent to " + std::to_string(to)}};
     }
 

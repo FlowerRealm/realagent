@@ -10,8 +10,8 @@ namespace realagent {
 ToolDef send_message_def()
 {
     return {"send_message", "给别的 agent 发消息",
-            "把一条消息投进另一个 agent 的收件箱。只能发给你有出边的那些 agent "
-            "数字 id——没有边就不知道它存在。",
+            "Deliver a message into another agent's inbox. You may only send to the numeric ids\n"
+            "of agents you have an out edge to — without an edge you do not know it exists.",
             R"({"type":"object","properties":{"to":{"type":"integer"},"text":{"type":"string"}},"required":["to","text"]})",
             false};
 }

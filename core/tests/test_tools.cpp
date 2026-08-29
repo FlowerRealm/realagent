@@ -227,10 +227,10 @@ int main()
         const auto ra3 = msg(call("read", R"({"file_path":)" + q(a) + "}"));
         const auto partial = call("edit", edits({{{"file_path", a.string()}, {"line", 1}, {"hash", hash_at(ra3, 1)}, {"new_text", "OK"}},
                                                  {{"file_path", b.string()}, {"line", 1}, {"hash", "___"}, {"new_text", "NO"}}}));
-        CHECK(st(partial) != 0 && msg(partial).find("第 2 条") != std::string::npos,
+        CHECK(st(partial) != 0 && msg(partial).find("edit 2") != std::string::npos,
               "遇错即停，报错点名第几条");
         CHECK(slurp(a) == "OK\n2\n" && slurp(b) == "B\ny\n", "前一条已写入，出错那条没动");
-        CHECK(msg(partial).find("前 1 条已写入") != std::string::npos, "说清前面写了几条");
+        CHECK(msg(partial).find("1 edit already written") != std::string::npos, "说清前面写了几条");
 
         CHECK(st(call("edit", "{}")) != 0, "缺 edits → 报错");
     }

@@ -46,7 +46,8 @@ void emit_output(const EmitFn &emit, const std::string &call_id, const std::stri
 ToolDef bash_def()
 {
     return {"bash", "执行命令",
-            "在 shell 中执行命令，返回标准输出与标准错误（合流）。危险操作需用户确认。",
+            "Run a command in the shell; returns stdout and stderr (merged into one stream).\n"
+            "Dangerous operations require user confirmation.",
             R"({"type":"object","properties":{"command":{"type":"string"}},"required":["command"]})",
             true};
 }
