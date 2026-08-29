@@ -21,9 +21,9 @@
 #include "agent/agent.hpp"
 #include "agent/agents.hpp"
 #include "agent/approval.hpp"
+#include "agent/context.hpp"
 #include "agent/session.hpp"
 #include "config.hpp"
-#include "context.hpp"
 
 namespace fs = std::filesystem;
 using namespace realagent;

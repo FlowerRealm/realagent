@@ -15,7 +15,7 @@
 #include <string>
 
 #include "agent/approval.hpp"
-#include "context.hpp"
+#include "agent/context.hpp"
 #include "tools/tools.hpp"
 
 namespace realagent {

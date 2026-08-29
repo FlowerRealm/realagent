@@ -28,9 +28,9 @@
 #include <thread>
 
 #include "agent/approval.hpp"
+#include "agent/context.hpp"
 #include "agent/executor.hpp"
 #include "config.hpp"
-#include "context.hpp"
 #include "tools/tools.hpp"
 
 namespace fs = std::filesystem;

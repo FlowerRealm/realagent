@@ -14,7 +14,7 @@
 #include <span>
 #include <string>
 
-#include "context.hpp"
+#include "agent/context.hpp"
 #include "json.hpp"
 
 namespace realagent {

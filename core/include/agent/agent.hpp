@@ -18,9 +18,9 @@
 #include <thread>
 #include <vector>
 
+#include "agent/context.hpp"
 #include "agent/executor.hpp"
 #include "agent/session.hpp"
-#include "context.hpp"
 #include "json.hpp"
 #include "llm/llm.hpp"
 

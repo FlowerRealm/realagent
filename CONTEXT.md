@@ -430,7 +430,7 @@ _Avoid_: `定型`、`提交`、`freeze`、`finalize`（都不再指任何东西�
 ```
 realagent/                  # 主仓库（core + tui + docs）
 ├── core/                   # C++ QUIC/HTTP3 服务（ADR-0006）
-│   ├── include/            #   公共头：config.hpp / context.hpp / json.hpp + agent/ llm/ tools/ server/
+│   ├── include/            #   公共头：config.hpp / json.hpp + agent/ llm/ tools/ server/
 │   ├── src/
 │   │   ├── llm/            #   一次 LLM 调用：造请求 + SSE 解析 + 计价（llm.cpp）
 │   │   ├── tools/          #   内置工具静态表：read / edit / bash（tools.cpp）

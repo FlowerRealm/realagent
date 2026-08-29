@@ -19,11 +19,11 @@
 
 #include "agent/agent.hpp"
 #include "agent/agents.hpp"
+#include "agent/context.hpp"
 #include "agent/executor.hpp"
 #include "agent/history.hpp"
 #include "agent/session.hpp"
 #include "config.hpp"
-#include "context.hpp"
 #include "server/quic_server.hpp"
 #include "tools/tools.hpp"
 
