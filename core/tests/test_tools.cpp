@@ -7,8 +7,8 @@
  *
  * 验证：
  *   - 工具清单：三个工具、危险位、查不到的名字返回 nullptr
- *   - read：正常读、文件不存在、缺参数
- *   - edit：不存在则创建 / 空 old_string 追加 / 替换命中 / old_string 找不到
+ *   - read：带 anchor 的输出、分页、输出上限、超大文件（ADR-0018）
+ *   - edit：一个操作四种用法 / 先全校验再写 / 陈旧 anchor 拒绝 / 多文件遇错即停
  *   - bash：stdout 回传、退出码透传、缺参数
  *   - 权限（ADR-0005 / ADR-0016）：allow-all 放行、deny 拒绝、ask 真等裁决、
  *     认不出的值按 ask 处理（写错配置该多问一句，不该多放一次行）
@@ -82,7 +82,8 @@ static std::string slurp(const fs::path &p)
 
 static json call(const std::string &name, const std::string &params)
 {
-    return run_tool("call-1", name, params, nullptr); // emit 为空：工具不推实时帧也照跑
+    // workdir 取 g_home：测试里路径都是绝对的，这个值只有 bash 的 chdir 会用到
+    return run_tool("call-1", name, params, nullptr, g_home.string());
 }
 
 /* 结果 json 的三个字段：{"status", "output"}（executor 再加 "interrupted"） */
@@ -92,6 +93,29 @@ static bool intr(const json &r) { return r.value("interrupted", false); }
 
 /* 参数里的路径要进 JSON 字符串，临时目录路径里不含需要转义的字符 */
 static std::string q(const fs::path &p) { return "\"" + p.string() + "\""; }
+
+/* read 输出里第 n 行的 hash（行格式 `行号 hash 正文`）。取不到返回空串。
+ * 测试走的路跟模型一样：read 印什么就原样填给 edit。 */
+static std::string hash_at(const std::string &out, size_t n)
+{
+    const std::string pre = std::to_string(n) + " ";
+    for (size_t p = 0; p < out.size();)
+    {
+        if (out.compare(p, pre.size(), pre) == 0) return out.substr(p + pre.size(), 3);
+        const size_t eol = out.find('\n', p);
+        if (eol == std::string::npos) break;
+        p = eol + 1;
+    }
+    return {};
+}
+
+/* `{e}` 交给 json 的初始化列表会被折成对象本身而不是单元素数组，所以显式收 list */
+static std::string edits(std::initializer_list<json> es)
+{
+    json arr = json::array();
+    for (const json &e : es) arr.push_back(e);
+    return json{{"edits", arr}}.dump();
+}
 
 int main()
 {
@@ -103,7 +127,10 @@ int main()
 
     printf("== 工具清单 ==\n");
     {
-        CHECK(tool_defs().size() == 3, "三个内置工具");
+        // read/edit/bash 三个在 tools.cpp，spawn/send_message 两个由 Executor 实现——
+        // 定义都在同一张表里，LLM 看见的清单只有一份（ADR-0019）
+        CHECK(tool_defs().size() == 5, "五个工具");
+        CHECK(find_tool("spawn") && find_tool("send_message"), "两个 agent 级工具在同一张表里");
         const ToolDef *r = find_tool("read");
         const ToolDef *e = find_tool("edit");
         const ToolDef *b = find_tool("bash");
@@ -122,46 +149,128 @@ int main()
             std::ofstream o(f);
             o << "hello\nworld\n";
         }
-        const auto ok = call("read", R"({"file_path":)" + q(f) + "}");
-        CHECK(st(ok) == 0 && msg(ok) == "hello\nworld\n", "读到原文");
+        const auto r = call("read", R"({"file_path":)" + q(f) + "}");
+        CHECK(st(r) == 0, "读得到");
+        const std::string h1 = hash_at(msg(r), 1), h2 = hash_at(msg(r), 2);
+        CHECK(h1.size() == 3 && h2.size() == 3 && h1 != h2, "每行一个 3 字符 hash");
+        CHECK(msg(r) == "1 " + h1 + " hello\n2 " + h2 + " world\n", "格式是 `行号 hash 正文`");
 
         const auto missing = call("read", R"({"file_path":)" + q(g_home / "nope.txt") + "}");
-        CHECK(st(missing) != 0 && msg(missing).find("cannot open") != std::string::npos,
-              "文件不存在 → 报错，不是空内容");
-
+        CHECK(st(missing) != 0, "文件不存在 → 报错，不是空内容");
         const auto noarg = call("read", "{}");
         CHECK(st(noarg) != 0 && msg(noarg).find("file_path") != std::string::npos,
               "缺 file_path → 报错点名缺的是哪个");
     }
 
-    printf("== edit（+x-0 = 创建） ==\n");
+    printf("== edit ==\n");
     {
         const fs::path f = g_home / "e.txt";
+        const auto reread = [&f] { return msg(call("read", R"({"file_path":)" + q(f) + "}")); };
+        const auto one = [&f](int line, const std::string &h, const std::string &t) {
+            json e{{"file_path", f.string()}, {"new_text", t}};
+            if (line)
+            {
+                e["line"] = line;
+                e["hash"] = h;
+            }
+            return edits({e});
+        };
+
         fs::remove(f);
-        const auto created = call("edit", R"({"file_path":)" + q(f) + R"(,"new_string":"a\n"})");
-        CHECK(st(created) == 0 && msg(created).find("created") != std::string::npos,
-              "文件不存在 → 创建（报的是 created，不是 appended）");
-        CHECK(slurp(f) == "a\n", "创建的内容就是 new_string");
+        CHECK(st(call("edit", one(0, "", "a\nb\nc"))) == 0 && slurp(f) == "a\nb\nc\n",
+              "不给 line = 写整个文件（创建）");
 
-        const auto appended =
-            call("edit", R"({"file_path":)" + q(f) + R"(,"old_string":"","new_string":"b\n"})");
-        CHECK(st(appended) == 0 && msg(appended).find("appended") != std::string::npos,
-              "空 old_string → 追加");
-        CHECK(slurp(f) == "a\nb\n", "追加在末尾，原内容不动");
+        std::string out = reread();
+        CHECK(st(call("edit", one(2, hash_at(out, 2), "B"))) == 0 && slurp(f) == "a\nB\nc\n",
+              "换掉一行");
 
-        const auto edited =
-            call("edit", R"({"file_path":)" + q(f) + R"(,"old_string":"a","new_string":"X"})");
-        CHECK(st(edited) == 0 && slurp(f) == "X\nb\n", "命中 → 只换第一处");
+        out = reread();
+        CHECK(st(call("edit", one(1, hash_at(out, 1), "a\nNEW"))) == 0 &&
+                  slurp(f) == "a\nNEW\nB\nc\n",
+              "new_text 带换行即换成多行");
 
+        out = reread();
+        CHECK(st(call("edit", one(2, hash_at(out, 2), ""))) == 0 && slurp(f) == "a\nB\nc\n",
+              "空串即删掉这一行");
+
+        out = reread();
+        CHECK(st(call("edit", one(2, "___", "X"))) != 0 && slurp(f) == "a\nB\nc\n",
+              "hash 对不上 → 拒绝，文件原样");
+        CHECK(st(call("edit", one(99, hash_at(out, 1), "X"))) != 0, "行号越界 → 拒绝");
+    }
+
+    printf("== edit：多条、跨文件、遇错即停 ==\n");
+    {
+        const fs::path a = g_home / "m1.txt", b = g_home / "m2.txt";
+        for (const auto &p : {a, b})
+        {
+            std::ofstream o(p);
+            o << "x\ny\n";
+        }
+        const auto ra = msg(call("read", R"({"file_path":)" + q(a) + "}"));
+        const auto rb = msg(call("read", R"({"file_path":)" + q(b) + "}"));
+
+        // 两条都改第 1 行：单行 hash 不含邻域，所以互不影响
+        CHECK(st(call("edit", edits({{{"file_path", a.string()}, {"line", 1}, {"hash", hash_at(ra, 1)}, {"new_text", "A"}},
+                                     {{"file_path", b.string()}, {"line", 1}, {"hash", hash_at(rb, 1)}, {"new_text", "B"}}}))) == 0 &&
+                  slurp(a) == "A\ny\n" && slurp(b) == "B\ny\n",
+              "一次调用跨两个文件");
+
+        // 同一个文件的相邻两行：单行 hash 不含邻域，改了上一行也不影响下一行
+        const auto ra2 = msg(call("read", R"({"file_path":)" + q(a) + "}"));
+        CHECK(st(call("edit", edits({{{"file_path", a.string()}, {"line", 1}, {"hash", hash_at(ra2, 1)}, {"new_text", "1"}},
+                                     {{"file_path", a.string()}, {"line", 2}, {"hash", hash_at(ra2, 2)}, {"new_text", "2"}}}))) == 0 &&
+                  slurp(a) == "1\n2\n",
+              "相邻两行同批改——hash 只看本行，改上一行不作废下一行");
+
+        // 第二条坏掉：第一条已经落盘，报错要说清停在第几条
+        const auto ra3 = msg(call("read", R"({"file_path":)" + q(a) + "}"));
+        const auto partial = call("edit", edits({{{"file_path", a.string()}, {"line", 1}, {"hash", hash_at(ra3, 1)}, {"new_text", "OK"}},
+                                                 {{"file_path", b.string()}, {"line", 1}, {"hash", "___"}, {"new_text", "NO"}}}));
+        CHECK(st(partial) != 0 && msg(partial).find("第 2 条") != std::string::npos,
+              "遇错即停，报错点名第几条");
+        CHECK(slurp(a) == "OK\n2\n" && slurp(b) == "B\ny\n", "前一条已写入，出错那条没动");
+        CHECK(msg(partial).find("前 1 条已写入") != std::string::npos, "说清前面写了几条");
+
+        CHECK(st(call("edit", "{}")) != 0, "缺 edits → 报错");
+    }
+
+    printf("== workdir：相对路径与 bash 的 cwd 都跟着它（ADR-0019） ==\n");
+    {
+        // core 进程的 cwd 与 agent 的 workdir 故意指到不同地方——多 agent 之后
+        // 前者是"启动 core 那个 shell 当时在哪"，跟任何 agent 都无关
+        const fs::path wd = g_home / "wd";
+        fs::create_directories(wd);
+        {
+            std::ofstream o(wd / "inside.txt");
+            o << "here\n";
+        }
+        fs::current_path(g_home); // 进程 cwd 停在别处
+
+        CoreContext ctx{.config = nullptr, .emit_fn = nullptr};
+        ApprovalCoordinator ap;
+        Executor exe(ctx, ap, wd.string());
+
+        const auto rel = run_tool("w1", "read", R"({"file_path":"inside.txt"})", nullptr, wd.string());
+        CHECK(st(rel) == 0 && msg(rel).find("here") != std::string::npos,
+              "相对路径从 workdir 算起，不是从进程 cwd");
         const auto miss =
-            call("edit", R"({"file_path":)" + q(f) + R"(,"old_string":"zzz","new_string":"X"})");
-        CHECK(st(miss) != 0 && msg(miss).find("not found") != std::string::npos,
-              "old_string 找不到 → 报错");
-        CHECK(slurp(f) == "X\nb\n", "报错时文件原样，没被写坏");
+            run_tool("w2", "read", R"({"file_path":"inside.txt"})", nullptr, g_home.string());
+        CHECK(st(miss) != 0, "换个 workdir 同一条相对路径就找不到——说明真的按它解析");
 
-        const auto noarg = call("edit", R"({"file_path":)" + q(f) + "}");
-        CHECK(st(noarg) != 0 && msg(noarg).find("new_string") != std::string::npos,
-              "缺 new_string → 报错");
+        const auto abs =
+            run_tool("w3", "read", R"({"file_path":")" + (wd / "inside.txt").string() + R"("})",
+                     nullptr, g_home.string());
+        CHECK(st(abs) == 0, "绝对路径不受 workdir 影响");
+
+        const auto pwd = run_tool("w4", "bash", R"({"command":"pwd"})", nullptr, wd.string());
+        CHECK(st(pwd) == 0 && msg(pwd).find(wd.string()) != std::string::npos,
+              "bash 起来时 chdir 到 workdir，不继承 core 进程的 cwd");
+
+        const auto created =
+            run_tool("w5", "edit",
+                     R"({"edits":[{"file_path":"made.txt","new_text":"x"}]})", nullptr, wd.string());
+        CHECK(st(created) == 0 && fs::exists(wd / "made.txt"), "edit 的相对路径同样按 workdir 落地");
     }
 
     printf("== bash ==\n");
@@ -187,27 +296,6 @@ int main()
               "两条流合流，顺序就是人在终端里看见的顺序");
     }
 
-    printf("== read 的截断边界 ==\n");
-    {
-        // 恰好读满与真被截断，从前读回来一模一样（gcount 都是上限），
-        // 于是刚好读满的文件被无辜削三个字节
-        const auto write_n = [](const fs::path &p, std::size_t n) {
-            std::ofstream o(p, std::ios::binary);
-            o << std::string(n, 'x');
-        };
-        const fs::path exact = g_home / "exact.txt";
-        const fs::path over = g_home / "over.txt";
-        write_n(exact, 50000);
-        write_n(over, 50001);
-        const auto r_exact = call("read", R"({"file_path":)" + q(exact) + "}");
-        const auto r_over = call("read", R"({"file_path":)" + q(over) + "}");
-        CHECK(msg(r_exact).size() == 50000 && msg(r_exact).back() == 'x',
-              "恰好读满 → 原样回传，不加省略号");
-        CHECK(msg(r_over).size() == 50000 && msg(r_over).substr(50000 - 3) == "...",
-              "真的更大 → 截断并标出来");
-        CHECK(msg(r_exact) != msg(r_over), "两种情况现在区分得开");
-    }
-
     printf("== 权限裁决（一个配置键，一个 switch） ==\n");
     {
         // allow-all：危险工具直接跑，没有任何问询
@@ -218,7 +306,7 @@ int main()
             if (t == "permission_request") ++asked;
         });
         CoreContext ctx{.config = &cfg, .emit_fn = nullptr};
-        Executor exe(ctx, ap);
+        Executor exe(ctx, ap, g_home.string());
         const auto r = exe.execute("c1", "bash", R"({"command":"echo allow"})");
         CHECK(st(r) == 0 && msg(r) == "allow\n", "allow-all → 危险工具照跑");
         CHECK(asked == 0, "allow-all → 一句都不问");
@@ -232,7 +320,7 @@ int main()
             if (t == "permission_request") ++asked;
         });
         CoreContext ctx{.config = &cfg, .emit_fn = nullptr};
-        Executor exe(ctx, ap);
+        Executor exe(ctx, ap, g_home.string());
         const auto r = exe.execute("c2", "bash", R"({"command":"echo nope"})");
         CHECK(st(r) != 0 && msg(r).find("permission policy") != std::string::npos,
               "deny → 拒绝，理由说明是策略拒的");
@@ -255,7 +343,7 @@ int main()
             ap.respond(ev["id"], true);
         });
         CoreContext ctx{.config = &cfg, .emit_fn = nullptr};
-        Executor exe(ctx, ap);
+        Executor exe(ctx, ap, g_home.string());
         const auto r = exe.execute("c4", "bash", R"({"command":"echo asked"})");
         CHECK(seen_tool == "bash", "ask → 发出 permission_request，点名是哪个工具");
         CHECK(st(r) == 0 && msg(r) == "asked\n", "用户放行 → 跑");
@@ -269,7 +357,7 @@ int main()
             ap.respond(ev["id"], false);
         });
         CoreContext ctx{.config = &cfg, .emit_fn = nullptr};
-        Executor exe(ctx, ap);
+        Executor exe(ctx, ap, g_home.string());
         const auto r = exe.execute("c5", "bash", R"({"command":"echo denied"})");
         CHECK(st(r) != 0 && msg(r).find("denied by user") != std::string::npos,
               "用户拒绝 → 不跑，理由是人拒的（与策略拒的分开）");
@@ -286,7 +374,7 @@ int main()
             ap.respond(ev["id"], false);
         });
         CoreContext ctx{.config = &cfg, .emit_fn = nullptr};
-        Executor exe(ctx, ap);
+        Executor exe(ctx, ap, g_home.string());
         const auto r = exe.execute("c6", "bash", R"({"command":"echo yolo"})");
         CHECK(asked == 1, "permission 值认不出 → 走 ask，不是放行");
         CHECK(st(r) != 0, "拒绝生效");
@@ -297,7 +385,7 @@ int main()
         Config cfg = config_with("allow-all");
         ApprovalCoordinator ap;
         CoreContext ctx{.config = &cfg, .emit_fn = nullptr};
-        Executor exe(ctx, ap);
+        Executor exe(ctx, ap, g_home.string());
 
         // 手上没有在跑的：标记留给紧随其后的那次 execute 撞上
         exe.interrupt();

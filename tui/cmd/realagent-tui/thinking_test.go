@@ -17,7 +17,7 @@ func feedEvents(m *model, evs ...client.Event) {
 // roleTexts 返回未提交行的「角色:文本」（断言顺序与归属）
 func roleTexts(m model) []string {
 	var out []string
-	for _, l := range m.pend {
+	for _, l := range m.lines {
 		out = append(out, l.role+":"+l.text)
 	}
 	return out
@@ -42,7 +42,7 @@ func TestThinkingStreaming(t *testing.T) {
 func TestThinkingStartWithoutContent(t *testing.T) {
 	m := testModel()
 	feedEvents(&m, client.Event{Type: "thinking_start", Payload: `{}`})
-	if len(m.pend) != 0 {
+	if len(m.lines) != 0 {
 		t.Errorf("空 thinking_start 不应产生行，got %v", roleTexts(m))
 	}
 }
@@ -81,7 +81,7 @@ func TestRenderThinking(t *testing.T) {
 		client.Event{Type: "thinking_update", Payload: `{"delta":"先想一下"}`},
 		client.Event{Type: "message_update", Payload: `{"delta":"这是回答"}`},
 	)
-	view := m.View()
+	view := m.sync().View()
 	thinkBody := strings.Index(view, "先想一下")
 	answer := strings.Index(view, "这是回答")
 	if thinkBody < 0 || answer < 0 {
@@ -118,7 +118,7 @@ func TestToolLinesInterleave(t *testing.T) {
 func TestToolFailureMark(t *testing.T) {
 	m := testModel()
 	feedEvents(&m, client.Event{Type: "tool_execution_end", Payload: `{"name":"bash","status":1}`})
-	if got := pendTexts(m); len(got) != 1 || !strings.Contains(got[0], "✗") {
+	if got := lineTexts(m); len(got) != 1 || !strings.Contains(got[0], "✗") {
 		t.Errorf("失败的工具应标 ✗，got %v", got)
 	}
 }

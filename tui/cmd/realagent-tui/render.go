@@ -1,20 +1,21 @@
-// 渲染层：行模型 + 折行 + scrollback 提交。
+// 渲染层：行模型 + 折行。
 //
 // 数据结构决定一切：整个界面只有一条 line 流（原始文本 + 角色），数据里永远
 // 没有 ANSI——样式在渲染的最后一刻才套上，所以同一份数据能按任意宽度重排。
+// 终端改宽历史跟着重排，就是这条性质的直接后果（ADR-0020）。
 //
-// 历史归终端管（claude code / codex 走法）：不进 altscreen，已定型的行用
-// tea.Println 打进终端原生 scrollback，Bubble Tea 只重绘底部「活动区」。
-// 滚动、选中、复制、搜索全是终端原生能力，退出后记录还在。
+// **屏幕整块归 TUI（altscreen），每帧全量重绘**（ADR-0020 取代 ADR-0008）：
+// scrollback 是一条只能追加的时间线，表达不了「换一个 agent 看」——B 在后台跑的
+// 那段时间它的行从来没被打进这个终端过，怎么翻都翻不到。
 //
-// 定型判据只有一条：**追加式文本的贪心折行是前缀稳定的**——往末尾加字不会
-// 改变前面的断点。于是「除最后一个折行外，其余折行都已定型」，没有特殊情况。
+// 随之消失的是「定型」：它存在的唯一理由是判断哪些行可以立刻 tea.Println 进
+// scrollback。没有 Println 就没有「已提交／未提交」这条边界，也就不需要那条
+// 「同一时刻只许一条 Println 在飞」的保序队列。
 package main
 
 import (
 	"strings"
 
-	"github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 )
@@ -63,8 +64,6 @@ func styleOf(role string) lipgloss.Style {
 }
 
 // prefixOf 返回角色前缀。前缀只出现在首折行，续行用等宽空格挂起缩进对齐。
-// 注意：只有前缀为空的角色（assistant / thinking）才会流式增长，
-// 这让「开着的行」在中途提交时不必操心前缀归属（见 model.freeze）。
 func prefixOf(role string) string {
 	switch role {
 	case "user":
@@ -123,107 +122,38 @@ func render(l line, width int) []string {
 	return out
 }
 
-// ==================== 行流的追加与定型 ====================
+// ==================== 行流的追加 ====================
 
-// emit 追加若干整行（自带 \n 则拆开）。整行天生是定型的。
+// emit 追加若干整行（自带 \n 则拆开）
 func (m *model) emit(role, text string) {
 	m.closeLine()
 	for _, s := range strings.Split(text, "\n") {
-		m.pend = append(m.pend, line{role: role, text: s})
+		m.lines = append(m.lines, line{role: role, text: s})
 	}
 }
 
 // stream 把流式增量续写到开着的行；遇 \n 起新行，角色变了先收尾再另起。
 func (m *model) stream(role, delta string) {
-	if !m.open || len(m.pend) == 0 || m.pend[len(m.pend)-1].role != role {
+	if !m.open || len(m.lines) == 0 || m.lines[len(m.lines)-1].role != role {
 		m.closeLine() // 换角色时也丢掉上一条的空尾行（理由同 closeLine）
-		m.pend = append(m.pend, line{role: role})
+		m.lines = append(m.lines, line{role: role})
 		m.open = true
 	}
 	parts := strings.Split(delta, "\n")
-	m.pend[len(m.pend)-1].text += parts[0]
+	m.lines[len(m.lines)-1].text += parts[0]
 	for _, s := range parts[1:] {
-		m.pend = append(m.pend, line{role: role, text: s})
+		m.lines = append(m.lines, line{role: role, text: s})
 	}
 }
 
-// closeLine 给开着的行收尾：它不再增长，下一次 freeze 即可进 scrollback。
+// closeLine 给开着的行收尾：它不再增长。
 //
 // 空的开着的行是"光标停在行首"，不是内容——增量以 \n 结尾时必然留下一个。
-// 流还开着时它无害（就是光标位置），一旦定型就成了 scrollback 里的一条空行，
+// 流还开着时它无害（就是光标位置），收工之后就成了历史里一条凭空多出来的空行，
 // 所以收尾时丢掉。emit 出来的空行不受影响：那种行从来不是 open 的。
 func (m *model) closeLine() {
-	if m.open && len(m.pend) > 0 && m.pend[len(m.pend)-1].text == "" {
-		m.pend = m.pend[:len(m.pend)-1]
+	if m.open && len(m.lines) > 0 && m.lines[len(m.lines)-1].text == "" {
+		m.lines = m.lines[:len(m.lines)-1]
 	}
 	m.open = false
-}
-
-// freeze 取出所有已定型的渲染行（交给 outbox 打进 scrollback），
-// 未定型的留在 m.pend 里继续由活动区重绘。
-//
-// 两级定型：整行级——除开着的末行外全部定型；折行级——开着的末行里，
-// 除最后一个折行外也已定型（贪心折行前缀稳定，追加不会改断点）。
-func (m *model) freeze() []string {
-	if m.width <= 0 || len(m.pend) == 0 {
-		return nil // 还没拿到窗口尺寸，先攒着，宽度对了再折行
-	}
-	n := len(m.pend)
-	if m.open {
-		n--
-	}
-	var rows []string
-	for _, l := range m.pend[:n] {
-		rows = append(rows, render(l, m.width)...)
-	}
-	m.pend = m.pend[n:]
-
-	// 开着的末行：把已定型的折行也吐出去，活动区永远只剩最后一个折行，
-	// 长段落流式输出时自然向上滚进 scrollback，不会撑爆活动区。
-	if m.open && len(m.pend) == 1 && prefixOf(m.pend[0].role) == "" {
-		if wrapped := layout(m.pend[0], m.width); len(wrapped) > 1 {
-			st := styleOf(m.pend[0].role)
-			for _, r := range wrapped[:len(wrapped)-1] {
-				rows = append(rows, st.Render(r))
-			}
-			m.pend[0].text = wrapped[len(wrapped)-1]
-		}
-	}
-	return rows
-}
-
-// ==================== scrollback 提交队列 ====================
-
-// printedMsg 是一批 Println 落地后的回执（outbox 用它串行化下一批）
-type printedMsg struct{}
-
-// outbox 保证提交进 scrollback 的行严格保序。
-//
-// tea.Cmd 各跑各的 goroutine，多条 Println 同时在飞就会乱序——记录一旦错乱
-// 无法挽回。于是立一条铁律：**同一时刻只许一条 Println 在飞**，其余排队。
-type outbox struct {
-	rows   []string
-	flying bool
-}
-
-func (o *outbox) push(rows []string) { o.rows = append(o.rows, rows...) }
-
-// flush 发出下一批（一次 Println 打完整批，批内保序），在飞则返回 nil 等回执。
-func (o *outbox) flush() tea.Cmd {
-	if o.flying || len(o.rows) == 0 {
-		return nil
-	}
-	batch := strings.Join(o.rows, "\n")
-	o.rows = nil
-	o.flying = true
-	return tea.Sequence(
-		tea.Println(batch),
-		func() tea.Msg { return printedMsg{} },
-	)
-}
-
-// done 收回执，接着发下一批
-func (o *outbox) done() tea.Cmd {
-	o.flying = false
-	return o.flush()
 }

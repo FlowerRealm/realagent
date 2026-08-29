@@ -9,7 +9,7 @@ namespace realagent {
 
 ApprovalCoordinator::~ApprovalCoordinator() { cancel_all(); }
 
-Verdict ApprovalCoordinator::await(const std::string &tool_name,
+Verdict ApprovalCoordinator::await(const std::string &agent, const std::string &tool_name,
                                    const std::string &params)
 {
     std::shared_ptr<PendingApproval> p;
@@ -17,13 +17,18 @@ Verdict ApprovalCoordinator::await(const std::string &tool_name,
         std::lock_guard<std::mutex> lk(mtx_);
         p = std::make_shared<PendingApproval>();
         p->id = "appr_" + std::to_string(next_id_++);
+        p->agent = agent;
         p->tool_name = tool_name;
         p->params = params;
         pending_[p->id] = p;
     }
     // 发 permission_request（入事件队列 → 推送流，事件循环线程投递）
+    // 审批请求不属于任何 agent 的"视图"，它是全局的：TUI 不管正在看哪个 agent 都要弹，
+    // 靠帧里的 agent_id 说明是谁在问。按"当前看着谁"过滤，会让一个没人看的 agent
+    // 静默地拿不到任何权限，而用户根本不知道有人问过（ADR-0019 §8）
     nlohmann::json ev;
     ev["id"] = p->id;
+    ev["agent_id"] = agent;
     ev["tool"] = tool_name;
     if (nlohmann::json args = nlohmann::json::parse(params, nullptr, false); !args.is_discarded())
         ev["params"] = std::move(args);
@@ -54,6 +59,38 @@ void ApprovalCoordinator::respond(const std::string &id, bool allow)
     p->cv.notify_one();
 }
 
+/* 按 deny 唤醒并从表里摘掉。摘下来再唤醒：拿着 pending_ 的锁去碰每条的 mtx，
+ * 就是在一把锁里等另一把。 */
+static void release(std::vector<std::shared_ptr<PendingApproval>> &all)
+{
+    for (auto &p : all)
+    {
+        std::lock_guard<std::mutex> lk(p->mtx);
+        p->verdict = Verdict::Deny;
+        p->responded = true;
+        p->cv.notify_all();
+    }
+}
+
+void ApprovalCoordinator::cancel(const std::string &agent)
+{
+    std::vector<std::shared_ptr<PendingApproval>> mine;
+    {
+        std::lock_guard<std::mutex> lk(mtx_);
+        for (auto it = pending_.begin(); it != pending_.end();)
+        {
+            if (it->second->agent != agent)
+            {
+                ++it;
+                continue;
+            }
+            mine.push_back(it->second);
+            it = pending_.erase(it);
+        }
+    }
+    release(mine);
+}
+
 void ApprovalCoordinator::cancel_all()
 {
     std::vector<std::shared_ptr<PendingApproval>> all;
@@ -62,13 +99,7 @@ void ApprovalCoordinator::cancel_all()
         for (auto &[_, p] : pending_) all.push_back(p);
         pending_.clear();
     }
-    for (auto &p : all)
-    {
-        std::lock_guard<std::mutex> lk(p->mtx);
-        p->verdict = Verdict::Deny;
-        p->responded = true;
-        p->cv.notify_all();
-    }
+    release(all);
 }
 
 } // namespace realagent

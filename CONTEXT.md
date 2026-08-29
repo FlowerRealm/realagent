@@ -19,9 +19,38 @@ _Avoid_: `iteration`、`round`
 
 ### **Tool（工具）**:
 
-LLM 可调用的具名函数。带名称、描述、参数 Schema（JSON Schema）、危险标记，执行后返回结构化结果。core 内置静态表 `read` / `edit` / `bash`（`core/src/tools/tools.cpp`），LLM 见到的就是这三个短名。
+LLM 可调用的具名函数。带名称、描述、参数 Schema（JSON Schema）、危险标记，执行后返回结构化结果。core 内置一张静态表（`core/src/tools/tools.cpp`）：文件与命令那三个 `read` / `edit` / `bash`，加上多 agent 那两个 `spawn` / `send_message`（[[ADR-0019]]）。
 
-_Avoid_: `function`、`command`（Tool ≠ 用户斜杠命令）
+后两个的**实现**在 `Executor` 而不是 `tools.cpp`——它们要认识 `Agents`，而 `tools/` 在 `agent/` 下面，反过来包含就是层级倒挂。**定义仍在同一张表里**：LLM 看见的清单只有一份。
+
+`edit` 只有一个操作：**把第 `line` 行换成 `new_text`**（`line` 与 `hash` 见 [[行 hash（Line Hash）]]）。四种用法，不是四个操作——
+
+| 用法 | `line` | `new_text` |
+| --- | --- | --- |
+| 替换一行 | 给 | 非空 |
+| 换成多行 | 给 | 带换行 |
+| 删除 | 给 | 空串 |
+| 创建 / 覆写整个文件 | **不给** | 内容 |
+
+最后一行保住「**write 不单独存在**」。参考实现（`hashline` / `dsh-better-edit` / hermes-agent 提案）都另留了一个 `write` 工具，本项目不跟。
+
+`edits` 是一个数组，每条自带 `file_path`，**一次调用可跨多个文件；逐条执行、遇错即停**。
+
+_Avoid_: `function`、`command`（Tool ≠ 用户斜杠命令）、`write`、`SWAP`/`DEL`/`INS`（把一个操作拆成四个关键字，模型就有四次选错的机会）
+
+### **行 hash（Line Hash）**:
+
+一行内容的指纹，`read` 连同行号一起印在每行开头（`142 29c 正文`），`edit` 用 `line` 与 `hash` 两个字段指位置。**两个值，不拼成一个串**——拼了就得解析，而这里本来一次解析都不需要。
+
+- **只算这一行**，不带上下文。带邻域会让「改第 1 行」作废第 2 行的 hash，于是同一批里的相邻行必然失败，于是要引入两阶段校验、按文件分组、范围重叠检查——**一整串机制的源头就是那个邻域**。
+- **空白不参与**：跑一遍格式化不该让它变（本仓库一个月内真发生过一次，见 `.git-blame-ignore-revs`）。
+- **不防撞、不做全表、不做回捞**：判断只发生在行号指定的那一行上，文件别处有没有同样的 hash 与这次判断无关。3 个十六进制字符，4096 种取值——这是 agent 场景，不是密码学场景。
+
+判断就是一句 `if`：**按行号取那一行，算它的 hash，一致就改，不一致就报错让模型重读**。逐条应用天然正确，因为改第 1 行不影响第 2 行的 hash。代价是文件别处增删行会让行号漂移、那些 hash 一律作废，模型得重读一次——这是「不做回捞」的定价。
+
+它让「这个文件被改过」**在需要知道的那一刻自己暴露**，而且不问改它的是谁——另一个 [[Agent]]、人手动改的、`git checkout`、格式化钩子，一视同仁。因此 core **不记「谁最后写了哪个文件」，也不在文件变更时通知任何人**：通知机制天生漏掉人为修改，hash 一个都不漏。
+
+_Avoid_: `old_string`（已被取代，不并存）、`anchor`（起草时的叫法，它当时还带邻域和全表唯一性）、`ETag`、`整文件 hash`
 
 ### **Event（事件）**:
 
@@ -30,15 +59,19 @@ Loop 向客户端发布的生命周期消息。典型序列：
 
 事件是**异步事件流**的一部分（ADR-0002）：生产方与消费方解耦。异步引擎的动机是**多 agent 并发编排**，而非单 agent 工具并行。
 
-出口只有一个：agent 线程 `emit` 入队，事件循环线程 flush 到推送流。没有扇出、没有订阅者——[[ADR-0016]] 之后事件的去处只有客户端。
+出口有两条，**都不是订阅**：agent 线程 `emit` 入队、事件循环线程 flush 到推送流（→ 客户端）；agent 跑完时沿自己的入边投递完成通知（→ 其他 agent 的[[收件箱（Inbox）]]）。
 
-_Avoid_: `callback`（事件是广播的，回调是一对一的）、`订阅`（已无插件订阅者）
+> 2026-08-28 修订：原文写「出口只有一个……没有扇出、没有订阅者」。第二条出口是多 agent 带来的，但它**不是把订阅者请回来**——没有人在别人身上注册回调，投递的依据是[[边（Edge）]]，而边是投递方自己那头的一条数据。[[ADR-0016]] 赶走的是插件在 core 里登记的那种订阅表，那东西仍然不存在。
+
+_Avoid_: `callback`（事件是广播的，回调是一对一的）、`订阅`（没有人在别人身上注册任何东西）
 
 ### **Multi-Agent（多代理编排）**:
 
-异步事件流的核心动机：多个 agent 实例并发调度（如主 agent 派生子任务）。每个 agent 内部仍保持工具严格顺序执行。
+异步事件流的核心动机：多个 [[Agent（代理）]] 实例并发调度。每个 agent 内部仍保持工具严格顺序执行。
 
-_Avoid_: `sub-agent`（特指派生出来的子 agent，Multi-Agent 是泛指）
+agent 之间的关系是**有向图**，不是树（[[ADR-0019]]）：一种[[边（Edge）]]，通过[[收件箱（Inbox）]]通信。「主 agent 派生子任务」只是这张图最常见的一种形状（两条边），不是它的结构。
+
+_Avoid_: `sub-agent`、`child`、`父子`（图里只有出边邻居；「谁创建了谁」不是一类边）、`agent 树`
 
 ### **Background（后台运行）**:
 
@@ -109,22 +142,106 @@ core 内部的职责分区（`llm` / `agent` / `tools` / `server`），以目录
 
 _Avoid_: `package`、`library`（指 core 内部模块时）
 
+### **Agent（代理）**:
+
+一条 [[Agent Loop]] 的宿主：一个 [[工作目录（Workdir）]]、一个[[收件箱（Inbox）]]、一组出[[边（Edge）]]、一个 [[Session]]。core 里同时活着多个，天然并发，按[[组（Group）]]归属于各个客户端。
+
+**「不在会话列表里显示」不是一个开关，是落点的后果**：会话清单是扫会话目录扫出来的（`Session::list()`），而 TUI 创建的 agent 落 `sessions/`、`spawn` 出来的落 `sessions/sub/`，清单只扫顶层（[[ADR-0021]]）。给对话取名那种杂活 agent 落在 `sub/` 里——**它有记录，只是不进列表**。两边都落盘是刻意的：不落盘的那份内存里丢不掉，而且出了事查不了。
+
+**core 不为任何 agent 过滤 [[Event]]**：全推，每帧带 `agent_id`，客户端认识哪个渲染哪个。因此杂活 agent 失败时用户看得见——这不需要为它设计任何东西，只需要不设计过滤。
+
+**三个状态**：
+
+- **运行中** —— 正在推进一个 [[Turn]]
+- **idle** —— 跑完了，等[[收件箱（Inbox）]]里的下一条（人的输入、别的 agent 的消息、别的 agent 的完成通知）
+- **close** —— 彻底关了，节点信息清理掉
+
+**close 不等于会话消失**：agent 关掉后那个 [[Session]] 文件还在，下次可以被打开成一个新 agent。
+
+Agent 不是客户端的东西——**没人盯着也照跑**。但它有所有者：[[组（Group）]]关掉时，组内 agent 全部 close（[[ADR-0021]]）。
+
+**close 时没有"落历史"这个动作**——历史一直在落（`Session::append` 每条消息即时追加）。close 只是关掉文件句柄。攒到 close 再写会把「崩溃丢最后一条」升级成「崩溃全丢」，而 agent 可以 idle 好几天。
+
+**idle 时对话历史不留在内存里。** 判据只有一条：**内存里那份是不是副本**。盘上那份与内存那份逐字相同（见 [[Session]] 的「同形则恢复即读取」），内存那份是纯副本，丢掉不丢信息，下次醒来重新读回来——走的就是 `resume` 那行代码。
+
+**每个 agent 都落盘，正是为了这条判据成立**（[[ADR-0021]]）：不落盘的那个，内存那份是唯一的一份，丢不得，于是常驻——而 subagent 恰恰是 idle 最久的那批。
+
+_立刻丢，不设「idle N 秒后丢」的定时器_：那是又一个可调参数、又一个中间状态、又一个刚丢完就来消息的抖动。
+
+TUI 只是选一个连上去看。
+
+_Avoid_: `会话`（[[Session]] 是盘上的记录，Agent 是内存里正在跑的东西，一个 Session 可以先后被两个 Agent 打开）、`任务`、`worker`
+
+### **组（Group）**:
+
+一个客户端拥有的那些 [[Agent（代理）]]。**组的单位就是客户端**，一个客户端一个组，**组没有名字**——你只看得见自己那一组，不需要指认别的组。
+
+`spawn` 出来的 agent 属于创建者所在的组。这不是「继承」这种需要判断的东西：组就是所有权边界，一个 agent 不可能属于别的组。**[[边（Edge）]]不跨组**（自动成立——`spawn` 的 `peers` 只能填创建者认识的，而它只认识同组的）。
+
+**隔离是硬的**：跨组的 agent id 一律当「无此 agent」，不区分「不存在」与「不是你的」——区分了就等于告诉调用方别的组里有什么。
+
+**生命周期**：客户端主动建（第一次 `POST /agent`），退出前显式关，**连接断开满 60 秒即关**（QUIC 原生 `max_idle_timeout` 探连接死活，应用层只记一个 60 秒的表）。关组的顺序是先 `interrupt` 再逐个 close——直接 close 一个在跑的 agent，它的线程会往一个已拆掉的[[收件箱（Inbox）]]里写。
+
+于是**core 里不存在没有所有者的 agent**。代价是「关掉终端让 agent 跑一夜」这个用法明确不做（[[ADR-0021]]）。
+
+_Avoid_: `session`（[[Session]] 是盘上的一个文件，组是内存里一批 agent 的所有权）、`workspace`、`租户`
+
+### **边（Edge）**:
+
+`A → B` 表示 **A 知道 B 存在，能往 B 的[[收件箱（Inbox）]]投消息**。有向；双向通信就是两条边。**只有一种边，边上不带类型**——「A 创建了 B」与「A 想给 C 发消息」是同一条边。
+
+**没有边就不知道对方存在。** core 不提供任何"列出所有 agent"的能力给 agent，边因此只能在 `spawn` 时定下，不能靠查询产生。**派生子 agent 时，模型要决定它的全部出入边**（`in_edges` / `out_edges` 两个列表）——两边的 id 都必须是派生方自己有出边的，因为那是在授予能力，授不出自己没有的。两个列表填同一组人就是 teamwork（互相能发），`in_edges` 只填自己就是工人（干完回话、不许打扰），两个都空就是派出去不管。
+
+模型**不需要邻居清单**：`agent_id` 本来就在它的对话历史里（`spawn` 的返回值、别人消息上的 `[来自 …]` 标记）。**图只用于校验，不用于发现。**
+
+单向边是完整合法的形态：B 收得到 A 的消息，但 B 没有 `B → A`，于是**B 无从知道这条消息是哪个 agent 发的，还是人发的**。人类（TUI）不是图上的节点，人发消息正是这种没有反向边的形态。
+
+完成通知**逆边回流**：`A → B` 的语义是「A 关心 B」，所以 B 跑完时通知的是 A。消息顺着边走（我主动找他），完成通知逆着边回来（他的事我关心）——同一条边，两个方向，一个语义。
+
+_Avoid_: `child`、`父子`、`树`（树是早先的说法，2026-08-28 改为有向图）、`订阅`（订阅是注册在别人身上的回调，边是自己这头的一条数据）
+
+### **收件箱（Inbox）**:
+
+一个 [[Agent]] 待处理消息的队列，**三种来源一个队列**：人发来的（`POST /message`）、别的 agent 用 `send_message` 工具投的、别的 agent 跑完时沿入边广播的完成通知。
+
+Agent 主循环不是"被喂一句用户输入"，是**从收件箱取下一条**——三种来源在主循环里不产生任何分支。**一次取一条，不批量取走**：等不等是模型的判断，攒成一批等于替它决定了「这几条要一起看」。
+
+「跑完通知」那一路仍然是一个 hook（跑完时触发的行为），但**它没有自己的注册表**：订阅者集合由[[边（Edge）]]推导——跑完就扫自己的入边、逐个投递。建边即注册，没有「注册 hook」这个动作，也就没有第二份数据可漂。
+
+> 实况注（2026-08-28）：已全部落地。收件箱与线程内化进 `Agent`（`deque` + `mutex` + `condition_variable` + 一条 `std::thread`）；`main` 里那个「每条消息起一条 detach 线程 + 一把全局 `agent_mtx`」的写法已删除，锁归 Agent 自己（`Agent::try_lock`）。图在 `Agents`（`core/src/agent/agents.cpp`）：`unordered_map<id, unordered_set<id>>` 一张出边表，反向查扫全表。`spawn` / `send_message` 实现在 `Executor` 而不是 `tools.cpp`——它们要认识 `Agents`，而 `tools/` 在 `agent/` 下面，反过来包含就是层级倒挂；两个工具的**定义**仍在同一张静态表里，LLM 看见的清单只有一份。
+>
+> 落地时撞出两个**必然**（不是竞态）的错误，都是「持着一把锁去 join 一条需要这把锁的线程」：`~Agents` 销毁 map 时 join 到的线程正要拿图锁投完成通知（use-after-free）；`close()` 持锁 `erase` 触发 join 同理（死锁）。修法一样：先在锁里把对象从表里摘出来，放开锁，再让它析构。判据是**窗口由某个「等待」撑开就必然发生**——`join` 等的就是那条线程。
+
+_Avoid_: `订阅者列表`、`监听器注册表`（hook 有行为，没有自己的名单）、`消息队列`（那是中间件，这里是 agent 自己的一个成员）
+
+### **工作目录（Workdir）**:
+
+一个 [[Agent]] 干活的地方。**创建 agent 时必传，没有默认值、不从 cwd 取**。它决定三件事：会话文件落在哪（`<workdir>/.realagent/sessions/`）、`read`/`edit` 的相对路径从哪算起、`bash` 起来时 `chdir` 到哪。
+
+> 实况注（2026-08-28）：三条都已落地。`Agent` 持有 `workdir_`，透传给 `Session` 与 `Executor`；`run_tool` 收一个 `workdir` 参数，`resolve()` 拿它解析相对路径，`do_bash` 在 `fork` 之后 `execl` 之前 `chdir` 过去。`POST /agent` 也已落地，`workdir` 由客户端给：**core 启动时 agent 数为 0，不自动建任何 agent**——自动建就得替用户猜 workdir。
+
+core 是一台机器一个进程，它自己的 cwd 是"启动它那个 shell 当时在哪"——一个跟任何 agent 都无关的数字。**cwd 因此不是一个概念**：core 里不存在"当前目录"，只存在"某个 agent 的工作目录"。
+
+_Avoid_: `cwd`、`当前目录`、`项目目录`（"项目"是人的说法，core 只认这个 agent 被创建时给的那个路径）
+
 ### **Session（会话）**:
 
 一段连续的对话记录，含消息历史、状态、元数据。以 **JSONL 文件**持久化（一行一条消息/事件），目录结构支持会话树（分支/fork）。人可读、可 diff、可进 git。
 
 _Avoid_: `conversation`（除非与 Session 区分出明确差异）
 
-> 实况注（2026-08-16）：已落地（`core/src/agent/session.cpp`），落点 `.realagent/sessions/<id>.jsonl`（相对 cwd，会话按项目分家）。id 形如 `20260816-153739-31d3`——时间戳 + 4 位随机，字典序即时间序，所以清单不需要索引文件。
+> 实况注（2026-08-16 / 2026-08-28）：已落地（`core/src/agent/session.cpp`），落点 `<workdir>/.realagent/sessions/<id>.jsonl`。**已改成按 [[工作目录（Workdir）]] 取**：`Session` 的构造函数与 `Session::list()` 都收一个目录参数，`Config::session_dir()` 已删除——core 进程没有"当前目录"这个概念。id 形如 `20260816-153739-31d3`——时间戳 + 4 位随机，字典序即时间序，所以清单不需要索引文件。
 > **一行 = 抽象对话里的那一条消息，原样**（`{"role":..., "content":[...]}`），没有外层信封。早先设计的"type 分 user/assistant/tool_call/tool_result + id/ts/model 信封"没有采用：那是抽象对话形状定下来之前的设计，不同形就得写一对转换函数，而转换函数正是丢字段的地方（thinking 的 signature、一条 assistant 消息里的多个 tool_use）。call_id 关联本来就在块里。
 > 清单元数据也不另存：条数 = 行数，标题 = 第一条 user 消息现取，时间 = 文件 mtime——没有第二份真相，也就没有对不上的那天。
 > [[Session Tree]]（fork/分支）仍未做，第一版范围外。
 
 ### **Session Tree（会话树）**:
 
-会话间的父子关系，支持从任一会话 fork 分支。JSONL 文件目录结构天然表达。
+会话间的父子关系，支持从任一会话 fork 分支。JSONL 文件目录结构天然表达。仍未做，第一版范围外。
 
-_Avoid_: `branch`（Git 语义混淆）
+**与 agent 之间那张有向图（[[边（Edge）]]）无关**：这里说的是盘上记录的血统，那里说的是内存里正在跑的 agent 谁能给谁发消息。两张结构，两个层次，不要混。
+
+_Avoid_: `branch`（Git 语义混淆）、`agent 树`（agent 之间是图，不是树，也不是这个东西）
 
 ### **Thinking（思考）**:
 
@@ -182,19 +299,27 @@ _Avoid_: `statusline`（那是输入框下方那条常驻栏）
 
 ### **活动区（Live Region）**:
 
-TUI 底部由 Bubble Tea 每帧重绘的区域：未定型行 + 审批框 + [[子面板（Panel）]] + 斜杠菜单 + 读秒状态行 + 输入框。其上方是**终端原生 scrollback**——已定型的行由 TUI 打进去后不再归 TUI 管（[[ADR-0008]]）。活动区绝不能高过终端。
+TUI 每帧重绘的区域。**[[ADR-0020]] 之后它就是整个屏幕**——TUI 进 alternate screen，自建 viewport，不再有「底部活动区 / 上方终端 scrollback」这条边界。
 
-_Avoid_: `视口`、`viewport`（本项目不自建滚动缓冲）
+> 2026-08-28 修订：原文是「TUI 底部由 Bubble Tea 每帧重绘的区域……其上方是终端原生 scrollback，已定型的行打进去后不再归 TUI 管（[[ADR-0008]]）」。多 agent 之后 scrollback 表达不了「换一个源」——切到一个在后台跑过的 agent，它的行从来没被打进这个终端，怎么翻都翻不到。
+
+内容按 `line{role, text}` 组织，数据里不含 ANSI，样式在渲染最后一刻套上。**渲染后的行一行都不存**——每帧按当前宽度重折，所以改宽历史跟着重排。
+
+常驻的是**当前这个 agent 的那份行流**：切 agent 时整个丢掉，从 `GET /history` 重读一遍（[[ADR-0020]] 起草时写的是"只存一个索引"，落地时没做，理由记在那份 ADR 里）。要的那条不变量成立：**行缓冲与 agent 数量无关**——20 个还是 200 个 agent，内存里都只有正在看的那一个。
+
+_Avoid_: `scrollback`（终端的那条 buffer 已不再承载会话历史）
 
 ### **子面板（Panel）**:
 
 斜杠命令的第二层选择（参考 codex cli）：`/model` `/resume` `/statusline` 无参执行后，用同一份结果载荷开一列可选项——↑/↓ 选择、Enter 确认、Esc 取消，模态（开着时按键只喂它）。**确认 = 把该项的整条命令写进输入框走正常提交**，没有第二套提交路径；面板也不新增端点，数据就是命令回包里的 `data`。造不出面板（无数据/坏载荷）就退回文本清单。
 
-### **定型（Freeze）**:
+### ~~**定型（Freeze）**~~ —— 已作废（[[ADR-0020]]，2026-08-28）:
 
-一行渲染内容不再变化、可以打进 scrollback 的状态。判据只有一条：**追加式文本的贪心折行前缀稳定**，故除最后一个折行外全部定型（[[ADR-0008]]）。
+曾指「一行渲染内容不再变化、可以打进 scrollback 的状态」，判据是追加式文本的贪心折行前缀稳定（[[ADR-0008]]）。
 
-_Avoid_: `finalize`（原指把 streaming 消息收进列表，行模型下已无此概念）
+**这个概念存在的唯一理由是判断哪些行可以立刻 `tea.Println` 进 scrollback。** 进了 altscreen 就没有 `Println`，整屏每帧重绘，也就没有「已提交／未提交」这条边界。同时作废的还有 ADR-0008 那条「同一时刻只许一条 `Println` 在飞」的 `outbox` 排队铁律，以及压这条不变量的 `TestFreezeIncrementalEqualsWhole`。
+
+_Avoid_: `定型`、`提交`、`freeze`、`finalize`（都不再指任何东西）
 
 ---
 
@@ -206,6 +331,13 @@ _Avoid_: `finalize`（原指把 streaming 消息收进列表，行模型下已�
 - 一个 **Model Tier** 解析为一个模型名，经 `dialog["model"]` 传给造请求那一段；协议层不感知档位
 - **Cost** 按本次模型查**模型数据表**算出，经 **status_update** 帧下发，落点是 **Status（状态行）**——不是 **Statusline（状态栏）**
 - **Tool** 是 core 里的一张静态表；`dangerous` 的那些经 `permission` 配置裁决后才执行
+- 一个 **Agent** 有一个 **工作目录**（必传）、一个 **收件箱**、一组出 **边**、一个 **Session**（每个都落盘，只是落点分 `sessions/` 与 `sessions/sub/`）
+- 一个**组**拥有一批 **Agent**，组的单位就是客户端；跨组的 agent id 一律当「无此 agent」
+- `A → B` 这条**边**同时是三样东西：A 知道 B 存在、A 能给 B 发消息、B 跑完时通知 A（完成通知**逆边**回流——边指向你关心的那个 agent）
+- **hook** 的订阅者名单由**边**推导，不单独存；「注册 hook」= 建一条边
+- 一个 **Session** 可以先后被两个 **Agent** 打开（close 之后再 `POST /agent {session_id}`）；反过来一个 Agent 恰好一个 Session
+- 一个**客户端**拥有一个**组**，一个**组**拥有若干 **Agent**；**边**只在组内；跨组不可见、不可达
+- **read** 印出行号与**行 hash**，**edit** 用这两个值指位置；改一行不影响别行的 hash
 
 ## Example dialogue
 
@@ -219,6 +351,10 @@ _Avoid_: `finalize`（原指把 streaming 消息收进列表，行模型下已�
 > **B：** 往 `core/src/tools/tools.cpp` 的静态表里加一条，写个函数。从前这要编一个动态库、写 100 行 ABI 样板、给工具名加 `<容器名>_` 前缀——那条路服务过 0 个第三方，所以拆了。
 
 ## Flagged ambiguities
+
+- **「树」**曾同时指两样东西（agent 之间的血统 / 会话 fork 的血统）——已解决：agent 之间是**有向图**（[[边（Edge）]]，[[ADR-0019]]），[[Session Tree]] 是盘上的会话血统且仍未做，两条 _Avoid_ 互指。
+- **「hook」**（一对多的完成回调）——已澄清：**hook 是行为，边是数据**，两者不是一回事。hook 保留，但**没有自己的订阅者名单**——名单由边推导（跑完扫入边、逐个投递），所以不存在「边删了名单还在」的漂移。见 [[ADR-0019]] 第 5 节。
+- **「cwd / 当前目录」**——**不再是一个概念**：core 是全机单实例，它的 cwd 与任何 agent 都无关。只有[[工作目录（Workdir）]]。
 
 - **"statusline" / "状态行"**指两个不同的东西（输入框下方常驻栏 vs 活动区读秒行）——已解决：**Statusline** 与 **Status** 分列，各自的 _Avoid_ 互指。
 - **"模型重名"**曾被当作冲突（后写覆盖）——已解决：一次运行只有一个端点，表里配的就是这条路径的价，不存在两条路径压进一个键的场合（见 [[Model]]）。
@@ -242,15 +378,24 @@ _Avoid_: `finalize`（原指把 streaming 消息收进列表，行模型下已�
 - 日志：spdlog（第三方依赖）。
 - core 第三方依赖：libcurl + spdlog 两个（FTXUI 属 TUI 层）。
   - 实况注（2026-08-28）：需要 find_package 的是**三个**——libcurl、spdlog、quiche（`core/CMakeLists.txt`）。JSON 是 nlohmann/json 3.12.0，单头文件 vendored 在 `core/include/json.hpp`，不必安装、不必链库。括号里的 FTXUI 是 ADR-0007 之前"TUI 也用 C++"方案的残留，本项目**没有也不会**依赖它（TUI 是 Go + Bubble Tea）。
-- TUI：Go + Bubble Tea（ADR-0007）。参考 claude code / codex 客户端外观，**有状态栏**（见 [[Statusline（状态栏）]]）。原定"无状态栏"，后反转并已完整实现（core 侧 `GET /statusline` + `statusline` 帧，TUI 侧 `tui/cmd/realagent-tui/statusline.go`）；**反转无 ADR 记录，且与现存 ADR 冲突**——`docs/adr/0007-tui-go-bubbletea.md:34` 至今写着"无状态栏（用户明确）"，无 ADR 取代它。理由未知。
-- TUI 渲染：历史归终端管，不进 altscreen（ADR-0008）——定型的行打进终端原生 scrollback，Bubble Tea 只重绘底部活动区。
-- 配置约定：项目级 `.realagent/` + AGENTS.md；全局 `~/.realagent/`。
-  - 实况注（2026-08-25）：**项目级那一半没落地**。`settings.json` 只读 `~/.realagent/settings.json`（`core/src/config.cpp` 明写"唯一的覆盖来源，不看 cwd"）。`extensions/` 目录随 [[ADR-0016]] 一并作废。唯一真按项目分家的是会话目录 `.realagent/sessions`（相对 cwd）。
+- TUI：Go + Bubble Tea（ADR-0007）。参考 claude code / codex 客户端外观，**有状态栏**（见 [[Statusline（状态栏）]]）。原定"无状态栏"，后反转并已完整实现（core 侧 `GET /statusline` + `statusline` 帧，TUI 侧 `tui/cmd/realagent-tui/statusline.go`）。ADR-0007 正文第 34 行仍写着"无状态栏（用户明确）"，紧跟其后的实况注（2026-08-16）已注明该条被推翻——**正文与注不一致是有意保留的**：ADR 记录的是当时怎么想的，注记录的是后来发生了什么。
+- TUI 渲染：~~历史归终端管，不进 altscreen（ADR-0008）~~ —— **已推翻**（[[ADR-0020]]，2026-08-28）。进 altscreen + 自建 viewport；**不开 mouse mode**（开了终端原生选中/复制会整个失效，bubbletea issue #162），滚动绑键盘、滚轮靠终端的 alternate scroll 转方向键。行不常驻内存，从会话记录读、动态渲染，改宽可重排。新增 `GET /agent/<id>/history`，**返回事件帧序列**（不是抽象对话消息）——TUI 复用同一个渲染器，不写第二份。
+  - 接缝在「最后一条已落盘的消息」：历史走端点，正在流的走事件帧。subagent 的历史同样读得到（它落在 `sessions/sub/`，只是不进会话清单）。
+  - 换掉的东西：退出即消失、不能 `tee`/管道、滚出屏幕要滚回来才能选。换来的：切 agent 可行、翻得到没在看的时段、改宽能重排、删掉「定型」与 `outbox` 两套机制。
+- 配置约定：**只有全局 `~/.realagent/`**。~~项目级 `.realagent/settings.json`~~ 已砍（2026-08-28，从未落地）：`core/src/config.cpp` 明写「唯一的覆盖来源，不看 cwd」，而 [[ADR-0019]] 之后 core 连 cwd 这个概念都没有了，项目级配置该按哪个 [[工作目录（Workdir）]]取也答不上来——同一个 core 里 N 个 agent，N 份项目配置合并给谁用？`extensions/` 随 [[ADR-0016]] 作废。真按项目分家的只有会话目录（`<workdir>/.realagent/sessions`）。
 - 上下文压缩：第一版不做。靠最大上下文模型硬撑，会话满则开新会话；后期可加 auto-compact。
 - Steering：第一版只支持中止（abort），不支持中途插话。插话（steering queue）后期基于异步引擎再加。
 - 会话管理：第一版支持新建/恢复/列表，无 fork/树导航。
-- 多 Agent：第一版单 agent，事件流引擎按可并发设计预留多 agent 编排接口（第二版里程碑）。
-- 内置工具（第一版）：**read / edit / bash**，core 里一张静态表（`core/src/tools/tools.cpp`）。write 不单独存在——write 是 edit 的 `+x-0` 特例（空文件追加 = 创建），LLM 创建文件用 edit。
+- 多 Agent：~~第一版单 agent，预留接口（第二版里程碑）~~ —— **第二版即本轮**（[[ADR-0019]]，2026-08-28）。core 一台机器一个实例（端口即锁，不加 pid 文件）；agent 创建必传 [[工作目录（Workdir）]]；agent 之间是[[边（Edge）]]构成的有向图；通信与完成通知统一走[[收件箱（Inbox）]]，没有 hook 注册表；三状态（运行中 / idle / close），idle 丢内存里的对话历史；[[Event]] 全推带 `agent_id`，core 不过滤；图不落盘。
+- Agent [[组（Group）]]（[[ADR-0021]]）：**组的单位是客户端**，一个客户端一个组、组无名、隔离硬（跨组 id 一律当「无此 agent」）、边不跨组。生命周期 = 客户端主动建 + 退出显式关 + **连接断开满 60 秒即关**（QUIC 原生 idle timeout 探活，应用层一个表挂在 `on_tick`）。core 里不存在没有所有者的 agent；代价是「关掉终端让 agent 跑一夜」不做。
+  - 「agent 没有客户端也跑」缩小为「**subagent 没人盯着也跑**」——客户端连着，只是在看同组别的 agent。
+  - **留不留记录由「谁创建的」决定，不是参数**：TUI 创建的落 `sessions/`（进清单），`spawn` 出来的落 `sessions/sub/`（不进清单）。`spawn` 因此没有 `persist` 参数。
+  - `POST /agent` 是唯一创建入口，`spawn` 工具走同一个函数；`POST /message` 与 `POST /interrupt` 加必填 `agent_id`。
+  - `agent_mtx` 从全局一把变成每 agent 一把；ADR-0017 的 `try_lock` 规矩不变。
+  - `Pricing` 从 `Agent` 成员移进 `CoreContext`——它是进程级只读数据，按值放在 agent 里就是 N 份模型表。
+- 内置工具（第一版）：**read / edit / bash**，core 里一张静态表（`core/src/tools/tools.cpp`）。write 不单独存在——write 是 edit 的特例（空范围 = 创建），LLM 创建文件用 edit。
+  - 实况注（2026-08-28）：`edit` 改为**行号 + [[行 hash（Line Hash）]]**，`old_string` 废除（[[ADR-0018]]）。一个操作（把第 `line` 行换成 `new_text`）四种用法；`edits` 是数组，可跨多文件，逐条执行、遇错即停、报错说清停在第几条。`+x-0` 那个写法随 `old_string` 一起没了，但 write 不单独存在这条结论没变。
+  - `read` **不限大小、不截断、不分页**：本地读一遍内存，限制的是不存在的问题。`bash` 的 50KB 截断保留——那条是管道，性质不同。
 - Provider（第一版）：只做 `/v1/messages` 协议，目标模型 DeepSeek。换供应商 = 改 `base_url`，不装东西。
 - 权限（第一版）：配置键 `permission`——`ask`（默认）/ `allow-all` / `deny`，一个 switch（[[ADR-0016]]）。`allow-all` 只为打通链路，非真实安全。
 - 审批链路：core 永远是发起方。裁决为 ask 时 core 向用户交互界面（TUI/gui）发询问，界面回传裁决。gui 与 TUI 是平等的 HTTP 客户端，接口按多客户端设计。
@@ -273,7 +418,7 @@ _Avoid_: `finalize`（原指把 streaming 消息收进列表，行模型下已�
   - 实况注（2026-08-25）：`/plugins` 与 `/provider` 随 [[ADR-0016]] 删除。`/quit` 与 `/statusline` **不归 core**——退出的是客户端进程，展示偏好是客户端的事，两者都是 TUI 本地命令。插件可注册命令这条从设计到废除，实际提供过命令的插件数是 0。
 - 通信协议：见 `docs/PROTOCOL.md`（可靠流请求-响应 + 推送流，全可靠 + 0-RTT）。
 - 架构：core 为常驻服务，客户端（TUI/未来 gui）通过 **QUIC/HTTP3** 连接（ADR-0006）。REST 语义（POST /message、POST /approval-response 等）；推送流为 HTTP/3 长生命周期单向流（SSE 语义），**全可靠**（增量与事件无差别，QUIC 可靠流原生保证，无自建确认机制）。0-RTT 快握手。支持公网部署。
-- QUIC 库：core 用 **Cloudflare quiche**（QUIC + HTTP/3 一体，`core/CMakeLists.txt:17-19`）；TUI 用 quic-go。msquic 于 2026-08-09 被弃（纯传输层无 H3 语义），ADR-0006 当时记的替代品是 ngtcp2 + nghttp3，但落地的是 quiche——**此次换库无 ADR 记录，理由未知**（ADR-0006 与本条原文均未更新，ADR-0002 已在用"quiche 非线程安全"作论据）。
+- QUIC 库：core 用 **Cloudflare quiche**（QUIC + HTTP/3 一体，`core/CMakeLists.txt:17-19`）；TUI 用 quic-go。msquic 于 2026-08-09 被弃（纯传输层无 H3 语义），ADR-0006 当时记的替代品是 ngtcp2 + nghttp3，**但那套实现满足不了需求，最终换成 quiche**（补记于 ADR-0006 实况注，2026-08-28；具体是哪一条不满足未留下记录）。
 - 出站 Provider 请求：core 用 libcurl（HTTP/1.1 客户端，请求 DeepSeek）；入站客户端通信走 QUIC。
 - 工具结果：一个 json，形状 `{"status": <int, 0=成功>, "output": <string, 给模型看的文本>}`；`Executor::execute` 再加一个 `"interrupted"` 键（core 本次执行期间提没提过中止）。没有 `ToolResult`/`ExecResult` 结构体——工具本来就在拼 json，两个字段的信封是多余的。
 - JSON 实现：nlohmann/json 3.12.0，单头文件逐字节 vendored 在 `core/include/json.hpp`，类型就是 `nlohmann::json`——**core 不包壳**。链式 `a["b"]["c"]` 与隐式转换是库自带的；读不受控的输入用 `find()` / `value(key, 默认值)`（const `operator[]` 撞上缺键是未定义行为），解析用 `parse(text, nullptr, false)` + `is_discarded()`。

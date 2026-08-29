@@ -35,11 +35,11 @@ func TestNamedCommandErrorRendered(t *testing.T) {
 	m.awaiting = true
 	nm, _ := m.Update(sendMsg{reply: client.Reply{Ok: false, Command: "model", Error: "unknown model: x"}})
 	m = nm.(model)
-	if len(m.pend) != 1 || m.pend[0].role != "error" {
-		t.Fatalf("命令失败应为 error 行，got %+v", m.pend)
+	if len(m.lines) != 1 || m.lines[0].role != "error" {
+		t.Fatalf("命令失败应为 error 行，got %+v", m.lines)
 	}
-	if !strings.Contains(m.pend[0].text, "unknown model") {
-		t.Errorf("error 应透传 core 错误，got %q", m.pend[0].text)
+	if !strings.Contains(m.lines[0].text, "unknown model") {
+		t.Errorf("error 应透传 core 错误，got %q", m.lines[0].text)
 	}
 }
 
@@ -50,7 +50,7 @@ func TestModelListSplitsLines(t *testing.T) {
 	data, _ := json.Marshal([]client.ModelInfo{{Name: "a"}, {Name: "b"}})
 	nm, _ := m.Update(sendMsg{reply: client.Reply{Ok: true, Command: "model", Data: data}})
 	m = nm.(model)
-	if len(m.pend) != 2 {
-		t.Fatalf("两个模型应占 2 行，got %v", pendTexts(m))
+	if len(m.lines) != 2 {
+		t.Fatalf("两个模型应占 2 行，got %v", lineTexts(m))
 	}
 }

@@ -26,23 +26,37 @@ TUI ◀──(2) 长生命周期单向流────────────  c
 
 | 端点 | 语义 | 实现 |
 |---|---|---|
-| `POST /message` | 提交用户消息 → 启动 agent turn。首字符为 `/` 时按斜杠命令处理，不启动 turn（见下「命令」节） | ✅ |
-| `POST /command` | 执行斜杠命令，体 `{"command":"/new"}`（命令名带不带 `/` 都认）。与 `POST /message` 的 `/` 前缀分支**共用 core 侧同一份实现**——两个门，一套行为。**agent 正在跑时立刻回 `{"ok":false,"error":"agent 正在运行…"}`**，不排队等（见下「忙碌与中断」） | ✅ |
+| `POST /agent` | 建一个 agent，体 `{"client_id","workdir"}` → `{"ok":true,"agent_id"}`。**`workdir` 必传，core 不猜**（ADR-0019）——它是全机单实例，自己的 cwd 跟任何 agent 都无关；客户端知道用户站在哪，由它给。`client_id` 决定它属于哪一组，该客户端还没有组就顺手建组。人不是图上的节点，所以这道门建出来的 agent 没有边 | ✅ |
+| `GET /agents` | agent 清单 `[{id, workdir, state, session_id, in_edges, out_edges}]`，体 `{"client_id"}`。**只列调用方那一组**（ADR-0021）——组的单位就是客户端。组内不受边的约束：客户端看得见本组全部，agent 只看得见自己的出边邻居，两层 | ✅ |
+| `GET /history` | 一个 agent 的历史，体 `{"client_id","agent_id"}` → **事件帧数组** `[{type, data}]`，形状与推送流逐帧相同。客户端因此复用同一个渲染器，实时看和翻历史看长得一样（ADR-0020）。读的是盘上那份，接缝在「最后一条已落盘的消息」：视图 = 这段回放 + 推送流喂进来的活尾巴。新会话还没写过盘 → 空数组，不是错 | ✅ |
+| `POST /group/close` | 关掉调用方那一组，体 `{"client_id"}`。客户端正常退出前显式发一次；**断线满 60 秒 core 自己也会关**，那是兜底不是主路（ADR-0021） | ✅ |
+| `POST /message` | 提交用户消息，体 `{"client_id","agent_id","message"}` → 投进那个 agent 的收件箱。首字符为 `/` 时按斜杠命令处理，不投收件箱（见下「命令」节）。**`agent_id` 必填、无默认**——猜"就那一个吧"在第二个 agent 出现的当天就会变成"刚才那条消息发给谁了" | ✅ |
+| `POST /command` | 执行斜杠命令，体 `{"client_id","agent_id","command":"/new"}`（命令名带不带 `/` 都认）。与 `POST /message` 的 `/` 前缀分支**共用 core 侧同一份实现**——两个门，一套行为。**agent 正在跑时立刻回 `{"ok":false,"error":"agent 正在运行…"}`**，不排队等（见下「忙碌与中断」） | ✅ |
 | `GET /commands` | 斜杠命令列表 `[{name, description}]`（TUI 菜单数据源，core 是唯一真相；`/new` `/resume` `/model`） | ✅ |
-| `POST /interrupt` | 中止当前 agent run。**无请求体**，恒返回 `{"status":"ok"}`（不报告当时有没有 run 在跑）。core 侧置 abort 位 + 取消全部待裁决审批（`Agent::interrupt()` + `ApprovalCoordinator::cancel_all()`）。**中止是异步的**：这个 200 只表示信号已置，agent 在下一个检查点才真正停，客户端要等 `interrupted` 帧才算收工。打断范围：LLM 请求、turn 间隙、**以及正在执行的工具**——core 同时把在跑的 bash 进程组打掉（`Executor::interrupt()` → `interrupt_tool()`）。read/edit 跑得快，不设中断点 | ✅ |
+| `POST /interrupt` | 中止某个 agent 的 run，体 `{"client_id","agent_id"}`，恒返回 `{"status":"ok"}`（不报告当时有没有 run 在跑）。多 agent 之后必须指名道姓，否则 Esc 一按全场停摆。core 侧置 abort 位 + 取消**这个 agent** 挂着的审批（`Agent::interrupt()` + `ApprovalCoordinator::cancel(agent_id)`）——一刀切会把「停下这一个」办成「全场停摆」。**中止是异步的**：这个 200 只表示信号已置，agent 在下一个检查点才真正停，客户端要等 `interrupted` 帧才算收工。打断范围：LLM 请求、turn 间隙、**以及正在执行的工具**——core 同时把在跑的 bash 进程组打掉（`Executor::interrupt()` → `interrupt_tool()`）。read/edit 跑得快，不设中断点 | ✅ |
 | `POST /approval-response` | 审批裁决回传（TUI → core），体 `{"id", "allow"}` | ✅ |
 | `GET /statusline` | 状态栏数据（输入框下方那条）：`{"model", "owned_by", "context"}`，后两项来自模型数据表，查不到就只有 model | ✅ |
-| `GET /sessions` | 会话清单 `[{id, title, messages, mtime, current}]`，按 `mtime` 倒序 | ✅ |
-| `POST /session` | 新建 / 恢复会话：体空 `{}` = 新建，体 `{"id"}` = 恢复。响应 `{"ok", "data"}`（`data` 为更新后的清单）；id 不存在 → `{"ok":false,"error":"unknown session: ..."}`，且**当前会话原样不动** | ✅ |
-| `GET /events` | 推送流订阅，见下节 (2)。响应 `200` + `content-type: text/event-stream`，流不关闭 | ✅ |
+| `GET /sessions` | 会话清单 `[{id, title, messages, mtime, opened_by}]`，按 `mtime` 倒序。**体带 `client_id` 与 `agent_id`**——会话目录跟着那个 agent 的 workdir 走（`<workdir>/.realagent/sessions`），不是进程级的。`opened_by` 取代了从前的 `current`：多 agent 之后「当前」没有主语了，一个会话要么被某个 agent 打开着（值为它的 id），要么躺在盘上（`null`）| ✅ |
+| `POST /session` | 新建 / 恢复会话：体 `{"client_id","agent_id"}` = 新建，多带一个 `"id"` = 恢复。响应 `{"ok", "data"}`（`data` 为更新后的清单）；id 不存在 → `{"ok":false,"error":"unknown session: ..."}`，且**当前会话原样不动** | ✅ |
+| `GET /events` | 推送流订阅，见下节 (2)。响应 `200` + `content-type: text/event-stream`，流不关闭。**身份走查询串 `?client_id=X`，这是唯一的例外**——别处一律 JSON 体，而这一处身份必须让传输层看见：承载这条流的 QUIC 连接就是"这个客户端还在不在"的判据（ADR-0021） | ✅ |
 
 未匹配任何路由的请求返回 `404` + `{"error":"not found"}`。
+
+**参数一律走 JSON 体，GET 也不例外**（唯一例外是 `GET /events?client_id=`，理由见上）。
+再养一套 query string 解析就是两处必须永远一致的参数格式，而这里一个查询参数都不缺。
+
+**每个动 agent 的端点都要 `client_id` 与 `agent_id`，都没有默认值**：`agent_id`
+猜"就那一个吧"，在第二个 agent 出现的当天就会变成"刚才那条消息发给谁了"（ADR-0019）；
+`client_id` 决定这个 agent 在不在你那一组，**跨组一律当「无此 agent」**——不区分
+「不存在」与「不是你的」，区分了就等于告诉调用方别的组里有什么（ADR-0021）。
 
 ### (2) 推送流（HTTP/3 单向流，SSE 语义）
 
 core 为每客户端建立**一条长生命周期推送流**（`GET /events` 流式响应），事件帧按序写入，QUIC 可靠流保证不丢、有序。**打字效果**由帧到达驱动（边写边读，无延迟损失）。
 
 ## 帧格式
+
+**每帧都带 `agent_id`**：core **不为任何 agent 过滤事件**，全推，客户端认识哪个渲染哪个（ADR-0019）。于是杂活 agent 失败时用户看得见——这不需要为它设计任何东西，只需要不设计过滤。
 
 流中每帧为独立 JSON 对象，SSE event 块语义（`\n` 分隔）：
 
@@ -57,7 +71,7 @@ data: <json>
 | type | 载荷 | 说明 | 实现 |
 |---|---|---|---|
 | `message_update` | delta 文本 | LLM 流式增量 | ✅ |
-| `message_start` | 消息结构 | 消息生命周期 | 🟡 只在收到用户输入时发一帧 `{"role":"user"}`；assistant 消息不发 |
+| `message_start` | `{role, text}` | 一条 user 消息进了收件箱。**正文随帧走**：收件箱三种来源都是 user 消息（人发的、别的 agent 用 `send_message` 投的、别的 agent 跑完沿入边广播的完成通知），后两种客户端根本没打过，靠"我刚才输入了什么"渲染不出来（ADR-0019 §5）。客户端因此不本地回显，实时与回放走同一段代码。assistant 消息不发这个帧 | ✅ |
 | `message_end` | 消息结构 | 消息生命周期 | ❌ 未实现——收工靠 `turn_end` |
 | `thinking_start/update/stop` | signature / delta / 空 | 模型思考过程（DeepSeek v4 reasoning），流式增量与 message_update 同语义 | ✅ |
 | `tool_output` | `{call_id, stream, text}` | 工具边跑边推的输出（stdout 与 stderr 合流，见下） | ✅ |
@@ -65,9 +79,10 @@ data: <json>
 | `turn_start/end` | 轮次信息 | Turn 生命周期 | ✅ |
 | `status_update` | 运行态数据 | 状态行数字（开放键集，见下） | ✅ |
 | `statusline` | 状态栏数据 | 会话身份变了就推一帧（见下），与 `GET /statusline` 同一份载荷 | ✅ |
-| `permission_request` | 审批问询 | 审批请求（可靠，卡点） | ✅ |
+| `permission_request` | `{id, agent_id, tool, params}` | 审批请求（可靠，卡点）。**不按"当前看着谁"过滤**：审批不属于任何 agent 的视图，它是全局的，客户端不管正在看哪个 agent 都要弹，靠 `agent_id` 说明是谁在问。过滤会让一个没人看的 agent 静默地拿不到任何权限，而用户根本不知道有人问过（ADR-0019 §8）。**没有客户端订阅推送流时当场拒绝**，不等那 30 秒——agent 没有客户端也照跑，两条合起来就是后台 agent 的每个危险工具都卡 30 秒然后必然被拒，那不是安全策略，是一个装成策略的超时 | ✅ |
 | `interrupted` | 空对象 | `POST /interrupt` 生效——agent 在某个检查点停了。此后本次 run 不再有帧 | ✅ |
-| `agent_start/end` | 运行信息 | Agent 生命周期 | ❌ 未实现 |
+| `agent_start` | 空对象 | 一次「跑」开始：收件箱里的一条消息进来了。与 turn 不是一回事——一次跑里有 N 个 turn | ✅ |
+| `agent_end` | `{cost}` | 一次「跑」收工：LLM 不再调工具，agent 回去 pop 下一条（空了就是 idle）。`cost` 是本次跑的累计花费 | ✅ |
 
 ### statusline 帧
 

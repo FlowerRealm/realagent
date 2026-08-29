@@ -6,7 +6,6 @@
  *   - settings.json 坏了 → load 失败（不静默跳过，读不懂就别往下跑）
  *   - 覆盖生效、两档模型各取各的（不做档位回落）
  *   - 唯一来源：全局 ~/.realagent/settings.json，不看 cwd
- *   - session_dir 是 core 常量：settings.json 写什么都不生效
  *   - 合并粒度：文件里的键覆盖默认，未提及的默认原样保留
  *   - persist 点对点：只改目标键，用户文件其余原样，默认值不渗进文件
  *   - persist 的两个边界：文件不存在按空对象起头；文件坏了拒绝写入
@@ -151,14 +150,6 @@ int main()
         CHECK(r.has_value() && r->model(ModelTier::Main) == "m-main", "只认 HOME，与 cwd 无关");
         fs::current_path(fs::temp_directory_path());
         fs::remove_all(elsewhere);
-    }
-
-    printf("== session_dir 是常量，不可配置 ==\n");
-    {
-        write_settings(home, R"({"session_dir":"/tmp/somewhere-else"})");
-        const auto r = Config::load();
-        CHECK(r.has_value() && r->session_dir() == ".realagent/sessions",
-              "settings.json 写它不生效");
     }
 
     printf("== 合并粒度：文件里的键覆盖默认，未提及的默认原样保留 ==\n");

@@ -1,26 +1,108 @@
 #include "agent/agent.hpp"
 
+#include "agent/agents.hpp"
+
 #include <curl/curl.h>
 
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 
 namespace realagent {
 
-Agent::Agent(CoreContext &ctx, Executor &exe) : ctx_(ctx), exe_(exe)
+namespace {
+/* 会话落点：客户端建的落 sessions/，派生的落 sessions/sub/（ADR-0021）。
+ * 不用拼一个空段——`fs::path / ""` 会留一个尾斜杠。 */
+std::string session_dir_of(const std::string &workdir, bool sub)
+{
+    const std::filesystem::path base = std::filesystem::path(workdir) / ".realagent" / "sessions";
+    return (sub ? base / "sub" : base).string();
+}
+} // namespace
+
+Agent::Agent(CoreContext &ctx, ApprovalCoordinator &approval, std::string workdir, std::string id,
+             Agents *pool, bool sub)
+    : ctx_(ctx), pool_(pool), id_(std::move(id)), workdir_(std::move(workdir)),
+      exe_(ctx, approval, workdir_, pool_, id_),
+      session_dir_(session_dir_of(workdir_, sub)),
+      session_(session_dir_)
 {
     messages_ = nlohmann::json::array();
-    // 模型数据表读一次。读不动就报出来，之后照常跑——没有表只是不算钱，
-    // 不是"不能对话"，为它拒绝启动是把一个次要功能提成了必需品
-    std::string err;
-    pricing_ = Pricing::load(*ctx_.config, &err);
-    if (!err.empty()) fprintf(stderr, "[llm] %s（本次运行不计价）\n", err.c_str());
+    loop_ = std::thread([this] { loop(); });
+}
+
+Agent::~Agent()
+{
+    {
+        std::lock_guard<std::mutex> lk(mtx_);
+        closing_ = true;
+    }
+    cv_.notify_all();
+    interrupt(); // 正卡在 LLM 或工具里的话，先把它停下来，别等它自己跑完
+    if (loop_.joinable()) loop_.join();
+}
+
+void Agent::post(std::string message)
+{
+    {
+        std::lock_guard<std::mutex> lk(mtx_);
+        inbox_.push_back(std::move(message));
+    }
+    cv_.notify_one();
+}
+
+/* 收件箱空就阻塞——那就是 idle。「继续等」不需要任何机制：模型这一轮不调工具，
+ * run() 返回，回来再 pop 一次而已（ADR-0019）。 */
+void Agent::loop()
+{
+    for (;;)
+    {
+        std::string msg;
+        {
+            std::unique_lock<std::mutex> lk(mtx_);
+            cv_.wait(lk, [this] { return closing_ || !inbox_.empty(); });
+            if (closing_) return;
+            msg = std::move(inbox_.front());
+            inbox_.pop_front();
+        }
+        std::string summary;
+        {
+            std::lock_guard<std::mutex> busy(run_mtx_);
+            running_.store(true);
+            run(msg);
+            running_.store(false);
+            summary = last_text();
+
+            // 收件箱空了就把历史还给盘（ADR-0019 §7）。判据只有一条：**内存里那份
+            // 是不是副本**。是副本就能丢，醒来重读一遍——走的就是 ensure_loaded()。
+            // 立刻丢，不设「idle N 秒后丢」的定时器：那是又一个可调参数、又一个中间
+            // 状态、又一个刚丢完就来消息的抖动。
+            std::lock_guard<std::mutex> lk(mtx_);
+            if (inbox_.empty())
+            {
+                messages_ = nlohmann::json::array();
+                loaded_ = false;
+            }
+        }
+        // 跑完了沿入边告诉关心我的那些 agent。这不是 hook 注册表——投递依据就是边，
+        // 而边是投递方自己那头的一条数据（ADR-0019）
+        if (pool_) pool_->on_done(id_, summary);
+    }
+}
+
+void Agent::ensure_loaded()
+{
+    if (loaded_) return;
+    if (!Session::read(session_dir_, session_.id(), messages_))
+        messages_ = nlohmann::json::array(); // 还没写过盘，不是错
+    loaded_ = true;
 }
 
 void Agent::reset()
 {
     messages_ = nlohmann::json::array();
-    session_ = Session(); // 换个新会话文件；旧的留在盘上，它是记录不是缓存
+    loaded_ = true;
+    session_ = Session(session_dir_); // 换个新会话文件；旧的留在盘上，它是记录不是缓存
     run_cost_ = 0;
     abort_.store(false);
 }
@@ -28,10 +110,11 @@ void Agent::reset()
 bool Agent::resume(const std::string &id)
 {
     nlohmann::json loaded;
-    Session s;
+    Session s(session_dir_);
     if (!s.resume(id, loaded)) return false; // 先在副本上试，成了才动自己
     session_ = std::move(s);
     messages_ = std::move(loaded);
+    loaded_ = true;
     run_cost_ = 0;
     abort_.store(false);
     return true;
@@ -51,9 +134,29 @@ void Agent::interrupt()
     exe_.interrupt();
 }
 
+/* 最后一条 assistant 消息的正文。完成通知带的就是它——那是这次跑出来的产物。 */
+std::string Agent::last_text() const
+{
+    for (auto it = messages_.rbegin(); it != messages_.rend(); ++it)
+    {
+        if (it->value("role", "") != "assistant") continue;
+        std::string out;
+        for (const auto &b : (*it)["content"])
+            if (b.value("type", "") == "text") out += b.value("text", "");
+        return out;
+    }
+    return {};
+}
+
 void Agent::broadcast(const std::string &type, const nlohmann::json &payload)
 {
-    if (ctx_.emit_fn) ctx_.emit_fn(type, payload.dump());
+    if (!ctx_.emit_fn) return;
+    // 每帧带 agent_id：core **不为任何 agent 过滤事件**，全推，客户端认识哪个渲染哪个
+    // （ADR-0019）。于是杂活 agent 失败时用户看得见——这不需要为它设计任何东西，
+    // 只需要不设计过滤。
+    nlohmann::json ev = payload.is_object() ? payload : nlohmann::json::object();
+    ev["agent_id"] = id_;
+    ctx_.emit_fn(type, ev.dump());
 }
 
 /* 一次 LLM 调用期间的流式状态：解析器 + 落点。
@@ -133,7 +236,7 @@ void Agent::on_llm_event(std::string_view type, const nlohmann::json &ev, LlmOut
         //
         // 本次用的是哪个模型，调用方自己知道（就是 dialog["model"]）——
         // 从前这条信息要靠 provider 壳在改请求时偷偷记一笔，现在直接传进来
-        const double cost = pricing_.cost(model, ev);
+        const double cost = ctx_.pricing ? ctx_.pricing->cost(model, ev) : 0;
         if (cost <= 0) return;
         out.cost = cost;
         // 推送流里的花费一律是"本次 run 累计"
@@ -167,12 +270,23 @@ static void append_thinking(nlohmann::json &content, const LlmOutcome &out)
 
 bool Agent::llm_call(const nlohmann::json &dialog, LlmOutcome &out)
 {
+    /* 端点那一束没配齐就别往下走（ADR-0017）。
+     *
+     * main 在 POST /message 上挡过一道，但那只是**一个**门：收件箱之后消息还会从
+     * 别的门进来（另一个 agent 的 send_message、完成通知）。而 build_request 里
+     * 解析协议是个断言——解不出来直接 throw，那会 terminate 整个常驻服务。
+     * core 是常驻的，一条消息不该杀掉它；把该配什么原样交给用户才是 ADR-0017 要的。 */
+    if (out.error = endpoint_config_error(*ctx_.config); !out.error.empty())
+    {
+        fprintf(stderr, "[agent] %s\n", out.error.c_str());
+        return false;
+    }
+
     const HttpRequest req = build_request(*ctx_.config, dialog);
     if (req.url.rfind("http", 0) != 0)
     {
-        // base_url 没配全，拼出来的是个相对路径。libcurl 会报一句难懂的错，
-        // 不如在这儿说人话
-        out.error = "base_url 未配置（当前请求 URL: " + req.url + "）";
+        // base_url 配了但拼出来不是个 URL。libcurl 会报一句难懂的错，不如在这儿说人话
+        out.error = "base_url 不像个 URL（当前请求 URL: " + req.url + "）";
         fprintf(stderr, "[agent] %s\n", out.error.c_str());
         return false;
     }
@@ -249,6 +363,7 @@ nlohmann::json Agent::build_dialog(ModelTier tier) const
 
 void Agent::run(const std::string &user_input)
 {
+    ensure_loaded(); // idle 期间历史还给了盘，先读回来
     abort_.store(false);
     exe_.reset(); // 中止痕迹与 abort_ 同一个生命周期，一起清
     run_cost_ = 0;
@@ -256,7 +371,14 @@ void Agent::run(const std::string &user_input)
     um["role"] = "user";
     um["content"] = nlohmann::json::array({nlohmann::json{{"type", "text"}, {"text", user_input}}});
     record(um);
-    broadcast("message_start", nlohmann::json{{"role", "user"}});
+    // agent 生命周期的两端。一次「跑」= 收件箱里的一条消息推到 LLM 不再调工具为止，
+    // 与 turn 不是一回事（一次跑里有 N 个 turn）。客户端靠这两帧知道谁醒着、谁收工了——
+    // 每帧都带 agent_id，所以不需要为「哪个 agent」再设计任何东西（ADR-0019 §5）
+    broadcast("agent_start", nlohmann::json::object());
+    // 正文随帧走。客户端不能只靠"我刚才打了什么"渲染这一行——收件箱里三种来源
+    // 都是 user 消息（人发的、别的 agent 发的、完成通知），后两种客户端根本没打过
+    // （ADR-0019 §5）。而且回放历史时走的是同一个帧，实时与翻历史因此长得一样（ADR-0020）
+    broadcast("message_start", nlohmann::json{{"role", "user"}, {"text", user_input}});
 
     // 不设轮数上限：一个数字定不出"多少轮算跑飞了"——同一个任务，改个错字一轮，
     // 重构一个模块几十轮，两者都正常。真正让循环停下来的是下面四处 abort_ 检查点
@@ -380,6 +502,8 @@ void Agent::run(const std::string &user_input)
         broadcast("turn_end", nlohmann::json{{"stop_reason", out.stop_reason}});
         break;
     }
+    // 循环只有 break 出口，没有 return——所以收工帧只需要写在这一处
+    broadcast("agent_end", nlohmann::json{{"cost", run_cost_}});
 }
 
 } // namespace realagent

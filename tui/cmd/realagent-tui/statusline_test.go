@@ -77,7 +77,7 @@ func TestStatuslineEventUpdatesModel(t *testing.T) {
 	if !strings.Contains(m.sl.render(), "deepseek-v4") {
 		t.Errorf("状态栏应渲染新模型: %q", m.sl.render())
 	}
-	if len(m.pend) != 0 {
+	if len(m.lines) != 0 {
 		t.Errorf("statusline 帧不该往对话流里写东西，got %v", roleTexts(m))
 	}
 }

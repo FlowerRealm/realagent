@@ -10,9 +10,6 @@ namespace fs = std::filesystem;
 
 namespace {
 
-// 会话落盘路径：core 自己的实现细节，不是配置项
-constexpr std::string_view kSessionDir = ".realagent/sessions";
-
 // 默认配置树（ADR-0010）：load() 用它打底，settings.json 再逐键覆盖。
 // 只有一个键：permission。这是安全默认，缺了不该放行。
 // 其余键（api_key / small_model / 端点那一束 base_url / model / protocol）没有默认——
@@ -144,8 +141,6 @@ bool Config::persist(std::string_view key, const nlohmann::json &v)
     settings_[std::string(key)] = v;
     return true;
 }
-
-std::string Config::session_dir() { return std::string(kSessionDir); }
 
 std::string Config::models_path() const
 {

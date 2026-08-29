@@ -152,8 +152,8 @@ func TestSubmitEmpty(t *testing.T) {
 	if cmd != nil {
 		t.Error("空输入不应发送")
 	}
-	if len(m.pend) != 0 {
-		t.Errorf("空输入不应产生行，got %v", pendTexts(m))
+	if len(m.lines) != 0 {
+		t.Errorf("空输入不应产生行，got %v", lineTexts(m))
 	}
 }
 

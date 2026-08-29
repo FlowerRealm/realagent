@@ -8,6 +8,7 @@
  */
 #include "server/quic_server.hpp"
 
+#include <cerrno>
 #include <cstdio>
 #include <cstring>
 #include <map>
@@ -47,6 +48,8 @@ struct QuicConn {
     /* 事件推送流（GET /events 订阅） */
     bool events_subscribed = false;
     int64_t events_stream = -1;
+    /* 订阅推送流时报上来的客户端身份（ADR-0021）。这条连接死了就是这个客户端没了 */
+    std::string client_id;
 };
 
 struct QuicServer::Impl {
@@ -153,7 +156,13 @@ void QuicServer::run()
     addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     if (bind(impl_->fd, (sockaddr *)&addr, sizeof(addr)) < 0)
     {
-        perror("bind");
+        // core 一台机器一个实例（ADR-0019）。端口本来就是那把锁，bind 是内核帮忙做的
+        // 原子检查——不另立 pid 文件：那是在内核已经解决的问题上再造一把会变陈旧的锁，
+        // 进程被 kill -9 之后它还在，那才是真麻烦。这里改的只有报错文本
+        if (errno == EADDRINUSE)
+            fprintf(stderr, "[server] core 已在 %d 运行\n", cfg_.port);
+        else
+            perror("bind");
         running_ = false;
         return;
     }
@@ -175,7 +184,9 @@ void QuicServer::run()
     }
     quiche_config_set_application_protos(impl_->config, (const uint8_t *)"\x02h3", 3);
     quiche_config_grease(impl_->config, false); // 兼容性：禁用 GREASE 流
-    quiche_config_set_max_idle_timeout(impl_->config, 30000);
+    // 10 秒：连接死了要让 core 尽快知道，好开始数那 60 秒（ADR-0021）。
+    // QUIC 自己会保活，闲着不发请求的客户端不会因此掉线
+    quiche_config_set_max_idle_timeout(impl_->config, 10000);
     quiche_config_set_initial_max_data(impl_->config, 1048576);
     quiche_config_set_initial_max_stream_data_bidi_local(impl_->config, 262144);
     quiche_config_set_initial_max_stream_data_bidi_remote(impl_->config, 262144);
@@ -328,9 +339,16 @@ void QuicServer::run()
                         const QuicRequest req = std::move(c.requests[sid]);
                         c.requests.erase(sid); // 请求到此结束，状态不留过夜
                         // 处理请求
-                        if (req.method == "GET" && req.path == "/events")
+                        if (req.method == "GET" && req.path.rfind("/events", 0) == 0)
                         {
+                            // 路径里的 client_id：`GET /events?client_id=X`。
+                            // 只取一个查询参数，不值得为它写个 URL 解析器
+                            if (const size_t q = req.path.find("?client_id="); q != std::string::npos)
+                                c.client_id = req.path.substr(q + 11);
+                            if (impl_->cbs.on_client_here && !c.client_id.empty())
+                                impl_->cbs.on_client_here(c.client_id);
                             // 事件推送流订阅：响应 200（fin=false），持续推送 agent 事件
+                            if (!c.events_subscribed) clients_.fetch_add(1);
                             c.events_subscribed = true;
                             c.events_stream = stream_id;
                             quiche_h3_header ev_headers[] = {
@@ -352,8 +370,25 @@ void QuicServer::run()
                         }
                         else if (req.method == "POST" && req.path == "/interrupt")
                         {
-                            if (impl_->cbs.on_interrupt) impl_->cbs.on_interrupt();
+                            if (impl_->cbs.on_interrupt) impl_->cbs.on_interrupt(req.body);
                             send_json(c, sid, "{\"status\":\"ok\"}");
+                        }
+                        else if (req.method == "POST" && req.path == "/agent")
+                        {
+                            // 建一个 agent（体 {"workdir"}），workdir 必传（ADR-0019）
+                            send_json(c, sid, impl_->cbs.on_agent ? impl_->cbs.on_agent(req.body) : "{\"error\":\"no agent handler\"}");
+                        }
+                        else if (req.method == "POST" && req.path == "/group/close")
+                        {
+                            send_json(c, sid, impl_->cbs.on_group_close ? impl_->cbs.on_group_close(req.body) : "{\"ok\":true}");
+                        }
+                        else if (req.method == "GET" && req.path == "/agents")
+                        {
+                            send_json(c, sid, impl_->cbs.on_agents ? impl_->cbs.on_agents(req.body) : "[]");
+                        }
+                        else if (req.method == "GET" && req.path == "/history")
+                        {
+                            send_json(c, sid, impl_->cbs.on_history ? impl_->cbs.on_history(req.body) : "[]");
                         }
                         else if (req.method == "POST" && req.path == "/message")
                         {
@@ -367,7 +402,7 @@ void QuicServer::run()
                         }
                         else if (req.method == "GET" && req.path == "/sessions")
                         {
-                            send_json(c, sid, impl_->cbs.on_sessions ? impl_->cbs.on_sessions() : "[]");
+                            send_json(c, sid, impl_->cbs.on_sessions ? impl_->cbs.on_sessions(req.body) : "[]");
                         }
                         else if (req.method == "POST" && req.path == "/session")
                         {
@@ -411,8 +446,17 @@ void QuicServer::run()
         for (auto it = impl_->conns.begin(); it != impl_->conns.end();)
         {
             auto &c = it->second;
+            // 走一遍 quiche 的定时器。**不叫它，max_idle_timeout 就永远不会到期**：
+            // 超时是 quiche 内部记的一个时刻，它不会自己醒过来，得有人来问。
+            // 客户端拔网线之后连接一直停在"活着"，于是 on_client_gone 一次都不发，
+            // ADR-0021 那张 60 秒的表永远是空的
+            quiche_conn_on_timeout(c.conn);
             if (quiche_conn_is_closed(c.conn))
             {
+                // 承载推送流的那条连接没了 = 这个客户端没了（ADR-0021）
+                if (c.events_subscribed) clients_.fetch_sub(1);
+                if (impl_->cbs.on_client_gone && !c.client_id.empty())
+                    impl_->cbs.on_client_gone(c.client_id);
                 if (c.h3)
                 {
                     quiche_h3_conn_free(c.h3);

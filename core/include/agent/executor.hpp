@@ -20,9 +20,16 @@
 
 namespace realagent {
 
+class Agents;
+
 class Executor {
   public:
-    Executor(CoreContext &ctx, ApprovalCoordinator &approval);
+    /* pool 与 owner 是"去哪儿找别的 agent"和"谁在用我"，spawn / send_message 要这两样。
+     * 独立构造（测试、test-tools）时都为空，那两个工具就报"这里没有 agent 图"。
+     * 进构造函数而不是事后 bind()：两段式初始化多出一个"造好了但还没接上"的中间态，
+     * 而这里根本不需要它——Agent 的 pool_ / id_ 在 exe_ 之前就已经就位了。 */
+    Executor(CoreContext &ctx, ApprovalCoordinator &approval, std::string workdir,
+             Agents *pool = nullptr, std::string owner = {});
 
     /* 权限检查：dangerous 工具按 permission 配置裁决。ASK → 真等用户裁决（ADR-0005）。 */
     bool check_permission(const ToolDef &tool, const std::string &params_json,
@@ -44,6 +51,13 @@ class Executor {
   private:
     CoreContext &ctx_;
     ApprovalCoordinator &approval_;
+    std::string workdir_; // 工具的相对路径从这里算起，bash 也 chdir 到这里
+    Agents *pool_ = nullptr;
+    std::string owner_; // 这个 executor 属于哪个 agent
+
+    /* spawn / send_message：它们要认识 Agents，所以实现在这儿而不在 tools.cpp——
+     * tools/ 在 agent/ 下面，反过来包含就是层级倒挂。 */
+    nlohmann::json agent_tool(const std::string &name, const nlohmann::json &params);
 
     std::mutex inflight_mtx_;
     bool inflight_ = false;

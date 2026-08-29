@@ -17,7 +17,9 @@ var testCmds = []client.Command{
 }
 
 func testModel() model {
-	return model{commands: testCmds}
+	// 带一个没连过的 client：渲染路径要问它 AgentID（会话清单靠它认哪条是自己的）。
+	// New 不连接，构造是纯本地的
+	return model{commands: testCmds, client: client.New("127.0.0.1:1")}
 }
 
 // typed 造一个输入了 s 的模型（光标在末尾）
@@ -27,11 +29,11 @@ func typed(s string) model {
 	return m
 }
 
-// pend 返回未提交的行文本。测试里 width=0，freeze 不动手，
-// 所有行都留在 m.pend——正好当成「本次会话的全部输出」来断言。
-func pendTexts(m model) []string {
+// lineTexts 返回行流的全部文本 —— altscreen 之后 m.lines 就是本次会话的全部输出，
+// 没有「已提交／未提交」这条边界了（ADR-0020）。
+func lineTexts(m model) []string {
 	var out []string
-	for _, l := range m.pend {
+	for _, l := range m.lines {
 		out = append(out, l.text)
 	}
 	return out
@@ -68,7 +70,7 @@ func TestMenuMatches(t *testing.T) {
 	}{
 		{"", nil},
 		{"hello", nil},
-		{"/", []string{"new", "resume", "statusline", "quit"}},
+		{"/", []string{"new", "resume", "statusline", "agents", "quit"}},
 		{"/n", []string{"new"}},
 		{"/re", []string{"resume"}},
 		{"/q", []string{"quit"}}, // 本地命令与远端命令在菜单里没有区别
@@ -140,27 +142,42 @@ func TestEnterExecutesHighlighted(t *testing.T) {
 	if v := m.ed.value(); v != "" {
 		t.Errorf("发送后输入应清空，got %q", v)
 	}
-	if got := pendTexts(m); len(got) != 1 || got[0] != "/resume" {
+	if got := lineTexts(m); len(got) != 1 || got[0] != "/resume" {
 		t.Errorf("应发送 /resume，got %v", got)
 	}
 }
 
+// 普通消息**不在本地回显**：core 收下它就发一帧 message_start 带正文回来，
+// 本地再画一遍就是画两遍（ADR-0019 §5 / ADR-0020）
 func TestEnterNormalMessage(t *testing.T) {
 	m, cmd := typed("hello world").handleKey(key(tea.KeyEnter))
 	if cmd == nil {
 		t.Fatal("enter 应返回发送命令")
 	}
-	if got := pendTexts(m); len(got) != 1 || got[0] != "hello world" {
-		t.Errorf("普通输入应原样发送，got %v", got)
+	if got := lineTexts(m); len(got) != 0 {
+		t.Errorf("普通输入不该本地回显，got %v", got)
+	}
+	if v := m.ed.value(); v != "" {
+		t.Errorf("发送后输入应清空，got %q", v)
 	}
 }
 
-// 多行输入整条提交，行流里按 \n 拆成多行（每行独立折行/着色）
-func TestEnterMultiline(t *testing.T) {
-	m, _ := typed("第一行\n第二行").handleKey(key(tea.KeyEnter))
-	got := pendTexts(m)
+// core 的 message_start 带正文回来，那一行才出现——多行按 \n 拆开
+func TestUserLineComesFromCore(t *testing.T) {
+	m := testModel()
+	m.handleEvent(client.Event{Type: "message_start", Payload: `{"role":"user","text":"第一行\n第二行"}`})
+	got := lineTexts(m)
 	if len(got) != 2 || got[0] != "第一行" || got[1] != "第二行" {
-		t.Errorf("多行输入应拆成 2 行，got %v", got)
+		t.Errorf("用户行应由 message_start 带来并按行拆开，got %v", got)
+	}
+}
+
+// 别的 agent 发来的消息与完成通知走的是同一条路（收件箱里都是 user 消息）
+func TestPeerMessageRendered(t *testing.T) {
+	m := testModel()
+	m.handleEvent(client.Event{Type: "message_start", Payload: `{"role":"user","text":"[a2 已完成] 干完了"}`})
+	if got := lineTexts(m); len(got) != 1 || got[0] != "[a2 已完成] 干完了" {
+		t.Errorf("完成通知应原样出现在行流里，got %v", got)
 	}
 }
 
@@ -256,11 +273,11 @@ func TestCommandResultRendered(t *testing.T) {
 	m.awaiting = true
 	nm, _ := m.Update(sendMsg{reply: client.Reply{Ok: true, Command: "new"}})
 	m = nm.(model)
-	if len(m.pend) != 1 {
-		t.Fatalf("命令结果应产生 1 行，got %d", len(m.pend))
+	if len(m.lines) != 1 {
+		t.Fatalf("命令结果应产生 1 行，got %d", len(m.lines))
 	}
-	if m.pend[0].role != "info" || !strings.Contains(m.pend[0].text, "新建会话") {
-		t.Errorf("命令结果应为 info 渲染，got %+v", m.pend[0])
+	if m.lines[0].role != "info" || !strings.Contains(m.lines[0].text, "新建会话") {
+		t.Errorf("命令结果应为 info 渲染，got %+v", m.lines[0])
 	}
 	if m.awaiting {
 		t.Error("命令结果落地后不应再等 POST 兜底")
@@ -272,8 +289,8 @@ func TestCommandErrorRendered(t *testing.T) {
 	m.awaiting = true
 	nm, _ := m.Update(sendMsg{reply: client.Reply{Error: "unknown command"}})
 	m = nm.(model)
-	if len(m.pend) != 1 || m.pend[0].role != "error" {
-		t.Fatalf("命令错误应渲染为 error，got %+v", m.pend)
+	if len(m.lines) != 1 || m.lines[0].role != "error" {
+		t.Fatalf("命令错误应渲染为 error，got %+v", m.lines)
 	}
 }
 
@@ -284,7 +301,7 @@ func TestSendFallbackIgnoredAfterStream(t *testing.T) {
 	m.handleEvent(client.Event{Type: "message_update", Payload: `{"delta":"已经在答了"}`})
 	nm, _ := m.Update(sendMsg{reply: client.Reply{Ok: true, Command: "new"}})
 	m = nm.(model)
-	if got := pendTexts(m); len(got) != 1 || got[0] != "已经在答了" {
+	if got := lineTexts(m); len(got) != 1 || got[0] != "已经在答了" {
 		t.Errorf("兜底不应覆盖流式内容，got %v", got)
 	}
 }

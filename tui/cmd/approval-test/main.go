@@ -3,9 +3,9 @@
 package main
 
 import (
-	"encoding/json"
 	"bufio"
 	"crypto/tls"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"

@@ -1,7 +1,10 @@
-// 端到端：跑真的 Bubble Tea 程序，验证已定型的行确实写进了终端输出流
-// （即用户能用终端原生滚动翻回去的那一份），且不重复、不丢字。
+// 端到端：跑真的 Bubble Tea 程序，验证一整回合的事件确实画到了屏幕上，
+// 且每行只画一次。
 //
-// 单元测试只能证明行流对；这一层证明 Println 通路对。
+// altscreen 之后屏幕每帧全量重绘（ADR-0020），所以断言的是**最后一帧**：
+// 输出流里前面那些是被覆盖掉的中间帧，拿整个流去数出现次数只会数到重绘次数。
+//
+// 单元测试只能证明行流对；这一层证明 viewport 通路对。
 package main
 
 import (
@@ -45,12 +48,13 @@ func (h headless) Update(msg tea.Msg) (tea.Model, tea.Cmd) { return h.model.Upda
 
 func (h headless) View() string { return h.model.View() }
 
-func TestScrollbackReceivesFinalizedLines(t *testing.T) {
+func TestAltscreenPaintsWholeTurn(t *testing.T) {
 	var out safeBuf
 	p := tea.NewProgram(headless{testModel()},
 		tea.WithInput(nil),
 		tea.WithOutput(&out),
 		tea.WithoutSignalHandler(),
+		tea.WithAltScreen(),
 	)
 
 	done := make(chan struct{})
@@ -59,8 +63,10 @@ func TestScrollbackReceivesFinalizedLines(t *testing.T) {
 		p.Run()
 	}()
 
-	p.Send(tea.WindowSizeMsg{Width: 40, Height: 12})
-	// 一个完整回合：用户提问 → 流式回答（多段）→ 工具 → 收工
+	p.Send(tea.WindowSizeMsg{Width: 40, Height: 24})
+	// 一个完整回合：用户提问 → 流式回答（多段）→ 工具 → 收工。
+	// 用户那一行也从 core 来（message_start 带正文），本地不回显
+	p.Send(eventMsg(client.Event{Type: "message_start", Payload: `{"role":"user","text":"问一句"}`}))
 	p.Send(eventMsg(client.Event{Type: "turn_start", Payload: `{}`}))
 	for _, delta := range []string{"第一段回答。\n", "第二段回答，", "它比较长需要折行折行折行。\n"} {
 		payload, _ := json.Marshal(map[string]string{"delta": delta})
@@ -75,13 +81,26 @@ func TestScrollbackReceivesFinalizedLines(t *testing.T) {
 	<-done
 
 	got := ansi.Strip(out.String())
-	for _, want := range []string{"第一段回答。", "第二段回答", "🔧 bash", "✓ bash"} {
+	for _, want := range []string{"问一句", "第一段回答。", "第二段回答", "🔧 bash", "✓ bash"} {
 		if !strings.Contains(got, want) {
-			t.Errorf("终端输出应含 %q\n实际输出:\n%s", want, got)
+			t.Errorf("屏幕应含 %q\n实际输出:\n%s", want, got)
 		}
 	}
-	// 定型的行只该出现一次——重复即说明活动区与 scrollback 各画了一遍
-	if n := strings.Count(got, "第一段回答。"); n != 1 {
-		t.Errorf("定型的行应只出现 1 次，got %d 次\n实际输出:\n%s", n, got)
+}
+
+// 最后一帧里每行只出现一次——重复即说明历史被画了两遍
+func TestAltscreenNoDuplicateLines(t *testing.T) {
+	m := testModel()
+	m.width, m.height = 40, 24
+	m.handleEvent(client.Event{Type: "message_start", Payload: `{"role":"user","text":"问一句"}`})
+	m.handleEvent(client.Event{Type: "message_update", Payload: `{"delta":"答一句"}`})
+	m.closeLine()
+	m = m.sync()
+
+	screen := ansi.Strip(m.View())
+	for _, want := range []string{"问一句", "答一句"} {
+		if n := strings.Count(screen, want); n != 1 {
+			t.Errorf("%q 应只出现 1 次，got %d\n屏幕:\n%s", want, n, screen)
+		}
 	}
 }

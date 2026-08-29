@@ -1,7 +1,8 @@
 /*
  * session.hpp — 会话持久化（JSONL，PLAN.md R9）
  *
- * 一个会话 = 一个文件：`.realagent/sessions/<id>.jsonl`，一行一条消息，append-only。
+ * 一个会话 = 一个文件：`<工作目录>/.realagent/sessions/<id>.jsonl`，一行一条消息，append-only。
+ * 目录由调用方给（ADR-0019：会话跟着 agent 的工作目录走，core 进程没有"当前目录"）。
  * 人可读、可 diff、可进 git（CONTEXT.md [[Session]]）。
  *
  * **一行就是 messages_ 里的那一条，原样**——没有信封（无外层 id/ts/type 包装）。
@@ -36,8 +37,8 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(SessionInfo, id, title, messages, mtime)
 class Session {
   public:
     /* 新会话：生成 id，**不建文件**——空会话不该在清单里占一行。
-     * 文件在第一次 append 时才出现。 */
-    Session();
+     * 文件在第一次 append 时才出现。dir 是会话目录（`<workdir>/.realagent/sessions`）。 */
+    explicit Session(std::string dir);
 
     const std::string &id() const { return id_; }
 
@@ -50,11 +51,16 @@ class Session {
     bool resume(const std::string &id, nlohmann::json &out);
 
     /* 扫描会话目录 → 清单，按 mtime 倒序（最近的在前）。目录不存在返回空。 */
-    static std::vector<SessionInfo> list();
+    static std::vector<SessionInfo> list(const std::string &dir);
+
+    /* 只读一份历史出来，不动任何人的当前会话（GET /history 走这条，ADR-0020）。
+     * resume 就是「read 成功之后把自己也搬过去」，两者共用这一份读取。 */
+    static bool read(const std::string &dir, const std::string &id, nlohmann::json &out);
 
   private:
+    std::string dir_;
     std::string id_;
-    std::string path_; // 由 id_ 算出，缓存一份省得每次拼
+    std::string path_; // 由 dir_ 与 id_ 算出，缓存一份省得每次拼
 };
 
 } // namespace realagent

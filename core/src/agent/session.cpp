@@ -31,9 +31,9 @@ std::string make_id()
     return std::string(stamp) + "-" + suffix;
 }
 
-fs::path path_of(const std::string &id)
+fs::path path_of(const std::string &dir, const std::string &id)
 {
-    return fs::path(Config::session_dir()) / (id + ".jsonl");
+    return fs::path(dir) / (id + ".jsonl");
 }
 
 /* 标题：第一条 user 消息的第一个 text 块，截到 60 字节。
@@ -67,7 +67,10 @@ std::string title_of(const nlohmann::json &msg)
 
 } // namespace
 
-Session::Session() : id_(make_id()), path_(path_of(id_).string()) {}
+Session::Session(std::string dir)
+    : dir_(std::move(dir)), id_(make_id()), path_(path_of(dir_, id_).string())
+{
+}
 
 void Session::append(const nlohmann::json &msg)
 {
@@ -85,7 +88,15 @@ void Session::append(const nlohmann::json &msg)
 
 bool Session::resume(const std::string &id, nlohmann::json &out)
 {
-    const fs::path p = path_of(id);
+    if (!read(dir_, id, out)) return false;
+    id_ = id;
+    path_ = path_of(dir_, id).string();
+    return true;
+}
+
+bool Session::read(const std::string &dir, const std::string &id, nlohmann::json &out)
+{
+    const fs::path p = path_of(dir, id);
     std::ifstream f(p);
     if (!f) return false;
 
@@ -107,16 +118,14 @@ bool Session::resume(const std::string &id, nlohmann::json &out)
         msgs.push_back(std::move(parsed));
     }
     out = std::move(msgs);
-    id_ = id;
-    path_ = p.string();
     return true;
 }
 
-std::vector<SessionInfo> Session::list()
+std::vector<SessionInfo> Session::list(const std::string &dir_arg)
 {
     std::vector<SessionInfo> out;
     std::error_code ec;
-    const fs::path dir(Config::session_dir());
+    const fs::path dir(dir_arg);
     if (!fs::is_directory(dir, ec)) return out; // 还没开过会话，不是错
 
     for (const auto &e : fs::directory_iterator(dir, ec))

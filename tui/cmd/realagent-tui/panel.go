@@ -35,12 +35,12 @@ type panel struct {
 
 // makePanel 按命令名与结果载荷造面板；造不出（无数据/不认识的命令）返回 nil，
 // 调用方退回原来的文本输出——面板是锦上添花，不是新的失败点。
-func makePanel(command string, data json.RawMessage) *panel {
+func makePanel(command string, data json.RawMessage, agentID string) *panel {
 	switch command {
 	case "model":
 		return modelPanel(data)
 	case "resume":
-		return sessionPanel(data)
+		return sessionPanel(data, agentID)
 	}
 	return nil
 }
@@ -68,7 +68,7 @@ func modelPanel(data json.RawMessage) *panel {
 
 // sessionPanel 把 /resume 的会话清单做成选择面板：Enter = 恢复那个会话。
 // 清单已按最近写入倒序（core 侧排好），所以第一项就是"上一个会话"。
-func sessionPanel(data json.RawMessage) *panel {
+func sessionPanel(data json.RawMessage, agentID string) *panel {
 	var list []client.SessionInfo
 	if err := json.Unmarshal(data, &list); err != nil || len(list) == 0 {
 		return nil
@@ -81,8 +81,32 @@ func sessionPanel(data json.RawMessage) *panel {
 		}
 		p.items = append(p.items, panelItem{
 			label:  fmt.Sprintf("%s  %s  %d 条", s.ID, title, s.Messages),
-			mark:   s.Current,
+			mark:   s.OpenedBy == agentID,
 			submit: "/resume " + s.ID,
+		})
+	}
+	p.sel = p.markIndex()
+	return p
+}
+
+// agentPanel 把本组的 agent 清单做成选择面板：Enter = 切过去看它（ADR-0020）。
+//
+// 清单只有本组那些——客户端看得见本组全部，组内 agent 只看得见自己的出边邻居，
+// 两层可见性（ADR-0021）。边也一并显示：TUI 不是图上的节点，要画拓扑就得有它。
+func agentPanel(list []client.AgentInfo, cur string) *panel {
+	if len(list) == 0 {
+		return nil
+	}
+	p := &panel{title: "切到哪个 agent"}
+	for _, a := range list {
+		label := fmt.Sprintf("%s  %s  %s", a.ID, a.State, a.Workdir)
+		if n := len(a.InEdges) + len(a.OutEdges); n > 0 {
+			label += fmt.Sprintf("  (入 %d 出 %d)", len(a.InEdges), len(a.OutEdges))
+		}
+		p.items = append(p.items, panelItem{
+			label:  label,
+			mark:   a.ID == cur,
+			submit: "/agents " + a.ID,
 		})
 	}
 	p.sel = p.markIndex()
