@@ -219,19 +219,23 @@ void Agent::on_llm_event(std::string_view type, const nlohmann::json &ev, LlmOut
 
 bool Agent::llm_call(const nlohmann::json &dialog, LlmOutcome &out)
 {
-    /* 端点那一束没配齐就别往下走（ADR-0017）。
+    /* 协议解不出来，这一趟就到此为止。
      *
-     * main 在 POST /message 上挡过一道，但那只是**一个**门：收件箱之后消息还会从
-     * 别的门进来（另一个 agent 的 send_message、完成通知）。而 build_request 里
-     * 解析协议是个断言——解不出来直接 throw，那会 terminate 整个常驻服务。
-     * core 是常驻的，一条消息不该杀掉它；把该配什么原样交给用户才是 ADR-0017 要的。 */
-    if (out.error = endpoint_config_error(*ctx_.config); !out.error.empty())
+     * 不是校验：配置缺什么、空不空，core 一概不管，缺了就让它以本来的方式失败
+     * （空 base_url 换回 libcurl 一句 URL 格式错，端点不认的模型名换回一个 400）。
+     * 协议是唯一的例外，因为它不失败——它决定的是请求长什么样，解不出来就没有
+     * "一个请求"可谈。而 core 是常驻服务，一条消息不该杀掉它，所以在这儿失败一趟，
+     * 不在下面 throw。 */
+    const std::optional<Protocol> proto = protocol_from(ctx_.config->get("/provider/protocol"));
+    if (!proto)
     {
+        out.error = "protocol 认不出来：\"" + ctx_.config->get("/provider/protocol") +
+                    "\"（只有 anthropic-messages / openai-chat / openai-responses）";
         fprintf(stderr, "[agent] %s\n", out.error.c_str());
         return false;
     }
 
-    const HttpRequest req = build_request(*ctx_.config, dialog);
+    const HttpRequest req = build_request(*proto, *ctx_.config, dialog);
     if (req.url.rfind("http", 0) != 0)
     {
         // base_url 配了但拼出来不是个 URL。libcurl 会报一句难懂的错，不如在这儿说人话
@@ -245,7 +249,7 @@ bool Agent::llm_call(const nlohmann::json &dialog, LlmOutcome &out)
     // 协议在这一层就定下来：解析器建出来那一刻就知道自己要解哪套帧
     StreamCtx s{.self = this,
                 .curl = curl,
-                .parser = SseParser(*protocol_from(ctx_.config->get("protocol"))),
+                .parser = SseParser(*proto),
                 .out = &out,
                 .model = dialog.value("model", std::string())};
     curl_easy_setopt(curl, CURLOPT_URL, req.url.c_str());
@@ -509,8 +513,20 @@ void Agent::loop()
 
         broadcast("turn_start", nlohmann::json::object());
         LlmOutcome out;
-        // 对话主链路走主模型；小模型档留给后续杂活调用点（标题/摘要）
-        if (!llm_call(build_dialog(ModelTier::Main), out))
+        bool called = false;
+        // 这一趟里抛出来的东西不该杀掉常驻服务。这条线程上没有别人接着，
+        // 漏出去就是 terminate——而配置里把 base_url 写成个数字就足以触发
+        // （json 取值按类型抛）。一条消息不该杀掉 core，所以在这儿收口成"这趟失败"。
+        try
+        {
+            // 对话主链路走主模型；小模型档留给后续杂活调用点（标题/摘要）
+            called = llm_call(build_dialog(ModelTier::Main), out);
+        } catch (const std::exception &e)
+        {
+            out.error = std::string("这一趟没跑成：") + e.what();
+            fprintf(stderr, "[agent] %s\n", out.error.c_str());
+        }
+        if (!called)
         {
             if (!abort_.load())
             {

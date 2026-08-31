@@ -11,10 +11,18 @@ import (
 	"realagent/tui/internal/client"
 )
 
+// /provider 与 /model 回的是同一份载荷：provider 那部分的完整状态 + 补好元数据的清单
 func modelsJSON() json.RawMessage {
-	data, _ := json.Marshal([]client.ModelInfo{
-		{Name: "deepseek-chat", OwnedBy: "deepseek", Context: 131072},
-		{Name: "deepseek-reasoner", OwnedBy: "deepseek", Context: 131072, Current: true},
+	data, _ := json.Marshal(client.ProviderData{
+		Provider: client.Provider{
+			Protocol: "anthropic-messages",
+			Models:   []string{"deepseek-chat", "deepseek-reasoner"},
+			Model:    "deepseek-reasoner",
+		},
+		Models: []client.ModelInfo{
+			{Name: "deepseek-chat", OwnedBy: "deepseek", Context: 131072},
+			{Name: "deepseek-reasoner", OwnedBy: "deepseek", Context: 131072, Current: true},
+		},
 	})
 	return data
 }
@@ -72,14 +80,14 @@ func TestModelPanel(t *testing.T) {
 	if p == nil {
 		t.Fatal("modelPanel 返回 nil")
 	}
-	if len(p.items) != 2 {
-		t.Fatalf("items = %d, want 2", len(p.items))
+	if len(p.items) != 3 {
+		t.Fatalf("items = %d, want 3", len(p.items))
 	}
 	if p.sel != 1 {
 		t.Errorf("sel = %d, want 1（current 项）", p.sel)
 	}
-	if p.items[1].submit != "/model deepseek-reasoner" {
-		t.Errorf("submit = %q", p.items[1].submit)
+	if p.items[1].onEnter == nil {
+		t.Errorf("expected onEnter to be set")
 	}
 	if !strings.Contains(p.items[0].label, "128k") {
 		t.Errorf("label 少了上下文窗口: %q", p.items[0].label)
@@ -105,8 +113,8 @@ func TestSessionPanel(t *testing.T) {
 
 // 无数据造不出面板：退回文本输出，不是新的失败点
 func TestMakePanelEmpty(t *testing.T) {
-	if p := makePanel("model", json.RawMessage(`[]`), 1); p != nil {
-		t.Error("空清单不该开面板")
+	if p := makePanel("model", json.RawMessage(`{`), 1); p != nil {
+		t.Error("坏载荷不该开面板")
 	}
 	if p := makePanel("resume", json.RawMessage(`{`), 1); p != nil {
 		t.Error("坏载荷不该开面板")
@@ -146,15 +154,16 @@ func TestWrapIndex(t *testing.T) {
 func TestPanelNav(t *testing.T) {
 	m := testModel()
 	m.panel = modelPanel(modelsJSON())
-	m, _ = m.panelKey("down")
+	m.panel.sel = len(m.panel.items) - 1 // set to last item
+	m, _ = m.panelKey(key(tea.KeyDown))
 	if m.panel.sel != 0 {
 		t.Errorf("down 未从末项绕回首项: sel = %d", m.panel.sel)
 	}
-	m, _ = m.panelKey("up")
-	if m.panel.sel != 1 {
+	m, _ = m.panelKey(key(tea.KeyUp))
+	if m.panel.sel != len(m.panel.items)-1 {
 		t.Errorf("up 未绕回末项: sel = %d", m.panel.sel)
 	}
-	m, _ = m.panelKey("esc")
+	m, _ = m.panelKey(key(tea.KeyEsc))
 	if m.panel != nil || m.panelWant != "" {
 		t.Error("esc 应关闭面板并清掉重开意图")
 	}
@@ -165,7 +174,7 @@ func TestPanelEnterSubmits(t *testing.T) {
 	m := testModel()
 	m.panel = sessionPanel(sessionsJSON(), 1)
 	m.panel.sel = 1 // s-001
-	m, cmd := m.panelKey("enter")
+	m, cmd := m.panelKey(key(tea.KeyEnter))
 	if m.panel != nil {
 		t.Error("确认后面板应先关闭，等结果回来再开")
 	}
@@ -220,7 +229,7 @@ func TestStatuslinePanel(t *testing.T) {
 	}
 	sel := len(m.panel.items) - 1 // icons nerd
 	m.panel.sel = sel
-	m, _ = m.panelKey("enter")
+	m, _ = m.panelKey(key(tea.KeyEnter))
 	if m.sl.iconSet != "nerd" {
 		t.Errorf("iconSet = %q, want nerd", m.sl.iconSet)
 	}
@@ -242,5 +251,141 @@ func TestPanelIsModal(t *testing.T) {
 	}
 	if _, cmd := m.handleKey(key(tea.KeyCtrlC)); cmd == nil {
 		t.Error("ctrl+c 仍应能退出")
+	}
+}
+
+// 表单键位：打字进当前格，↑↓ 换项、←→ 移光标（在选项格上换的是选中的值）。
+// 这四件事分不清就得引入「选择态 / 编辑态」两个模式，而 ADR-0023 §8 明确不要模式。
+func TestPanelFormNavigation(t *testing.T) {
+	m := testModel()
+	data, _ := json.Marshal(client.ProviderData{
+		Provider:  client.Provider{Protocol: "anthropic-messages", BaseURL: "https://x"},
+		Protocols: []string{"anthropic-messages", "openai-chat", "openai-responses"},
+	})
+	m.panel = providerForm(data) // 高亮落在第一格 protocol
+
+	if len(m.panel.items[0].choices) == 0 {
+		t.Fatalf("第一项应为选择项")
+	}
+	initialChoice := m.panel.items[0].choice
+	m, _ = m.panelKey(key(tea.KeyRight))
+	if m.panel.items[0].choice == initialChoice {
+		t.Errorf("right 键未能切换选项")
+	}
+	if m.panel.sel != 0 {
+		t.Errorf("right 键在选项格上不应换项")
+	}
+
+	m, _ = m.panelKey(key(tea.KeyDown))
+	if m.panel.sel != 1 {
+		t.Errorf("down 未能换项: sel=%d", m.panel.sel)
+	}
+
+	m, _ = m.panelKey(keyRunes("n"))
+	m, _ = m.panelKey(keyRunes("e"))
+	m, _ = m.panelKey(keyRunes("w"))
+
+	val := m.panel.items[m.panel.sel].ed.value()
+	if !strings.HasSuffix(val, "new") {
+		t.Errorf("打字未能正确修改编辑格: got %q", val)
+	}
+
+	m.panel.items[m.panel.sel].ed.left()
+	m, _ = m.panelKey(key(tea.KeyLeft))
+	if m.panel.sel != 1 {
+		t.Errorf("left 键不应换项: sel=%d", m.panel.sel)
+	}
+}
+
+// 移除的那个正占着主档：清单里去掉它的同时得把主档清空，
+// 否则 provider 会指着一个清单里没有的模型名。小档不受牵连。
+func TestPanelRemoveMainModel(t *testing.T) {
+	pd := client.ProviderData{
+		Provider: client.Provider{Models: []string{"m1", "m2", "m3"}, Model: "m2", SmallModel: "m3"},
+	}
+	menu := modelSubMenu(pd, []string{"m1", "m2", "m3"}, "m2", "m3", "m2")
+	cmd, data, _ := menu.items[2].onSubmit()
+	if cmd != "/model" {
+		t.Errorf("cmd = %q", cmd)
+	}
+	out, ok := data.(client.ProviderData)
+	if !ok {
+		t.Fatalf("载荷类型错误")
+	}
+	if len(out.Provider.Models) != 2 {
+		t.Errorf("模型未移除: %v", out.Provider.Models)
+	}
+	if out.Provider.Model != "" {
+		t.Errorf("移除主模型后未置空: got %q", out.Provider.Model)
+	}
+	if out.Provider.SmallModel != "m3" {
+		t.Errorf("移除了主模型却波及了小模型: got %q", out.Provider.SmallModel)
+	}
+}
+
+func TestPanelFormSave(t *testing.T) {
+	data, _ := json.Marshal(client.ProviderData{
+		Provider:  client.Provider{Protocol: "anthropic-messages", BaseURL: "https://x"},
+		Protocols: []string{"anthropic-messages", "openai-chat", "openai-responses"},
+	})
+	p := providerForm(data)
+	p.items[1].ed.set("https://y")                        // base_url 那一格
+	cmd, outData, _ := p.items[len(p.items)-1].onSubmit() // 末项是【保存】
+	if cmd != "/provider" {
+		t.Errorf("cmd = %q", cmd)
+	}
+	newPd, ok := outData.(client.ProviderData)
+	if !ok {
+		t.Fatalf("载荷类型或长度错误")
+	}
+	if newPd.Provider.BaseURL != "https://y" {
+		t.Errorf("编辑后的值未体现: %v", newPd.Provider)
+	}
+}
+
+// 移除清单里最后一个模型同理：空清单发 []，不发 null
+func TestPanelRemoveLastModelSendsEmptyArray(t *testing.T) {
+	pd := client.ProviderData{
+		Provider: client.Provider{Models: []string{"m1"}, Model: "m1"},
+	}
+	_, data, _ := modelSubMenu(pd, []string{"m1"}, "m1", "", "m1").items[2].onSubmit()
+	body, _ := json.Marshal(data)
+	if !strings.Contains(string(body), `"models":[]`) {
+		t.Errorf("清单删空后应是空数组: %s", body)
+	}
+}
+
+// 写完回到刷新后的表单：panelWant 要对上回包的 command，面板才就地重开。
+// provider 是新配的（base_url 原本为空）时 panelWant 变成 model。
+func TestPanelSaveReopensList(t *testing.T) {
+	data1, _ := json.Marshal(client.ProviderData{
+		Provider:  client.Provider{Protocol: "anthropic-messages", BaseURL: "https://x"},
+		Protocols: []string{"anthropic-messages", "openai-chat", "openai-responses"},
+	})
+	m := testModel()
+	m.panel = providerForm(data1)
+	m.panel.sel = len(m.panel.items) - 1 // 【保存】
+	m, cmd := m.panelKey(key(tea.KeyEnter))
+	if cmd == nil {
+		t.Fatal("确认应发出请求")
+	}
+	if m.panelWant != "provider" {
+		t.Errorf("写完已有 provider 该回到 provider 面板: panelWant = %q", m.panelWant)
+	}
+
+	data2, _ := json.Marshal(client.ProviderData{
+		Provider:  client.Provider{Protocol: "anthropic-messages", BaseURL: ""}, // 新配的
+		Protocols: []string{"anthropic-messages", "openai-chat", "openai-responses"},
+	})
+	m2 := testModel()
+	m2.panel = providerForm(data2)
+	m2.panel.items[1].ed.set("https://y")
+	m2.panel.sel = len(m2.panel.items) - 1 // 【保存】
+	m2, cmd2 := m2.panelKey(key(tea.KeyEnter))
+	if cmd2 == nil {
+		t.Fatal("保存应发出请求")
+	}
+	if m2.panelWant != "model" {
+		t.Errorf("新配 provider 保存完该把 /model 顶上来: panelWant = %q", m2.panelWant)
 	}
 }

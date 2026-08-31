@@ -3,7 +3,6 @@
  *
  *   build_request         : 抽象对话 → 三套协议各自的请求形状与认证头
  *   SseParser             : SSE → 事件（三套协议各自的帧结构，产出同一套事件词汇）
- *   endpoint_config_error : 端点那一束缺键/协议名写错 → 人话（ADR-0017）
  *   http_status_error     : 4xx/5xx → 人话，绝不当成"内容为空的成功"
  *   Pricing               : token 用量 → 钱；models() 不报单价
  *
@@ -51,9 +50,11 @@ static Config make_config(const std::string &base_url, const std::string &api_ke
     fs::remove_all(home);
     fs::create_directories(home + "/.realagent");
     {
+        // 端点那一束住在 provider 里（ADR-0023），不在顶层
         std::ofstream f(home + "/.realagent/settings.json");
-        f << R"({"protocol":")" << proto << R"(","base_url":")" << base_url
-          << R"(","api_key":")" << api_key << R"(","model":"m-test"})";
+        f << R"({"provider":{"protocol":")" << proto << R"(","base_url":")"
+          << base_url << R"(","api_key":")" << api_key
+          << R"(","models":["m-test"],"model":"m-test"}})";
     }
     if (!models_json.empty())
     {
@@ -131,7 +132,7 @@ static void test_build_request()
             {"name":"read","description":"读文件","input_schema":{"type":"object","properties":{"file_path":{"type":"string"}}}}
         ]
     })");
-    const HttpRequest req = build_request(cfg, dialog);
+    const HttpRequest req = build_request(*protocol_from(cfg.get("/provider/protocol")), cfg, dialog);
 
     CHECK(req.url == "http://127.0.0.1:18080/v1/messages", "url = base_url + /v1/messages");
     std::string hdrs;
@@ -175,7 +176,7 @@ static void test_build_request_openai_chat()
         ],
         "tools": [{"name":"read","description":"读文件","input_schema":{"type":"object"}}]
     })");
-    const HttpRequest req = build_request(cfg, dialog);
+    const HttpRequest req = build_request(*protocol_from(cfg.get("/provider/protocol")), cfg, dialog);
     CHECK(req.url == "http://127.0.0.1:18080/v1/chat/completions", "url = base_url + /chat/completions");
     std::string hdrs;
     for (const auto &h : req.headers) hdrs += h + "\n";
@@ -217,7 +218,7 @@ static void test_build_request_openai_responses()
         ],
         "tools": [{"name":"read","input_schema":{"type":"object"}}]
     })");
-    const HttpRequest req = build_request(cfg, dialog);
+    const HttpRequest req = build_request(*protocol_from(cfg.get("/provider/protocol")), cfg, dialog);
     CHECK(req.url == "http://127.0.0.1:18080/v1/responses", "url = base_url + /responses");
     const json body = json::parse(req.body, nullptr, false);
     CHECK(!body.is_discarded(), "body 是合法 JSON");
@@ -236,44 +237,6 @@ static void test_build_request_openai_responses()
 }
 
 /* —— 端点配置校验（ADR-0017）：缺键、协议名写错 —— */
-static void test_endpoint_config_error()
-{
-    printf("[endpoint_config_error]\n");
-    {
-        const Config cfg = make_config("http://x", "k");
-        CHECK(endpoint_config_error(cfg).empty(), "三个键齐全 → 无错");
-    }
-    {
-        // 只配 api_key：三个必填键一个都没有
-        static std::string home = (fs::temp_directory_path() / "realagent_cfgerr_home").string();
-        fs::remove_all(home);
-        fs::create_directories(home + "/.realagent");
-        {
-            std::ofstream f(home + "/.realagent/settings.json");
-            f << R"({"api_key":"k"})";
-        }
-        setenv("HOME", home.c_str(), 1);
-        const auto cfg = Config::load();
-        CHECK(cfg.has_value(), "缺必填键不影响 load 本身（load 只管 JSON 读不读得懂）");
-        const std::string e = endpoint_config_error(*cfg);
-        CHECK(e.find("protocol") != std::string::npos, "报错点名 protocol");
-        CHECK(e.find("base_url") != std::string::npos, "报错点名 base_url");
-        CHECK(e.find("model") != std::string::npos, "缺的三个一次报全，不是报一个改一个");
-        CHECK(e.find("anthropic-messages") != std::string::npos &&
-                  e.find("openai-chat") != std::string::npos &&
-                  e.find("openai-responses") != std::string::npos,
-              "把三个可选值都列出来");
-        CHECK(e.find("settings.json") != std::string::npos, "附可直接抄的样例");
-    }
-    {
-        const Config cfg = make_config("http://x", "k", "", "anthropic_messages"); // 下划线，写错了
-        const std::string e = endpoint_config_error(cfg);
-        CHECK(e.find("不认识") != std::string::npos,
-              "协议名写错与没写分开说——他确实写了，只是拼错了");
-    }
-}
-
-/* —— HTTP 状态码：4xx/5xx 绝不当成"内容为空的成功"（ADR-0017）—— */
 static void test_http_status_error()
 {
     printf("[http_status_error]\n");
@@ -583,7 +546,6 @@ int main()
     test_build_request();
     test_build_request_openai_chat();
     test_build_request_openai_responses();
-    test_endpoint_config_error();
     test_http_status_error();
     test_parse_text();
     test_parse_tool_use();

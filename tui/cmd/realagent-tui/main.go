@@ -284,6 +284,11 @@ func (m model) update(msg tea.Msg) (model, tea.Cmd) {
 					m.panel = p
 					return m, nil
 				}
+			} else if m.panelWant == "model" && v.reply.Command == "provider" {
+				// 刚新建完一份 provider：它的 models 还是空的，直接把 /model 顶上来，
+				// 免得用户先撞一句"配置缺少必填键"再回头找配在哪
+				m.awaiting = true
+				return m, tea.Batch(sendCmd(m.client, "/model"), m.busy.begin("加载模型列表", time.Now()))
 			}
 			// 斜杠命令结果（core 返回 {"ok":true,"command":...}），渲染为 info 行。
 			text := describeCommand(v.reply.Command, v.reply.Messages)
@@ -359,15 +364,21 @@ func (m model) handleKey(v tea.KeyMsg) (model, tea.Cmd) {
 		return m, nil
 	}
 
-	if m.panel != nil {
-		return m.panelKey(v.String())
-	}
-
-	// 粘贴：整块原样插入（含换行），不当按键解释
 	if v.Paste {
+		if m.panel != nil {
+			p := m.panel
+			if len(p.items) > p.sel && p.items[p.sel].ed != nil {
+				p.items[p.sel].ed.insert(string(v.Runes))
+			}
+			return m, nil
+		}
 		m.ed.insert(string(v.Runes))
 		m.menuHid = false
 		return m, nil
+	}
+
+	if m.panel != nil {
+		return m.panelKey(v)
 	}
 
 	switch v.String() {
@@ -418,34 +429,49 @@ func (m model) handleKey(v tea.KeyMsg) (model, tea.Cmd) {
 		m.vp.ViewDown()
 		return m, nil
 
-	case "backspace":
-		m.ed.backspace()
-	case "delete":
-		m.ed.del()
-	case "left", "ctrl+b":
-		m.ed.left()
-	case "right", "ctrl+f":
-		m.ed.right()
-	case "home", "ctrl+a":
-		m.ed.home()
-	case "end", "ctrl+e":
-		m.ed.end()
-	case "ctrl+k":
-		m.ed.killToEnd()
-	case "ctrl+u":
-		m.ed.killToStart()
-	case "ctrl+w":
-		m.ed.killWord()
-
 	default:
-		if v.Type == tea.KeyRunes && len(v.Runes) > 0 {
-			m.ed.insert(string(v.Runes))
-		} else if v.Type == tea.KeySpace {
-			m.ed.insert(" ")
-		}
+		editKey(&m.ed, v)
 	}
 	m.menuHid = false // 任何编辑都让菜单复原
 	return m, nil
+}
+
+// editKey 把一次按键作用到一个编辑器上：光标移动、删除、插入字符。
+// 认得出并处理了返回 true。
+//
+// **只此一份。** 输入行与子面板里的输入格用的是同一套键位，写两遍的下场是
+// 以后加一个编辑键只改得动一边，而两边看起来都还在正常工作。
+func editKey(ed *editor, v tea.KeyMsg) bool {
+	switch v.String() {
+	case "backspace":
+		ed.backspace()
+	case "delete":
+		ed.del()
+	case "left", "ctrl+b":
+		ed.left()
+	case "right", "ctrl+f":
+		ed.right()
+	case "home", "ctrl+a":
+		ed.home()
+	case "end", "ctrl+e":
+		ed.end()
+	case "ctrl+k":
+		ed.killToEnd()
+	case "ctrl+u":
+		ed.killToStart()
+	case "ctrl+w":
+		ed.killWord()
+	default:
+		// 空格键的 Runes 是空的，只有 Type 认得出它
+		if v.Type == tea.KeyRunes && len(v.Runes) > 0 {
+			ed.insert(string(v.Runes))
+		} else if v.Type == tea.KeySpace {
+			ed.insert(" ")
+		} else {
+			return false
+		}
+	}
+	return true
 }
 
 // menuOpen 判断斜杠菜单是否激活（输入以 '/' 开头且未被 esc 收起）
@@ -510,11 +536,19 @@ func (m model) menuNav(key string) (model, tea.Cmd) {
 	return m, nil
 }
 
-// panelKey 处理子面板按键：↑/↓（Tab/Shift+Tab 同义）移动高亮，Enter 确认，Esc 取消。
-// 确认走的就是 submitInput——面板只是替用户把命令打全了，没有第二套提交路径。
-func (m model) panelKey(key string) (model, tea.Cmd) {
+// panelKey 处理子面板按键。**上下键永远换项，左右键永远移光标**（当前项是
+// 选项轮换时，左右键换的是选中的那个值）——所以不存在「选择态 / 编辑态」两个模式，
+// 也就没有模式切换键（ADR-0023 §8）。
+//
+// 收整个 KeyMsg 而不是 v.String()：空格键的 Runes 是空的，只有 Type 认得出它。
+// 拆成几个参数传进来，就得在调用点先把这件事判一遍——判断该待在用得着它的地方。
+func (m model) panelKey(v tea.KeyMsg) (model, tea.Cmd) {
 	p := m.panel
-	switch key {
+	if len(p.items) == 0 {
+		return m, nil
+	}
+
+	switch v.String() {
 	case "ctrl+c":
 		return m, tea.Quit
 	case "esc":
@@ -524,11 +558,64 @@ func (m model) panelKey(key string) (model, tea.Cmd) {
 		p.sel = wrapIndex(p.sel-1, len(p.items))
 	case "down", "tab":
 		p.sel = wrapIndex(p.sel+1, len(p.items))
+	case "left", "ctrl+b", "right", "ctrl+f":
+		// 选项格上左右键换的是选中的那个值，输入格上换的是光标位置——
+		// 两者都是"在当前这一项里横向移动"，不是换项
+		item := &p.items[p.sel]
+		if n := len(item.choices); n > 0 {
+			step := 1
+			if v.String() == "left" || v.String() == "ctrl+b" {
+				step = -1
+			}
+			item.choice = wrapIndex(item.choice+step, n)
+		} else if item.ed != nil {
+			editKey(item.ed, v)
+		}
 	case "enter":
 		item := p.items[p.sel]
-		m.panel = nil
-		m.ed.set(item.submit)
-		return m.submitInput(true)
+		if item.onEnter != nil {
+			m.panel = item.onEnter()
+			return m, nil
+		}
+		// 输入格与选项格上的 Enter 是「填完这一格」，往下走一项；
+		// 真正的提交落在带 onSubmit 的那一项上（表单里就是末尾那个【保存】）
+		if item.onSubmit == nil && (item.ed != nil || len(item.choices) > 0) {
+			if p.sel < len(p.items)-1 {
+				p.sel++
+			}
+			return m, nil
+		}
+		if item.onSubmit != nil {
+			cmd, data, openModel := item.onSubmit()
+			if cmd == "" { // 这一项没凑齐能发的东西（比如名字是空的），当没按
+				return m, nil
+			}
+			m.panel = nil
+			m.awaiting = true
+			// 写完回到刷新后的清单：结果回来时 panelWant 与回包的 command 对得上，
+			// 面板就地重开。新建 provider 是唯一的例外——它要的是接着去配模型
+			m.panelWant = strings.TrimPrefix(cmd, "/")
+			if openModel {
+				m.panelWant = "model"
+			}
+			return m, tea.Batch(
+				func() tea.Msg {
+					r, err := m.client.Command(cmd, data)
+					return sendMsg{reply: r, err: err}
+				},
+				m.busy.begin("发送中", time.Now()),
+			)
+		}
+		if item.submit != "" {
+			m.panel = nil
+			m.ed.set(item.submit)
+			return m.submitInput(true)
+		}
+	default:
+		// 打字与行编辑直接进当前这一格；不是输入格就什么都不做
+		if ed := p.items[p.sel].ed; ed != nil {
+			editKey(ed, v)
+		}
 	}
 	return m, nil
 }
@@ -885,12 +972,13 @@ func renderSessions(command string, data json.RawMessage, agentID int) string {
 // renderModels 把 /model 结果（[]ModelInfo JSON）渲染为多行 info 文本。
 // 每行：标记 名称 [供应商] 上下文；● 是当前主模型。切换用 /model <name>。
 func renderModels(data json.RawMessage) string {
-	var list []client.ModelInfo
-	if err := json.Unmarshal(data, &list); err != nil {
+	var pd client.ProviderData
+	if err := json.Unmarshal(data, &pd); err != nil {
 		return "✅ 命令已执行: /model" // 载荷解析失败降级为通用提示
 	}
+	list := pd.Models
 	if len(list) == 0 {
-		return "✅ /model: 无模型清单（模型数据表是空的）"
+		return "✅ /model: 活动 provider 的模型清单是空的（用 /model 加一个）"
 	}
 	var out []string
 	for _, m := range list {

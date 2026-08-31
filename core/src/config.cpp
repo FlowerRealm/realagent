@@ -11,10 +11,11 @@ namespace fs = std::filesystem;
 namespace {
 
 // 默认配置树（ADR-0010）：load() 用它打底，settings.json 再逐键覆盖。
-// 只有一个键：permission。这是安全默认，缺了不该放行。
-// 其余键（api_key / small_model / 端点那一束 base_url / model / protocol）没有默认——
-// 缺了 get() 本就返回空串，再写一行 d["x"] = "" 是把编译器免费做的事运行期重做一遍；
-// 端点三键为什么坚持不给默认，见 llm.hpp 与 endpoint_config_error()。
+// 只有一个键：permission。这是安全默认，缺了不该放行——它也是唯一一个不属于
+// 那一束端点配置、因而留在顶层的键（ADR-0023）。
+// provider 没有默认：没配时 get() 取那五个键本就返回空串，
+// 再写一行 d["provider"] = {} 是把编译器免费做的事运行期重做一遍；
+// provider 里那几个键为什么坚持不给默认（也不校验），见 CONTEXT.md 的[[端点束]]。
 nlohmann::json defaults()
 {
     // dangerous 工具执行前怎么裁决：ask 问用户（默认）/ allow-all 一律放行 / deny 一律拒绝
@@ -38,15 +39,6 @@ std::expected<std::optional<nlohmann::json>, std::string> read_settings(const fs
     nlohmann::json j = nlohmann::json::parse(text, nullptr, false);
     if (j.is_discarded()) return std::unexpected(path.string() + " 不是合法 JSON");
     return std::optional<nlohmann::json>{std::move(j)};
-}
-
-// 逐键覆盖：用户配了哪个键就换哪个键，没提的保留默认值。
-// 配置树是平的（ADR-0016 删掉 plugins 那一节之后再没有嵌套键），所以不必递归——
-// 需要嵌套的那天连着默认树一起加，不提前留机械。
-void merge_into(nlohmann::json &dst, const nlohmann::json &src)
-{
-    if (!src.is_object()) return; // settings.json 是合法 JSON 但不是对象：当没配
-    for (const auto &[k, v] : src.items()) dst[k] = v;
 }
 
 // tmp + rename 原子写。断电或进程被杀只会留下临时文件，不会留半截的 settings.json
@@ -93,38 +85,43 @@ std::expected<Config, std::string> Config::load()
     Config cfg;
     cfg.settings_ = defaults();
 
-    // 默认树打底，settings.json 覆盖。缺键不是错，缺的就用默认值——不校验必需项。
+    // 默认树打底，settings.json 逐个顶层键覆盖（update 默认不递归，正是要的：
+    // 唯一的嵌套是 provider 那个对象，它的语义就是"这一束一起换"）。
+    // 缺键不是错，缺的就用默认值——不校验必需项。
+    // 合法 JSON 但不是对象（比如一个数组）就当没配：update 对非对象会抛。
     auto file = read_settings(settings_path(global_dir()));
     if (!file) return std::unexpected(file.error());
-    if (*file) merge_into(cfg.settings_, **file);
+    if (*file && (*file)->is_object()) cfg.settings_.update(**file);
 
     return cfg;
 }
 
-std::string Config::get(std::string_view key) const
+std::string Config::get(std::string_view path) const
 {
     std::lock_guard<std::mutex> lk(*mutex_);
-    return settings_.value(std::string(key), std::string());
+    return settings_.value(nlohmann::json::json_pointer(std::string(path)), std::string());
 }
 
-bool Config::has(std::string_view key) const
+nlohmann::json Config::provider() const
 {
     std::lock_guard<std::mutex> lk(*mutex_);
-    return settings_.contains(std::string(key));
+    const nlohmann::json p = settings_.value("/provider"_json_pointer, nlohmann::json::object());
+    return p.is_object() ? p : nlohmann::json::object(); // 配成别的类型 = 当没配
 }
 
 // 不做档位间回落：small_model 空就是空串。回落会让"我明明配了小模型"与
 // "我没配所以用了主模型"长得一模一样，出账单时才发现区别
 std::string Config::model(ModelTier tier) const
 {
-    return get(tier == ModelTier::Small ? "small_model" : "model");
+    return get(tier == ModelTier::Small ? "/provider/small_model" : "/provider/model");
 }
 
 bool Config::persist(std::string_view key, const nlohmann::json &v)
 {
     const fs::path target = settings_path(global_dir());
 
-    // 点对点：读出文件原样，只改这一个键。不 dump 内存树——默认值不进用户的文件。
+    // 点对点：读出文件原样，只改这一个键。不 dump 内存树——
+    // 默认值不进用户的文件，core 还不认识的键也原样留着。
     auto file = read_settings(target);
     if (!file)
     {
@@ -145,12 +142,6 @@ bool Config::persist(std::string_view key, const nlohmann::json &v)
 std::string Config::models_path() const
 {
     return (global_dir() / ".realagent" / "models.json").string();
-}
-
-nlohmann::json Config::to_json() const
-{
-    std::lock_guard<std::mutex> lk(*mutex_);
-    return settings_;
 }
 
 } // namespace realagent

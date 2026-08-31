@@ -105,8 +105,8 @@ HttpRequest build_request(protocol::OpenAiChat, const Config &cfg, const nlohman
     }
 
     HttpRequest req;
-    req.url = cfg.get("base_url") + "/chat/completions";
-    if (const std::string key = cfg.get("api_key"); !key.empty())
+    req.url = cfg.get("/provider/base_url") + "/chat/completions";
+    if (const std::string key = cfg.get("/provider/api_key"); !key.empty())
         req.headers.push_back("Authorization: Bearer " + key);
     req.headers.push_back("Content-Type: application/json");
     req.body = body.dump();

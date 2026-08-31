@@ -100,8 +100,8 @@ HttpRequest build_request(protocol::AnthropicMessages, const Config &cfg, const 
     }
 
     HttpRequest req;
-    req.url = cfg.get("base_url") + "/v1/messages";
-    if (const std::string key = cfg.get("api_key"); !key.empty())
+    req.url = cfg.get("/provider/base_url") + "/v1/messages";
+    if (const std::string key = cfg.get("/provider/api_key"); !key.empty())
     {
         req.headers.push_back("x-api-key: " + key);
         req.headers.push_back("Authorization: Bearer " + key);

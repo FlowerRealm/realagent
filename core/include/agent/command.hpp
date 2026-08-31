@@ -1,5 +1,5 @@
 /*
- * command.hpp — 斜杠命令（/new、/resume、/model）
+ * command.hpp — 斜杠命令（/new、/resume、/model、/provider）
  *
  * 两个门通向这里：`POST /message` 的 `/` 前缀、`POST /command`。一份实现——
  * 两份迟早只改一边，那时同一条命令在两个端点上行为不同，谁都查不出为什么。
@@ -48,8 +48,14 @@ nlohmann::json sessions_payload(const Agents &pool, const Agent &agent);
 nlohmann::json statusline_payload(const CoreContext &ctx);
 
 /* 执行一条斜杠命令（input 带前导 `/`），返回响应 JSON 字符串。
- * agent 的锁在这里面拿：拿不到就回 AGENT_BUSY，不排队等。 */
+ * agent 的锁在这里面拿：拿不到就回 AGENT_BUSY，不排队等。
+ *
+ * `data` 是结构化参数（ADR-0023 §6），`POST /command` 体里的同名字段，不传就是 null。
+ * 表单类命令（/provider、/model）走它：四个字段在客户端已经是分好的字符串，
+ * 序列化成一行文本再让 core 解析回来，中间凭空多出一整套引号规则——
+ * api_key 里可以有空格，base_url 里可以有 `=`。那不是边界情况，是编码往返自己制造的。 */
 std::string handle_command(CoreContext &ctx, Agents &pool, Agent &agent,
-                           const std::string &input);
+                           const std::string &input,
+                           const nlohmann::json &data = nlohmann::json());
 
 } // namespace realagent

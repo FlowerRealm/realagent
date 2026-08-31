@@ -10,10 +10,10 @@ import (
 )
 
 func TestRenderModels(t *testing.T) {
-	data, _ := json.Marshal([]client.ModelInfo{
+	data, _ := json.Marshal(client.ProviderData{Models: []client.ModelInfo{
 		{Name: "deepseek-v4-flash", OwnedBy: "deepseek", Context: 1048576, Current: true},
 		{Name: "deepseek-v4-pro", OwnedBy: "deepseek", Context: 1048576},
-	})
+	}})
 	got := renderModels(data)
 	for _, want := range []string{"deepseek-v4-flash", "deepseek-v4-pro", "deepseek", "●"} {
 		if !strings.Contains(got, want) {
@@ -47,7 +47,7 @@ func TestNamedCommandErrorRendered(t *testing.T) {
 func TestModelListSplitsLines(t *testing.T) {
 	m := testModel()
 	m.awaiting = true
-	data, _ := json.Marshal([]client.ModelInfo{{Name: "a"}, {Name: "b"}})
+	data, _ := json.Marshal(client.ProviderData{Models: []client.ModelInfo{{Name: "a"}, {Name: "b"}}})
 	nm, _ := m.Update(sendMsg{reply: client.Reply{Ok: true, Command: "model", Data: data}})
 	m = nm.(model)
 	if len(m.lines) != 2 {

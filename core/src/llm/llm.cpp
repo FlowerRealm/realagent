@@ -7,78 +7,44 @@
  */
 #include "llm/llm.hpp"
 
+#include <array>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <utility>
 
 namespace realagent {
 namespace fs = std::filesystem;
 
 /* ==================== 协议身份 ==================== */
 
+/* 协议名单只此一份。三个用途都读它：认字符串、印字符串、把可选值发给客户端。
+ * 写三遍就有三处要同步，而它们分散在两个文件里——TUI 那头也曾自己抄过一份。 */
+constexpr std::array<std::pair<std::string_view, Protocol>, 3> kProtocols{{
+    {"anthropic-messages", Protocol::AnthropicMessages},
+    {"openai-chat", Protocol::OpenAiChat},
+    {"openai-responses", Protocol::OpenAiResponses},
+}};
+
 std::optional<Protocol> protocol_from(std::string_view name)
 {
-    if (name == "anthropic-messages") return Protocol::AnthropicMessages;
-    if (name == "openai-chat") return Protocol::OpenAiChat;
-    if (name == "openai-responses") return Protocol::OpenAiResponses;
+    for (const auto &[text, p] : kProtocols)
+        if (text == name) return p;
     return std::nullopt;
 }
 
 std::string_view protocol_name(Protocol p)
 {
-    switch (p)
-    {
-        case Protocol::AnthropicMessages:
-            return "anthropic-messages";
-        case Protocol::OpenAiChat:
-            return "openai-chat";
-        case Protocol::OpenAiResponses:
-            return "openai-responses";
-    }
-    return "";
+    for (const auto &[text, q] : kProtocols)
+        if (q == p) return text;
+    return {};
 }
 
-/* ==================== 端点配置校验（ADR-0017）==================== */
-
-std::string endpoint_config_error(const Config &cfg)
+nlohmann::json protocol_names()
 {
-    std::vector<std::string> missing;
-    if (cfg.get("protocol").empty()) missing.push_back("protocol");
-    if (cfg.get("base_url").empty()) missing.push_back("base_url");
-    if (cfg.get("model").empty()) missing.push_back("model");
-
-    // 协议名写错与协议名没写是两种错，分开说——"你写的这个我不认识"比
-    // "你没写"多一条信息：他确实写了，只是拼错或记岔了
-    std::string bad_protocol;
-    if (missing.empty() && !protocol_from(cfg.get("protocol")))
-        bad_protocol = cfg.get("protocol");
-
-    if (missing.empty() && bad_protocol.empty()) return {};
-
-    std::string out;
-    if (!missing.empty())
-    {
-        out = "配置缺少必填键：";
-        for (std::size_t i = 0; i < missing.size(); ++i)
-        {
-            if (i) out += "、";
-            out += missing[i];
-        }
-        out += "。这三个键没有默认值——填错产生的报错最难诊断，所以宁可现在拦住你。";
-    }
-    else
-    {
-        out = "配置里的 protocol=\"" + bad_protocol + "\" 不认识。";
-    }
-    out += "\nprotocol 只有三个值：anthropic-messages / openai-chat / openai-responses。";
-    out += "\n往 ~/.realagent/settings.json 里写（照抄改值即可）：\n";
-    out += R"({
-  "protocol": "anthropic-messages",
-  "base_url": "https://api.deepseek.com/anthropic",
-  "model": "deepseek-v4-flash",
-  "api_key": "sk-你的密钥"
-})";
-    return out;
+    nlohmann::json arr = nlohmann::json::array();
+    for (const auto &[text, p] : kProtocols) arr.push_back(text);
+    return arr;
 }
 
 std::string http_status_error(long status, const std::string &body)
@@ -101,12 +67,9 @@ std::string http_status_error(long status, const std::string &body)
 
 /* ==================== 上行派发 ==================== */
 
-HttpRequest build_request(const Config &cfg, const nlohmann::json &dialog)
+HttpRequest build_request(Protocol p, const Config &cfg, const nlohmann::json &dialog)
 {
-    // 协议缺失/写错在 Config::missing_required 那一关就拦下了（ADR-0017），
-    // 到这里一定解得出来。解不出来只可能是那一关漏了，宁可炸响也不要静默走某个默认
-    const auto p = protocol_from(cfg.get("protocol"));
-    switch (p.value())
+    switch (p)
     {
         case Protocol::AnthropicMessages:
             return build_request(protocol::AnthropicMessages{}, cfg, dialog);

@@ -58,3 +58,19 @@ add_executable(test_agent test_agent.cpp
 target_include_directories(test_agent PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
 target_link_libraries(test_agent PRIVATE ${CURL_LIBRARIES})
 add_test(NAME agent COMMAND test_agent)
+
+# /provider 与 /model 两条管配置的斜杠命令（ADR-0023）。不起服务、不碰网络：
+# 验的是命令层自己的知识——按"带了什么"分派、覆盖写、校验不过整条拒绝。
+add_executable(test_command test_command.cpp
+  ../src/agent/command.cpp
+  ../src/agent/agent.cpp ../src/agent/agents.cpp ../src/agent/executor.cpp ../src/agent/approval.cpp
+  ../src/agent/session.cpp ../src/agent/skills.cpp ../src/llm/llm.cpp
+  ../src/tools/tools.cpp ../src/tools/read.cpp ../src/tools/edit.cpp
+  ../src/tools/bash.cpp ../src/tools/spawn.cpp ../src/tools/send_message.cpp ../src/tools/stop.cpp
+  ../src/llm/upstream/anthropic_messages.cpp ../src/llm/upstream/openai_chat.cpp
+  ../src/llm/upstream/openai_responses.cpp ../src/llm/downstream/anthropic_messages.cpp
+  ../src/llm/downstream/openai_chat.cpp ../src/llm/downstream/openai_responses.cpp
+  ../src/config.cpp)
+target_include_directories(test_command PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
+target_link_libraries(test_command PRIVATE ${CURL_LIBRARIES})
+add_test(NAME command COMMAND test_command)

@@ -81,8 +81,6 @@ int main(int argc, char **argv)
      * 恰好犯了"报错了用户啥都不知道"这条本身要治的病。
      * 所以照常起、启动日志喊一遍，同时把这段话原样交给任何一次 POST /message，
      * 让它出现在用户正盯着的那块屏幕上。 */
-    const std::string cfg_error = endpoint_config_error(cfg);
-    if (!cfg_error.empty()) fprintf(stderr, "[config] %s\n", cfg_error.c_str());
 
     // 线程安全事件队列：agent 线程 emit → 事件循环 on_tick flush 到推送流
     // （ADR-0002 线程模型：quiche 非线程安全，推送必须在事件循环线程）
@@ -154,7 +152,6 @@ int main(int argc, char **argv)
         Agent *a = pool.find(id);
         if (!a) return command_error("无此 agent: " + std::to_string(id));
         if (user_input[0] == '/') return handle_command(ctx, pool, *a, user_input);
-        if (!cfg_error.empty()) return command_error(cfg_error);
         a->post(user_input);
         return std::string("{\"status\":\"processing\"}");
     };
@@ -166,7 +163,7 @@ int main(int argc, char **argv)
         const int id = j.value("agent_id", 0);
         Agent *a = pool.find(id);
         if (!a) return command_error("无此 agent: " + std::to_string(id));
-        return handle_command(ctx, pool, *a, cmd);
+        return handle_command(ctx, pool, *a, cmd, j.value("data", nlohmann::json()));
     };
     // GET /sessions 与 POST /session 都要指名道姓：会话目录跟着 agent 的 workdir 走
     cbs.on_sessions = [&](const std::string &body) {

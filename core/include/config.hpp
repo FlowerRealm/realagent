@@ -4,8 +4,14 @@
  * 分层两级（ADR-0010）：代码里的默认打底（config.cpp 的 defaults()），
  * ~/.realagent/settings.json 覆盖。不看 cwd，不看项目目录，没有 env 那一层。
  *
- * 有默认值的键只有一个：permission（安全默认）。其余键缺了就是空串。
- * 端点那一束（protocol / base_url / model）坚持不给默认，理由见 llm.hpp。
+ * 有默认值的键只有一个：permission（安全默认）。其余键缺了就是空串，
+ * 而且**没有任何一处校验它们齐不齐**：缺了就让它以本来的方式失败
+ * （空 base_url 换回一句 libcurl 的 URL 格式错，缺 api_key 换回一个 401）。
+ *
+ * 配置树有且只有一层嵌套（ADR-0023）：provider 是一个对象，端点那一束与
+ * api_key / model / small_model 住在里面，不在顶层。
+ * 取值用 JSON Pointer：get("/provider/base_url")。路径自己说清读的是哪儿，
+ * 不需要"哪些键住在里面"的名单，也不需要逐字段的取值函数。
  *
  * 没有"必需键"：配置缺失不是错误状态，只是取到默认值，load() 不校验缺了什么。
  * load() 只在一种情况下失败：settings.json 存在但不是合法 JSON。
@@ -45,14 +51,18 @@ enum class ModelTier {
 
 class Config {
   public:
-    // 加载：默认树打底 + ~/.realagent/settings.json 逐键覆盖（配置树是平的）。
+    // 加载：默认树打底 + ~/.realagent/settings.json 逐键覆盖（顶层逐键，不递归）。
     // 只有一种失败：文件存在但不是合法 JSON——读不懂就别带着半份配置往下跑。
     // 配置"缺项"不是失败，缺的取默认值。
     static std::expected<Config, std::string> load();
 
-    // 读取配置项（合并后的值；未知键返回空串）
-    std::string get(std::string_view key) const;
-    bool has(std::string_view key) const;
+    // 按 JSON Pointer 取一个字符串（"/permission"、"/provider/base_url"）。
+    // 路径不存在 → 空串；值不是字符串 → 抛（配置写错了，那一趟失败，不是静默走默认）
+    std::string get(std::string_view path) const;
+
+    // 那一束整份（没配 / 配成别的类型 → 空对象，不是 null——null.value() 会抛）。
+    // 按值返回：settings_ 在 mutex 后面，交出引用就是交出一个没上锁的引用。
+    nlohmann::json provider() const;
 
     // 按档位取模型名（键名只此一处知道）
     std::string model(ModelTier tier) const;
@@ -66,9 +76,6 @@ class Config {
     // 模型数据表的用户接管版：~/.realagent/models.json。
     // 存在即整表替换出厂表（ADR-0009），不合并
     std::string models_path() const;
-
-    // 合并后的完整配置树
-    nlohmann::json to_json() const;
 
   private:
     nlohmann::json settings_; // 合并后的配置树（默认树 + settings.json）

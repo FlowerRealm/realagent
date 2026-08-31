@@ -44,6 +44,41 @@ type Reply struct {
 	AgentID  int             `json:"agent_id,omitempty"`
 }
 
+// Command 发送一条结构化命令（POST /command），body 带 agent_id / command / 可选 data。
+func (c *Client) Command(command string, data any) (Reply, error) {
+	req := map[string]any{
+		"agent_id": c.agentID,
+		"command":  command,
+	}
+	if data != nil {
+		req["data"] = data
+	}
+	return c.postJSON("/command", req)
+}
+
+// Provider 是那一束模型后端配置：端点、凭证、这条路径上的模型清单，
+// 以及两档各选中了谁（ADR-0023）。盘上就这一份。
+type Provider struct {
+	Protocol   string   `json:"protocol"`
+	BaseURL    string   `json:"base_url"`
+	APIKey     string   `json:"api_key"`
+	Models     []string `json:"models"`
+	Model      string   `json:"model"`
+	SmallModel string   `json:"small_model"`
+}
+
+// ProviderData 是 /provider 与 /model 共用的载荷。
+//
+// 写回时原样发这个结构，core 直接落盘——它不合并、不重算，所以客户端拼的必须是
+// **完整**的那一束。Models 只有读的时候有值，是 Provider.Models 补上元数据之后的
+// 样子，发回去时 core 不看它。
+type ProviderData struct {
+	Provider Provider    `json:"provider"`
+	Models   []ModelInfo `json:"models,omitempty"`
+	// 可选的 protocol 取值，core 下发（名单在 core 那一份，客户端不抄第二份）
+	Protocols []string `json:"protocols,omitempty"`
+}
+
 // Command 是一条可用的斜杠命令（GET /commands，core 是唯一真相源）
 type Command struct {
 	Name        string `json:"name"`        // 不带 '/'
@@ -249,6 +284,7 @@ type ModelInfo struct {
 	OwnedBy string `json:"owned_by"`
 	Context int64  `json:"context"`
 	Current bool   `json:"current"`
+	Small   bool   `json:"small"`
 }
 
 // SessionInfo 是一条会话记录（/new /resume 与 GET /sessions 的 data 载荷）。
@@ -268,7 +304,7 @@ type SessionInfo struct {
 
 // AgentInfo 是一条 agent 记录（GET /agents）。
 type AgentInfo struct {
-	ID        int   `json:"id"`
+	ID        int    `json:"id"`
 	Workdir   string `json:"workdir"`
 	State     string `json:"state"` // running | idle
 	SessionID string `json:"session_id"`

@@ -53,15 +53,10 @@ enum class Protocol { AnthropicMessages,
 
 /* 配置字符串 → 协议。认不出返回 nullopt（调用方报错，不猜、不兜底） */
 std::optional<Protocol> protocol_from(std::string_view name);
-/* 协议 → 配置字符串（报错信息里列可选值用） */
+/* 协议 → 配置字符串 */
 std::string_view protocol_name(Protocol p);
-
-/* 端点那一束（protocol / base_url / model）配齐了没有。配齐返回空串，
- * 否则返回一段人话：缺哪个说哪个、一次说全、附一段能直接抄的 settings.json。
- *
- * 为什么这个检查住在 llm 而不是 config：这三个键是"打一次 LLM 调用需要什么"，
- * 那是本模块的知识。config 只管键的读写，不该认识 anthropic-messages 是什么。 */
-std::string endpoint_config_error(const Config &cfg);
+/* 全部可选值（发给客户端渲染选项用）。名单只此一份，客户端不留第二份 */
+nlohmann::json protocol_names();
 
 /* HTTP 状态码不是 2xx 时的人话错误（body 里的 message 能捞就捞出来）。
  * 三套协议共用一条规矩：先看状态码，再谈解析——4xx/5xx 的响应体不是流，
@@ -83,7 +78,9 @@ HttpRequest build_request(protocol::AnthropicMessages, const Config &cfg, const 
 HttpRequest build_request(protocol::OpenAiChat, const Config &cfg, const nlohmann::json &dialog);
 HttpRequest build_request(protocol::OpenAiResponses, const Config &cfg, const nlohmann::json &dialog);
 /* 按配置里的协议派发（认不出的协议由 Config 那一关拦下，到不了这里） */
-HttpRequest build_request(const Config &cfg, const nlohmann::json &dialog);
+/* 派发到上面三个之一。协议由调用方解析好传进来——它自己已经拿着那个值
+ * （解析器也要用），在这里再解一遍就多一处"解不出来怎么办"要回答。 */
+HttpRequest build_request(Protocol p, const Config &cfg, const nlohmann::json &dialog);
 
 /* 解析出的事件同步交给它（payload 只在回调内有效） */
 using EventSink = std::function<void(std::string_view type, const nlohmann::json &payload)>;

@@ -21,7 +21,7 @@ namespace {
  * 认不出的值按 ask：配置写错时该多问一句，不该多放一次行。 */
 Verdict decide(const Config &cfg)
 {
-    const std::string mode = cfg.get("permission");
+    const std::string mode = cfg.get("/permission");
     if (mode == "allow-all") return Verdict::Allow;
     if (mode == "deny") return Verdict::Deny;
     if (mode != "ask" && !mode.empty())
