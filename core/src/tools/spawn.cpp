@@ -8,9 +8,9 @@
 
 namespace realagent {
 
-ToolDef spawn_def()
+nlohmann::json spawn_def()
 {
-    return {
+    return tool_def(
         "spawn", "派生 agent",
         "Spawn a new agent in the background. Returns the new agent's numeric id immediately\n"
         "without waiting for it to finish.\n"
@@ -22,7 +22,7 @@ ToolDef spawn_def()
         "Ids present in both lists establish bidirectional communication.\n"
         "Both lists accept only your own agent id or known agent ids.",
         R"({"type":"object","properties":{"workdir":{"type":"string","description":"working directory for the new agent, required"},"prompt":{"type":"string","description":"initial message handed to the new agent"},"in_edges":{"type":"array","items":{"type":"integer"},"description":"agent ids permitted to send messages to this agent and receive its completion notice"},"out_edges":{"type":"array","items":{"type":"integer"},"description":"agent ids this agent is permitted to send messages to"}},"required":["workdir","prompt"]})",
-        true};
+        true);
 }
 
 } // namespace realagent

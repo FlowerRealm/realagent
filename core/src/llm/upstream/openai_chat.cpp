@@ -11,6 +11,7 @@
  * reasoning 内容是只读的产出。硬塞进 content 会被当成用户可见正文，那是另一种谎。
  */
 #include "llm/llm.hpp"
+#include "tools/tools.hpp"
 
 namespace realagent {
 
@@ -62,7 +63,7 @@ HttpRequest build_request(protocol::OpenAiChat, const Config &cfg, const nlohman
                 {
                     tool_msgs.push_back(nlohmann::json{{"role", "tool"},
                                                        {"tool_call_id", b.at("tool_use_id")},
-                                                       {"content", b.at("content")}});
+                                                       {"content", tool_content_text(b.at("content"))}});
                 }
                 else if (bt == "tool_use")
                 {

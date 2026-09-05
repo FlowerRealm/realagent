@@ -24,6 +24,7 @@
 #include "agent/skills.hpp"
 #include "json.hpp"
 #include "llm/llm.hpp"
+#include "mcp/mcp.hpp"
 
 namespace realagent {
 
@@ -148,6 +149,14 @@ class Agent {
     Agents *pool_ = nullptr; // 跑完时沿入边通知邻居；独立构造（测试）时为空
     int id_ = 0;
     std::string workdir_;
+    /* 这个 agent 看得见的 MCP 工具与连接（ADR-0023）。**建 agent 时开一次**，
+     * 与 workdir、skill 清单同期确定、同期不变——一趟中间清单变形，prompt cache 当场碎。
+     * 连接本身在进程级的池子里按配置去重，这里拿的是 shared_ptr：最后一个 agent 松手，
+     * server 进程才收尾。**排在 exe_ 前面**：Executor 拿的是指向它的指针。
+     *
+     * ADR-0023 说的是「生死跟着组」，而组（ADR-0021）还没建——今天持有者是 agent。
+     * 换成组只是换谁拿这个 Lease，计数机制不变（池里存的是 weak_ptr）。 */
+    McpHub::Lease mcp_;
     /* Executor 的 inflight_ / interrupted_ 是**这一个 agent** 的状态，
      * 共享一个就会串味：中断 A 会把 B 的下一次工具调用一起拒掉。 */
     Executor exe_;

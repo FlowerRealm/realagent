@@ -7,13 +7,14 @@
 
 namespace realagent {
 
-ToolDef send_message_def()
+nlohmann::json send_message_def()
 {
-    return {"send_message", "给别的 agent 发消息",
-            "Deliver a message into another agent's inbox. You may only send to the numeric ids\n"
-            "of agents you have an out edge to — without an edge you do not know it exists.",
-            R"({"type":"object","properties":{"to":{"type":"integer"},"text":{"type":"string"}},"required":["to","text"]})",
-            false};
+    return tool_def(
+        "send_message", "给别的 agent 发消息",
+        "Deliver a message into another agent's inbox. You may only send to the numeric ids\n"
+        "of agents you have an out edge to — without an edge you do not know it exists.",
+        R"({"type":"object","properties":{"to":{"type":"integer"},"text":{"type":"string"}},"required":["to","text"]})",
+        false);
 }
 
 } // namespace realagent

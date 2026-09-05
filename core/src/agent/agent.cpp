@@ -23,10 +23,18 @@ std::string session_dir_of(const std::string &workdir, bool sub)
 Agent::Agent(CoreContext &ctx, ApprovalCoordinator &approval, std::string workdir, int id,
              Agents *pool, bool sub)
     : ctx_(ctx), pool_(pool), id_(id), workdir_(std::move(workdir)),
-      exe_(ctx, approval, workdir_, pool_, id_),
+      mcp_(ctx.mcp ? ctx.mcp->open(workdir_) : McpHub::Lease{}),
+      exe_(ctx, approval, workdir_, pool_, id_, &mcp_),
       session_dir_(session_dir_of(workdir_, sub)),
       session_(session_dir_), skills_(scan_skills(workdir_))
 {
+    /* 连不上的 server 只报不拦（models.json 那条先例）。用户当下看不见这行——
+     * core 是常驻服务，面前只有 TUI。这笔债 skill 也欠着，一并另算（ADR-0023 §8）。 */
+    for (const std::string &e : mcp_.errors) fprintf(stderr, "[mcp] %s\n", e.c_str());
+    if (!mcp_.tools.empty())
+        fprintf(stderr, "[mcp] agent %d: %zu servers, %zu tools\n", id_, mcp_.conns.size(),
+                mcp_.tools.size());
+
     messages_ = nlohmann::json::array();
     loop_ = std::thread([this] { loop(); });
 }
@@ -303,18 +311,12 @@ nlohmann::json Agent::build_dialog(ModelTier tier) const
                                                     "Assistant: [Explains the function] + tool_call: stop()" +
         // skill 清单（ADR-0022）。一个都没有时这里是空串——system prompt 与加这个功能之前一个字不差
         skills_prompt(skills_);
-    // 工具定义：静态表，LLM 见到的名字与 executor 查表用的名字是同一个
-    nlohmann::json tools = nlohmann::json::array();
-    for (const auto &t : tool_defs())
-    {
-        nlohmann::json tool;
-        tool["name"] = t.name;
-        tool["description"] = t.description;
-        // 工具 schema 是编译进来的字面量，解不动就是 core 自己写错了
-        tool["input_schema"] = nlohmann::json::parse(t.parameters);
-        tools.push_back(tool);
-    }
-    dialog["tools"] = tools;
+    /* 工具定义**就是端点要的那个对象**：拷一份，抹掉 core 私有的那一个键（ADR-0023 §2）。
+     * LLM 见到的名字与 executor 查表用的名字是同一个。 */
+    nlohmann::json tools = tool_defs();
+    for (const nlohmann::json &t : mcp_.tools) tools.push_back(t); // MCP 来的接在后面
+    for (auto &t : tools) t.erase("_core");
+    dialog["tools"] = std::move(tools);
     dialog["messages"] = messages_;
     return dialog;
 }
@@ -431,24 +433,28 @@ bool Agent::run_tools(const LlmOutcome &out)
         if (abort_.load()) break;
         broadcast("tool_execution_start", nlohmann::json{{"name", tu.name}, {"id", tu.id}});
         const nlohmann::json r = exe_.execute(tu.id, tu.name, tu.input);
-        const int status = r["status"];
+        /* 三个字段每条返回路径都写齐了（Executor::execute），所以三个都直接取——
+         * 给其中两个配默认值，只会在谁漏写的那天把这件事盖住。 */
+        const bool is_error = r["isError"];
         const bool interrupted = r["interrupted"];
-        const std::string output = r["output"];
+        nlohmann::json content = r["content"];
         // 认字段不认名字：哪个工具能收工是工具自己说的，loop 不抄一份工具表
         if (r.value("stop", false)) stopped = true;
+        /* 帧里的 status 是协议契约（PROTOCOL.md），保持 int：0 或 1。
+         * bash 的退出码从此不进这个帧——TUI 一直只判 != 0，行为一个字不变。 */
         broadcast("tool_execution_end", nlohmann::json{{"name", tu.name},
                                                        {"id", tu.id},
-                                                       {"status", status},
+                                                       {"status", is_error ? 1 : 0},
                                                        {"interrupted", interrupted}});
         nlohmann::json tb;
         tb["type"] = "tool_result";
         tb["tool_use_id"] = tu.id;
         // 被中断的结果照实说，别混进"命令失败了"里——模型据此判断该不该重试，这两件事
         // 它的反应完全不同。手上那截输出仍然给它，那是真跑出来的
-        tb["content"] = interrupted ? (output.empty() ? std::string("interrupted by user")
-                                                      : output + "\n[interrupted by user]")
-                                    : output;
-        if (status != 0 || interrupted) tb["is_error"] = true;
+        if (interrupted)
+            content.push_back(nlohmann::json{{"type", "text"}, {"text", "interrupted by user"}});
+        tb["content"] = std::move(content);
+        if (is_error || interrupted) tb["is_error"] = true;
         record(nlohmann::json{{"role", "user"}, {"content", nlohmann::json::array({tb})}});
         ++executed;
         if (interrupted) break;
@@ -460,7 +466,7 @@ bool Agent::run_tools(const LlmOutcome &out)
         record(nlohmann::json{{"role", "user"},
                               {"content", nlohmann::json::array({nlohmann::json{{"type", "tool_result"},
                                                                                 {"tool_use_id", out.tool_uses[i].id},
-                                                                                {"content", "interrupted by user"},
+                                                                                {"content", nlohmann::json::array({{{"type", "text"}, {"text", "interrupted by user"}}})},
                                                                                 {"is_error", true}}})}});
     }
     return stopped;

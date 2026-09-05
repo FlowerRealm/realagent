@@ -9,7 +9,7 @@
  *   - 工具清单：三个工具、危险位、查不到的名字返回 nullptr
  *   - read：带 anchor 的输出、分页、输出上限、超大文件（ADR-0018）
  *   - edit：一个操作四种用法 / 先全校验再写 / 陈旧 anchor 拒绝 / 多文件遇错即停
- *   - bash：stdout 回传、退出码透传、缺参数
+ *   - bash：stdout 回传、非零退出码即错误、缺参数
  *   - 权限（ADR-0005 / ADR-0016）：allow-all 放行、deny 拒绝、ask 真等裁决、
  *     认不出的值按 ask 处理（写错配置该多问一句，不该多放一次行）
  *   - 中止（ADR-0002 R8）：执行前的中止标记撞得上，跑着的 bash 打得断，reset 抹得掉
@@ -31,6 +31,7 @@
 #include "agent/context.hpp"
 #include "agent/executor.hpp"
 #include "config.hpp"
+#include "mcp/mcp.hpp"
 #include "tools/tools.hpp"
 
 namespace fs = std::filesystem;
@@ -83,12 +84,19 @@ static std::string slurp(const fs::path &p)
 static json call(const std::string &name, const std::string &params)
 {
     // workdir 取 g_home：测试里路径都是绝对的，这个值只有 bash 的 chdir 会用到
-    return run_tool("call-1", name, params, nullptr, g_home.string());
+    return run_tool("call-1", name, json::parse(params), nullptr, g_home.string());
 }
 
-/* 结果 json 的三个字段：{"status", "output"}（executor 再加 "interrupted"） */
-static int st(const json &r) { return r.value("status", -1); }
-static std::string msg(const json &r) { return r.value("output", std::string()); }
+/* 结果就是 MCP 那个形状：{"content": [块...], "isError"}（executor 再加 "interrupted"）。
+ * st() 保留「非零即错」的读法，测试里那几十处判断因此一个字都不用改。 */
+static int st(const json &r) { return r.value("isError", true) ? 1 : 0; }
+static std::string msg(const json &r)
+{
+    std::string s;
+    for (const auto &b : r.value("content", json::array()))
+        if (b.value("type", std::string()) == "text") s += b.value("text", std::string());
+    return s;
+}
 static bool intr(const json &r) { return r.value("interrupted", false); }
 
 /* 参数里的路径要进 JSON 字符串，临时目录路径里不含需要转义的字符 */
@@ -131,14 +139,19 @@ int main()
         // 定义都在同一张表里，LLM 看见的清单只有一份（ADR-0019）
         CHECK(tool_defs().size() == 6, "六个工具");
         CHECK(find_tool("spawn") && find_tool("send_message"), "两个 agent 级工具在同一张表里");
-        const ToolDef *r = find_tool("read");
-        const ToolDef *e = find_tool("edit");
-        const ToolDef *b = find_tool("bash");
-        const ToolDef *s = find_tool("stop");
-        CHECK(r && !r->dangerous, "read 是只读工具，不触发权限检查点");
-        CHECK(e && e->dangerous, "edit 危险");
-        CHECK(b && b->dangerous, "bash 危险");
-        CHECK(s && !s->dangerous, "stop 是非危险控制工具");
+        const nlohmann::json *r = find_tool("read");
+        const nlohmann::json *e = find_tool("edit");
+        const nlohmann::json *b = find_tool("bash");
+        const nlohmann::json *s = find_tool("stop");
+        CHECK(r && !tool_dangerous(*r), "read 是只读工具，不触发权限检查点");
+        CHECK(e && tool_dangerous(*e), "edit 危险");
+        CHECK(b && tool_dangerous(*b), "bash 危险");
+        CHECK(s && !tool_dangerous(*s), "stop 是非危险控制工具");
+        // 定义就是端点要的那个对象，外加一个 core 私有的键（ADR-0023 §2）
+        CHECK(r && r->contains("input_schema") && (*r)["input_schema"].is_object(),
+              "schema 是对象，不是待 parse 的字符串");
+        CHECK(r && r->contains("_core") && (*r)["_core"].contains("label"),
+              "core 私有的字段收在 _core 里，发出去之前抹掉那一个键即可");
         CHECK(find_tool("core-tools_bash") == nullptr,
               "没有命名空间前缀这回事了（ADR-0016）");
         CHECK(st(call("nope", "{}")) != 0, "未知工具返回错误，不是空成功");
@@ -256,25 +269,26 @@ int main()
         ApprovalCoordinator ap;
         Executor exe(ctx, ap, wd.string());
 
-        const auto rel = run_tool("w1", "read", R"({"file_path":"inside.txt"})", nullptr, wd.string());
+        const auto rel = run_tool("w1", "read", json::parse(R"({"file_path":"inside.txt"})"), nullptr, wd.string());
         CHECK(st(rel) == 0 && msg(rel).find("here") != std::string::npos,
               "相对路径从 workdir 算起，不是从进程 cwd");
         const auto miss =
-            run_tool("w2", "read", R"({"file_path":"inside.txt"})", nullptr, g_home.string());
+            run_tool("w2", "read", json::parse(R"({"file_path":"inside.txt"})"), nullptr, g_home.string());
         CHECK(st(miss) != 0, "换个 workdir 同一条相对路径就找不到——说明真的按它解析");
 
         const auto abs =
-            run_tool("w3", "read", R"({"file_path":")" + (wd / "inside.txt").string() + R"("})",
-                     nullptr, g_home.string());
+            run_tool("w3", "read", json{{"file_path", (wd / "inside.txt").string()}}, nullptr,
+                     g_home.string());
         CHECK(st(abs) == 0, "绝对路径不受 workdir 影响");
 
-        const auto pwd = run_tool("w4", "bash", R"({"command":"pwd"})", nullptr, wd.string());
+        const auto pwd = run_tool("w4", "bash", json::parse(R"({"command":"pwd"})"), nullptr, wd.string());
         CHECK(st(pwd) == 0 && msg(pwd).find(wd.string()) != std::string::npos,
               "bash 起来时 chdir 到 workdir，不继承 core 进程的 cwd");
 
         const auto created =
             run_tool("w5", "edit",
-                     R"({"edits":[{"file_path":"made.txt","new_text":"x"}]})", nullptr, wd.string());
+                     json::parse(R"({"edits":[{"file_path":"made.txt","new_text":"x"}]})"), nullptr,
+                     wd.string());
         CHECK(st(created) == 0 && fs::exists(wd / "made.txt"), "edit 的相对路径同样按 workdir 落地");
     }
 
@@ -284,7 +298,7 @@ int main()
         CHECK(st(ok) == 0 && msg(ok) == "tools-ok\n", "stdout 原样回传");
 
         const auto rc = call("bash", R"({"command":"exit 3"})");
-        CHECK(st(rc) == 3, "退出码透传（非零即错）");
+        CHECK(st(rc) != 0, "非零退出码即错误（结果是 isError 布尔，不带退出码）");
 
         const auto noarg = call("bash", "{}");
         CHECK(st(noarg) != 0 && msg(noarg).find("command") != std::string::npos,
@@ -292,7 +306,7 @@ int main()
 
         // B1（ADR-0017）：只接 stdout 的话，失败命令回给模型的是"退出码非零，无话可说"
         const auto err = call("bash", R"({"command":"echo BOOM >&2; exit 7"})");
-        CHECK(st(err) == 7, "退出码照旧透传");
+        CHECK(st(err) != 0, "非零退出码即错误");
         CHECK(msg(err).find("BOOM") != std::string::npos,
               "stderr 也回传——报错原文是模型判断该不该重试的唯一依据");
 
@@ -412,6 +426,51 @@ int main()
         const auto elapsed = std::chrono::steady_clock::now() - t0;
         CHECK(elapsed < std::chrono::seconds(5), "在跑的 bash 被打断，不是等它自己跑完");
         CHECK(intr(r), "结果标出这次是被中止的（与工具自己失败不是一回事）");
+    }
+
+    printf("\n== MCP 接进来了（ADR-0023）：一个分支，判的是代码在哪儿跑 ==\n");
+    {
+        // 全局 mcp.json 指向 stub server（HOME 已经指到临时目录）
+        {
+            std::ofstream f(g_home / ".realagent" / "mcp.json");
+            f << R"({"mcpServers":{"stub":{"command":")" << MCP_STUB_SERVER << R"("}}})";
+        }
+        McpHub hub;
+        auto lease = hub.open(g_home.string());
+        CHECK(lease.errors.empty() && lease.conns.size() == 1, "连上了 stub");
+
+        Config cfg = config_with("allow-all");
+        CoreContext ctx{.config = &cfg, .emit_fn = nullptr};
+        ApprovalCoordinator ap;
+        Executor exe(ctx, ap, g_home.string(), nullptr, 0, &lease);
+
+        CHECK(find_tool("stub__echo") == nullptr, "内置那张表里没有它");
+        CHECK(exe.find("stub__echo") != nullptr, "但 executor 查得到——内置在前，MCP 在后");
+        CHECK(exe.find("read") != nullptr, "内置的照旧查得到");
+        CHECK(exe.find("stub__nope") == nullptr, "没有的还是没有");
+        const json *d = exe.find("stub__echo");
+        CHECK(d && tool_dangerous(*d), "MCP 来的一律 dangerous（annotations 不可信）");
+
+        const json r = exe.execute("c1", "stub__echo", R"({"message":"hi"})");
+        CHECK(st(r) == 0, "调通了");
+        CHECK(msg(r) == "Echo: hi", "转发用的是原名（stub 那头叫 echo，不带前缀）");
+
+        const json bad = exe.execute("c2", "stub__nope", "{}");
+        CHECK(st(bad) != 0 && msg(bad).find("unknown tool") != std::string::npos,
+              "查不到的名字照旧是 unknown tool");
+    }
+
+    printf("\n== MCP 工具照走权限那条路 ==\n");
+    {
+        McpHub hub;
+        auto lease = hub.open(g_home.string());
+        Config cfg = config_with("deny");
+        CoreContext ctx{.config = &cfg, .emit_fn = nullptr};
+        ApprovalCoordinator ap;
+        Executor exe(ctx, ap, g_home.string(), nullptr, 0, &lease);
+        const json r = exe.execute("c3", "stub__echo", R"({"message":"hi"})");
+        CHECK(st(r) != 0 && msg(r).find("denied") != std::string::npos,
+              "deny 挡得住——权限检查在派发之前，不分内置还是外部");
     }
 
     fs::current_path(fs::temp_directory_path());

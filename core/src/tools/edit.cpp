@@ -10,9 +10,9 @@
 
 namespace realagent {
 
-ToolDef edit_def()
+nlohmann::json edit_def()
 {
-    return {
+    return tool_def(
         "edit", "编辑文件",
         "Replace line `line` with new_text. line and hash are the two values at the start of\n"
         "each read line — pass them back verbatim.\n"
@@ -21,7 +21,7 @@ ToolDef edit_def()
         "A hash mismatch means that line changed — read it again, do not guess.\n"
         "edits is an array, applied in order, stopping at the first error; it may span files.",
         R"({"type":"object","properties":{"edits":{"type":"array","items":{"type":"object","properties":{"file_path":{"type":"string"},"line":{"type":"integer","description":"line number; omit = write the whole file"},"hash":{"type":"string","description":"hash of that line"},"new_text":{"type":"string","description":"new content; empty string = delete this line"}},"required":["file_path","new_text"]}}},"required":["edits"]})",
-        true};
+        true);
 }
 
 namespace {

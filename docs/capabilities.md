@@ -78,9 +78,23 @@ core 照常启动——没有表只是不算钱，不是不能对话。
 
 **公开清单**（`/model` 与状态栏的数据源）只有 `name` / `owned_by` / `context`，**单价不出去**。
 
-## 2. 内置工具（`core/src/tools/tools.cpp`）
+## 2. 工具（`core/src/tools/tools.cpp` + `core/src/mcp/`）
 
-静态表三个工具。LLM 见到的就是短名——没有命名空间前缀这回事了。
+**两个来源，一个词**（ADR-0023）：内置的六个随 core 一起编译，
+[MCP server](../docs/adr/0023-mcp-tools-only.md) 交出来的那些随外部进程生灭。
+模型眼里没有这条界线——一份清单、同样的 Schema、同样的 `tool_use`。
+
+工具定义**就是端点要的那个对象**（`name` / `description` / `input_schema`），
+外加一个 `_core` 键装 core 私有的字段（`label` / `dangerous`，MCP 来的还有
+`server` / `remote_name`）；发出去之前 `erase("_core")`。**不是结构体**——
+MCP 递来的本来就是 JSON，转成结构体再转回去是两次互相抵消的转换。
+
+结果只有一种形状：`{"content": [块...], "isError"}`，也是 MCP 那个。
+带不动块数组的协议在 `llm/upstream/<协议>.cpp` 里压平（ADR-0023 §3）。
+
+### 内置那六个
+
+LLM 见到的就是短名——没有命名空间前缀这回事了。
 
 | 工具 | 职责 | 安全属性 |
 |---|---|---|
@@ -89,6 +103,17 @@ core 照常启动——没有表只是不算钱，不是不能对话。
 | `bash` | 执行 shell 命令，回传 stdout **与 stderr**（合流） | 危险（过权限检查点） |
 | `spawn` | 派生一个 agent 去干一件事，**立刻返回它的 id，不等它跑完**；`in_edges` / `out_edges` 由模型决定（ADR-0019 §4b） | 危险（过权限检查点） |
 | `send_message` | 把一条消息投进另一个 agent 的收件箱；只能发给自己有出边的那些 | 只读（不碰文件、不起进程） |
+| `stop` | 一趟的唯一出口：收工回 idle。结果里多一个 `"stop": true`，loop 认字段不认名字 | 只读 |
+
+### MCP 来的那些（ADR-0023）
+
+配置两处来源、同名近的覆盖远的（`~/.realagent/mcp.json` 与 `<workdir>/.realagent/mcp.json`），
+信封逐字抄事实标准。**连接进程级**，一份配置一个，按配置身份去重。
+只说 `2026-07-28`：没有 `initialize` 握手，起进程之后第一句话就是 `tools/list`。
+
+名字是 `<配置的键>__<server 那头的原名>`，非法字符换 `_`，**不截断**（转发用的仍是原名）。
+**一律带危险标记**——规范自己说 `annotations` 不可信。
+坏 server 跳过、报错原文进 stderr，core 照常起。
 
 **无独立 `write` 工具**——创建是 `edit` 的一种用法（不给 `line` 即写整个文件），
 与替换、换成多行、删除共用同一个操作（ADR-0018）。工具描述里写清了四种用法。
@@ -99,7 +124,7 @@ core 照常启动——没有表只是不算钱，不是不能对话。
 而文件别处增删行导致的行号漂移会让 hash 对不上、模型重读一次。
 
 **`spawn` / `send_message` 实现在 `Executor`，不在 `tools.cpp`**：它们要认识
-`Agents`，而 `tools/` 在 `agent/` 下面，反过来包含就是层级倒挂。**定义仍在同一张静态表里**
+`Agents`，而 `tools/` 在 `agent/` 下面，反过来包含就是层级倒挂。**定义仍在同一张表里**
 ——LLM 看见的工具清单只有一份。
 
 **执行细节**：

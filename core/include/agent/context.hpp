@@ -23,11 +23,15 @@ namespace realagent {
 using EmitFn = std::function<void(const std::string &type, const std::string &payload)>;
 
 class Pricing;
+class McpHub;
 
 struct CoreContext {
     Config *config = nullptr;
     const Pricing *pricing = nullptr;
     EmitFn emit_fn;
+    /* MCP 连接池（ADR-0023 §4）。**进程级**——一份配置一个连接，全部 agent 共用。
+     * 与模型数据表同理：进程级只读的东西住这里，不按值挂到每个 Agent 上。 */
+    McpHub *mcp = nullptr;
 };
 
 } // namespace realagent

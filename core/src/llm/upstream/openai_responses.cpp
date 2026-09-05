@@ -10,6 +10,7 @@
  *   5. 工具结果的关联键叫 call_id，不叫 tool_call_id
  */
 #include "llm/llm.hpp"
+#include "tools/tools.hpp"
 
 namespace realagent {
 
@@ -52,7 +53,7 @@ HttpRequest build_request(protocol::OpenAiResponses, const Config &cfg, const nl
                 {
                     input.push_back(nlohmann::json{{"type", "function_call_output"},
                                                    {"call_id", b.at("tool_use_id")},
-                                                   {"output", b.at("content")}});
+                                                   {"output", tool_content_text(b.at("content"))}});
                 }
             }
             if (!text_parts.empty())

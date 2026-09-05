@@ -23,6 +23,7 @@
 #include "agent/executor.hpp"
 #include "agent/session.hpp"
 #include "config.hpp"
+#include "mcp/mcp.hpp"
 #include "server/quic_server.hpp"
 #include "tools/tools.hpp"
 
@@ -74,6 +75,11 @@ int main(int argc, char **argv)
     if (!price_err.empty()) fprintf(stderr, "[llm] %s（本次运行不计价）\n", price_err.c_str());
     ctx.pricing = &pricing;
 
+    /* MCP 连接池（ADR-0023）：进程级，一份配置一个连接。真正连上是在建 agent 那一刻
+     * （那时才知道 workdir，项目级 mcp.json 从它算起）。 */
+    McpHub mcp_hub;
+    ctx.mcp = &mcp_hub;
+
     /* 端点那一束（protocol / base_url / model）没有默认值，缺了就跑不了（ADR-0017）。
      *
      * 但**不在这里退出**：core 是常驻服务，TUI 是另一个进程。core 一退，
@@ -94,7 +100,8 @@ int main(int argc, char **argv)
     };
 
     for (const auto &t : tool_defs())
-        fprintf(stderr, "  tool: %s (dangerous=%d)\n", t.name.c_str(), (int)t.dangerous);
+        fprintf(stderr, "  tool: %s (dangerous=%d)\n", t.value("name", std::string()).c_str(),
+                (int)tool_dangerous(t));
 
     ApprovalCoordinator approval;
     approval.set_emit(ctx.emit_fn); // permission_request 也走队列

@@ -112,6 +112,52 @@ static Collected run_parse(const std::vector<std::string> &chunks,
     return c;
 }
 
+/* —— 工具结果的块数组：能带的带过去，带不动的压成一行占位（ADR-0023 §3） —— */
+static void test_tool_result_blocks()
+{
+    printf("[tool_result 块数组]\n");
+    const json dialog = json::parse(R"({
+      "model": "m",
+      "messages": [
+        {"role": "assistant", "content": [{"type":"tool_use","id":"t1","name":"shot","input":{}}]},
+        {"role": "user", "content": [{"type":"tool_result","tool_use_id":"t1","content":[
+            {"type":"text","text":"here it is:"},
+            {"type":"image","data":"aaaaaaaa","mimeType":"image/png"}]}]}
+      ]})");
+
+    { // anthropic-messages：图片过得去，但要换成它的 source 形状
+        const Config cfg = make_config("http://x", "k", "", "anthropic-messages");
+        const json body = json::parse(build_request(cfg, dialog).body);
+        const json &c = body["messages"][1]["content"][0]["content"];
+        CHECK(c.is_array() && c.size() == 2, "块数组原样是两块");
+        CHECK(c[1]["type"] == "image" && c[1]["source"]["type"] == "base64" &&
+                  c[1]["source"]["media_type"] == "image/png" &&
+                  c[1]["source"]["data"] == "aaaaaaaa",
+              "图片翻成 /v1/messages 的 source 形状（工具那边照 MCP 是 {data,mimeType}）");
+    }
+    { // openai-chat：工具消息只收字符串，非文本块压成占位
+        const Config cfg = make_config("http://x/v1", "k", "", "openai-chat");
+        const json body = json::parse(build_request(cfg, dialog).body);
+        std::string tool_msg;
+        for (const auto &m : body["messages"])
+            if (m.value("role", std::string()) == "tool") tool_msg = m["content"];
+        CHECK(tool_msg.find("here it is:") != std::string::npos, "文本过去了");
+        CHECK(tool_msg.find("image/png") != std::string::npos &&
+                  tool_msg.find("带不动") != std::string::npos,
+              "图片压成一行占位——模型知道自己没看见，就不会假装看见了");
+    }
+    { // openai-responses：同一条规则，落在 function_call_output 的 output 里
+        const Config cfg = make_config("http://x/v1", "k", "", "openai-responses");
+        const json body = json::parse(build_request(cfg, dialog).body);
+        std::string outp;
+        for (const auto &i : body["input"])
+            if (i.value("type", std::string()) == "function_call_output") outp = i["output"];
+        CHECK(outp.find("here it is:") != std::string::npos &&
+                  outp.find("image/png") != std::string::npos,
+              "文本 + 占位，同一条规则");
+    }
+}
+
 /* —— 1. build_request —— */
 static void test_build_request()
 {
@@ -171,7 +217,7 @@ static void test_build_request_openai_chat()
         "messages": [
             {"role":"user","content":[{"type":"text","text":"hello"}]},
             {"role":"assistant","content":[{"type":"tool_use","id":"c1","name":"read","input":{"file_path":"a.txt"}}]},
-            {"role":"user","content":[{"type":"tool_result","tool_use_id":"c1","content":"file body"}]}
+            {"role":"user","content":[{"type":"tool_result","tool_use_id":"c1","content":[{"type":"text","text":"file body"}]}]}
         ],
         "tools": [{"name":"read","description":"读文件","input_schema":{"type":"object"}}]
     })");
@@ -213,7 +259,7 @@ static void test_build_request_openai_responses()
         "messages": [
             {"role":"user","content":[{"type":"text","text":"hello"}]},
             {"role":"assistant","content":[{"type":"tool_use","id":"c9","name":"read","input":{"p":1}}]},
-            {"role":"user","content":[{"type":"tool_result","tool_use_id":"c9","content":"out"}]}
+            {"role":"user","content":[{"type":"tool_result","tool_use_id":"c9","content":[{"type":"text","text":"out"}]}]}
         ],
         "tools": [{"name":"read","input_schema":{"type":"object"}}]
     })");
@@ -581,6 +627,7 @@ static void test_parse_openai_responses_failed()
 int main()
 {
     test_build_request();
+    test_tool_result_blocks();
     test_build_request_openai_chat();
     test_build_request_openai_responses();
     test_endpoint_config_error();

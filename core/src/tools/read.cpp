@@ -8,14 +8,14 @@
 
 namespace realagent {
 
-ToolDef read_def()
+nlohmann::json read_def()
 {
-    return {
+    return tool_def(
         "read", "读文件",
         "Read a file. Every line starts with `line hash ` — those two values are exactly the\n"
         "line and hash arguments of the edit tool.",
         R"({"type":"object","properties":{"file_path":{"type":"string"}},"required":["file_path"]})",
-        false};
+        false);
 }
 
 nlohmann::json read_run(const nlohmann::json &params, const std::string &workdir)
@@ -29,7 +29,7 @@ nlohmann::json read_run(const nlohmann::json &params, const std::string &workdir
     const auto lines = read_lines(path);
     for (size_t i = 0; i < lines.size(); ++i)
         out += std::to_string(i + 1) + ' ' + hash_line(lines[i]) + ' ' + lines[i] + '\n';
-    return tool_result(0, std::move(out));
+    return tool_ok(std::move(out));
 }
 
 } // namespace realagent

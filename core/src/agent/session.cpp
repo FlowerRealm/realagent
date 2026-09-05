@@ -1,5 +1,7 @@
 #include "agent/session.hpp"
 
+#include "tools/tools.hpp"
+
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
@@ -234,7 +236,9 @@ nlohmann::json Session::to_frames(const nlohmann::json &messages)
                 // 工具跑出来的东西实时是一串 tool_output，回放是一整块——同一个帧，
                 // 客户端认领碎片的那段代码原样吃得下
                 frame(out, "tool_output",
-                      nlohmann::json{{"call_id", id}, {"stream", "output"}, {"text", str(b, "content")}});
+                      nlohmann::json{{"call_id", id},
+                                     {"stream", "output"},
+                                     {"text", tool_content_text(b.at("content"))}});
                 frame(out, "tool_execution_end", nlohmann::json{{"name", tool_names[id]}, {"id", id}, {"status", err ? 1 : 0}, {"interrupted", false}});
             }
         }

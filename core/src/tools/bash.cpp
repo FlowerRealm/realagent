@@ -43,13 +43,14 @@ void emit_output(const EmitFn &emit, const std::string &call_id, const std::stri
 
 } // namespace
 
-ToolDef bash_def()
+nlohmann::json bash_def()
 {
-    return {"bash", "执行命令",
-            "Run a command in the shell; returns stdout and stderr (merged into one stream).\n"
-            "Dangerous operations require user confirmation.",
-            R"({"type":"object","properties":{"command":{"type":"string"}},"required":["command"]})",
-            true};
+    return tool_def(
+        "bash", "执行命令",
+        "Run a command in the shell; returns stdout and stderr (merged into one stream).\n"
+        "Dangerous operations require user confirmation.",
+        R"({"type":"object","properties":{"command":{"type":"string"}},"required":["command"]})",
+        true);
 }
 
 nlohmann::json bash_run(const std::string &call_id, const nlohmann::json &params,
@@ -155,7 +156,7 @@ nlohmann::json bash_run(const std::string &call_id, const nlohmann::json &params
     if (!reaped) waitpid(pid, &st, 0);
 
     const int rc = WIFEXITED(st) ? WEXITSTATUS(st) : 128 + WTERMSIG(st);
-    return tool_result(rc, std::move(out)); // 非零退出码视为错误
+    return tool_text(rc != 0, std::move(out)); // 非零退出码视为错误
 }
 
 void interrupt_tool()

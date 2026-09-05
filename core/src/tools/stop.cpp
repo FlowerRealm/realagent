@@ -12,14 +12,15 @@
 
 namespace realagent {
 
-ToolDef stop_def()
+nlohmann::json stop_def()
 {
-    return {"stop", "收工",
-            "Finish this run and go idle until a new message arrives.\n"
-            "This is the ONLY way to conclude a run. Call this tool whenever you have answered\n"
-            "the user's question, completed the requested task, or have no further actions to perform.\n"
-            "Always call this tool along with your final response text. Do NOT invent new tasks.",
-            R"({"type":"object","properties":{}})", false};
+    return tool_def(
+        "stop", "收工",
+        "Finish this run and go idle until a new message arrives.\n"
+        "This is the ONLY way to conclude a run. Call this tool whenever you have answered\n"
+        "the user's question, completed the requested task, or have no further actions to perform.\n"
+        "Always call this tool along with your final response text. Do NOT invent new tasks.",
+        R"({"type":"object","properties":{}})", false);
 }
 
 nlohmann::json stop_run()

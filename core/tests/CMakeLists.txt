@@ -33,6 +33,7 @@ add_executable(test_tools test_tools.cpp
                           ../src/agent/executor.cpp
                           ../src/agent/agents.cpp ../src/agent/agent.cpp ../src/agent/session.cpp
                           ../src/agent/skills.cpp
+                          ../src/mcp/client.cpp ../src/mcp/hub.cpp
                           ../src/llm/llm.cpp
                           ../src/llm/upstream/anthropic_messages.cpp ../src/llm/upstream/openai_chat.cpp
                           ../src/llm/upstream/openai_responses.cpp
@@ -42,6 +43,8 @@ add_executable(test_tools test_tools.cpp
                           ../src/agent/approval.cpp ../src/config.cpp)
 target_include_directories(test_tools PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
 target_link_libraries(test_tools PRIVATE ${CURL_LIBRARIES})
+target_compile_definitions(test_tools PRIVATE MCP_STUB_SERVER="$<TARGET_FILE:mcp_stub_server>")
+add_dependencies(test_tools mcp_stub_server)
 add_test(NAME tools COMMAND test_tools)
 
 # agent 的收件箱与线程生命周期（ADR-0019）。端点没配，LLM 调用当场失败——
@@ -49,6 +52,7 @@ add_test(NAME tools COMMAND test_tools)
 add_executable(test_agent test_agent.cpp
   ../src/agent/agent.cpp ../src/agent/agents.cpp ../src/agent/executor.cpp ../src/agent/approval.cpp
   ../src/agent/session.cpp ../src/agent/skills.cpp ../src/llm/llm.cpp
+  ../src/mcp/client.cpp ../src/mcp/hub.cpp
   ../src/tools/tools.cpp ../src/tools/read.cpp ../src/tools/edit.cpp
   ../src/tools/bash.cpp ../src/tools/spawn.cpp ../src/tools/send_message.cpp ../src/tools/stop.cpp
   ../src/llm/upstream/anthropic_messages.cpp ../src/llm/upstream/openai_chat.cpp
@@ -58,3 +62,20 @@ add_executable(test_agent test_agent.cpp
 target_include_directories(test_agent PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
 target_link_libraries(test_agent PRIVATE ${CURL_LIBRARIES})
 add_test(NAME agent COMMAND test_agent)
+
+# MCP 客户端（ADR-0023）。对手是同目录下的 stub server：官方参考 server 实测是旧纪元的
+# （server/discover 回 -32601），而我们只说 2026-07-28，所以现成的对手一个都用不了。
+add_executable(mcp_stub_server mcp_stub_server.cpp)
+target_include_directories(mcp_stub_server PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
+
+add_executable(test_mcp test_mcp.cpp ../src/mcp/client.cpp)
+target_include_directories(test_mcp PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
+target_compile_definitions(test_mcp PRIVATE MCP_STUB_SERVER="$<TARGET_FILE:mcp_stub_server>")
+add_dependencies(test_mcp mcp_stub_server)
+add_test(NAME mcp COMMAND test_mcp)
+
+add_executable(test_mcp_hub test_mcp_hub.cpp ../src/mcp/hub.cpp ../src/mcp/client.cpp ../src/config.cpp)
+target_include_directories(test_mcp_hub PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
+target_compile_definitions(test_mcp_hub PRIVATE MCP_STUB_SERVER="$<TARGET_FILE:mcp_stub_server>")
+add_dependencies(test_mcp_hub mcp_stub_server)
+add_test(NAME mcp_hub COMMAND test_mcp_hub)

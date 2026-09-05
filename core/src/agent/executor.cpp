@@ -9,9 +9,28 @@
 namespace realagent {
 
 Executor::Executor(CoreContext &ctx, ApprovalCoordinator &approval, std::string workdir,
-                   Agents *pool, int agent_id)
+                   Agents *pool, int agent_id, const McpHub::Lease *mcp)
     : ctx_(ctx), approval_(approval), workdir_(std::move(workdir)), pool_(pool),
-      agent_id_(agent_id) {}
+      agent_id_(agent_id), mcp_(mcp)
+{
+}
+
+const nlohmann::json *Executor::find(const std::string &name) const
+{
+    if (const nlohmann::json *t = find_tool(name)) return t; // 内置那六个
+    return mcp_ ? find_by_name(mcp_->tools, name) : nullptr;
+}
+
+/* 转发。**这一个实现服务全部 MCP 工具**——它们不是 N 段代码，是 N 份声明（ADR-0023 §1）。 */
+nlohmann::json Executor::mcp_call(const nlohmann::json &tool, const nlohmann::json &params)
+{
+    const std::string server = tool_server(tool);
+    for (const auto &c : mcp_->conns)
+        if (c->name() == server) return c->call(tool["_core"]["remote_name"], params, &interrupted_);
+    /* core 是常驻服务，一个空指针会带走所有 agent，所以这里不解引用一个找不到的连接。
+     * 清单与连接是 hub 同一个循环里生成的，正常路径到不了这儿。 */
+    return tool_fail("MCP server 不在手上: " + server);
+}
 
 namespace {
 /* 权限策略：一个配置键，一个 switch（ADR-0016）。
@@ -30,10 +49,10 @@ Verdict decide(const Config &cfg)
 }
 } // namespace
 
-bool Executor::check_permission(const ToolDef &tool, const std::string &params_json,
+bool Executor::check_permission(const nlohmann::json &tool, const std::string &params_json,
                                 std::string *denied_reason)
 {
-    if (!tool.dangerous) return true; // 只读工具不触发
+    if (!tool_dangerous(tool)) return true; // 只读工具不触发
     switch (decide(*ctx_.config))
     {
         case Verdict::Allow:
@@ -53,7 +72,7 @@ bool Executor::check_permission(const ToolDef &tool, const std::string &params_j
             }
             // 审批链路（ADR-0005）：core 发 permission_request → 用户裁决 → 回传。
             // agent 线程真等裁决（30s 超时 deny），事件循环线程收 /approval-response 唤醒
-            if (approval_.await(agent_id_, tool.name, params_json) != Verdict::Allow)
+            if (approval_.await(agent_id_, tool.value("name", std::string()), params_json) != Verdict::Allow)
             {
                 if (denied_reason) *denied_reason = "denied by user";
                 return false;
@@ -79,30 +98,42 @@ void Executor::reset()
 nlohmann::json Executor::execute(const std::string &call_id, const std::string &name,
                                  const std::string &params_json)
 {
-    const ToolDef *tool = find_tool(name);
-    if (!tool) return nlohmann::json{{"status", 1}, {"output", "unknown tool"}, {"interrupted", false}};
+    /* 结果的三个字段（content / isError / interrupted）由每条返回路径写齐——
+     * 少写一个，调用方就得给它准备一个默认值，那个默认值又会掩盖是谁漏写的。 */
+    const auto bail = [](nlohmann::json r, bool intr) {
+        r["interrupted"] = intr;
+        return r;
+    };
+
+    const nlohmann::json *tool = find(name);
+    if (!tool) return bail(tool_fail("unknown tool"), false);
 
     std::string reason;
-    if (!check_permission(*tool, params_json, &reason))
-        return nlohmann::json{{"status", 1}, {"output", reason}, {"interrupted", false}};
+    if (!check_permission(*tool, params_json, &reason)) return bail(tool_fail(reason), false);
 
     // 登记在先、执行在后：这个顺序才让 interrupt() 要么打断得到它、要么撞上 interrupted_，
     // 不存在"检查完了才开始跑"的缝
     {
         std::lock_guard<std::mutex> lk(inflight_mtx_);
-        if (interrupted_)
-            return nlohmann::json{{"status", 1}, {"output", "interrupted by user"}, {"interrupted", true}};
+        if (interrupted_) return bail(tool_fail("interrupted by user"), true);
         inflight_ = true;
     }
+    /* 参数**只解析一次**，解出来的往下传。模型给的形状不由 core 说了算，解不动就当空对象。 */
     nlohmann::json params = nlohmann::json::parse(params_json, nullptr, false);
     if (params.is_discarded()) params = nlohmann::json::object();
-    nlohmann::json r = (name == "spawn" || name == "send_message")
-                           ? agent_tool(name, params)
-                           : run_tool(call_id, name, params_json, ctx_.emit_fn, workdir_);
+    /* 唯一那个分支：**代码在 core 里，还是在别的进程里**（ADR-0023 §1）。
+     * spawn / send_message 那两个是本来就在的账（定义在 tools/，实现在这儿），跟 MCP 无关。 */
+    nlohmann::json r;
+    if (!tool_server(*tool).empty())
+        r = mcp_call(*tool, params);
+    else if (name == "spawn" || name == "send_message")
+        r = agent_tool(name, params);
+    else
+        r = run_tool(call_id, name, params, ctx_.emit_fn, workdir_);
     {
         std::lock_guard<std::mutex> lk(inflight_mtx_);
         // "算不算被中断"由 core 判——中止是 core 提的，工具不必编造状态码
-        r["interrupted"] = interrupted_;
+        r["interrupted"] = interrupted_.load();
         inflight_ = false;
     }
     return r;
@@ -124,10 +155,7 @@ static std::vector<int> id_list(const nlohmann::json &p, std::string_view key)
 
 nlohmann::json Executor::agent_tool(const std::string &name, const nlohmann::json &params)
 {
-    const auto fail = [](const std::string &m) {
-        return nlohmann::json{{"status", 1}, {"output", m}};
-    };
-    if (!pool_) return fail("no agent graph here");
+    if (!pool_) return tool_fail("no agent graph here");
 
     const auto str = [&params](std::string_view k) {
         const auto it = params.find(k);
@@ -138,20 +166,20 @@ nlohmann::json Executor::agent_tool(const std::string &name, const nlohmann::jso
     {
         const auto it_to = params.find("to");
         if (it_to == params.end() || (!it_to->is_number_integer() && !it_to->is_number_unsigned()))
-            return fail("send_message is missing or has an invalid target agent id: to");
+            return tool_fail("send_message is missing or has an invalid target agent id: to");
         const int to = it_to->get<int>();
         if (!pool_->post(to, str("text")))
-            return fail("no such agent: " + std::to_string(to));
-        return nlohmann::json{{"status", 0}, {"output", "sent to " + std::to_string(to)}};
+            return tool_fail("no such agent: " + std::to_string(to));
+        return tool_ok("sent to " + std::to_string(to));
     }
 
     // spawn：派生方决定新 agent 的全部出入边（ADR-0019）
     std::string err;
     const int id = pool_->create(str("workdir"), agent_id_, id_list(params, "in_edges"),
                                  id_list(params, "out_edges"), err);
-    if (id <= 0) return fail(err);
+    if (id <= 0) return tool_fail(err);
     pool_->post(id, str("prompt"));
-    return nlohmann::json{{"status", 0}, {"output", std::to_string(id)}};
+    return tool_ok(std::to_string(id));
 }
 
 } // namespace realagent

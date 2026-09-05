@@ -171,7 +171,10 @@ int main()
             {{"role", "assistant"},
              {"content", {{{"type", "tool_use"}, {"id", "c1"}, {"name", "bash"}, {"input", json::object()}}}}},
             {{"role", "user"},
-             {"content", {{{"type", "tool_result"}, {"tool_use_id", "c1"}, {"content", "hi\n"}}}}},
+             {"content",
+              {{{"type", "tool_result"},
+                {"tool_use_id", "c1"},
+                {"content", json::array({{{"type", "text"}, {"text", "hi\n"}}})}}}}},
         });
         const json g = Session::to_frames(tool);
         CHECK(types(g) == "turn_start tool_execution_start turn_end tool_output tool_execution_end",
@@ -182,7 +185,11 @@ int main()
 
         const json bad = json::array({
             {{"role", "user"},
-             {"content", {{{"type", "tool_result"}, {"tool_use_id", "c9"}, {"content", "boom"}, {"is_error", true}}}}},
+             {"content",
+              {{{"type", "tool_result"},
+                {"tool_use_id", "c9"},
+                {"content", json::array({{{"type", "text"}, {"text", "boom"}}})},
+                {"is_error", true}}}}},
         });
         CHECK(Session::to_frames(bad)[1]["data"]["status"] == 1, "is_error 变成 status 1");
 

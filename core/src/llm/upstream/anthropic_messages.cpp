@@ -10,8 +10,54 @@
  * 于是不必为"对面是哪一家"开一个配置项，也不必在代码里认 URL。
  */
 #include "llm/llm.hpp"
+#include "tools/tools.hpp"
 
 namespace realagent {
+
+namespace {
+
+/* 工具结果的块数组 → `/v1/messages` 的块数组。
+ *
+ * **这一套协议带得动图片**：`tool_result.content` 收 text / image / document /
+ * search_result 的数组。但形状不一样——工具那边（照 MCP）是
+ * `{"type":"image","data":...,"mimeType":...}`，这边是
+ * `{"type":"image","source":{"type":"base64","media_type":...,"data":...}}`。
+ *
+ * 翻译住在这个文件里，因为「这个端点收什么形状」只有它知道（ADR-0017 / ADR-0023 §3）。
+ * 带不动的（音频、二进制资源）压成一行文字占位，不悄悄丢掉。 */
+nlohmann::json to_tool_content(const nlohmann::json &content)
+{
+    nlohmann::json out = nlohmann::json::array();
+    for (const nlohmann::json &b : content)
+    {
+        const std::string type = b.value("type", std::string());
+        if (type == "text")
+        {
+            out.push_back({{"type", "text"}, {"text", b.value("text", std::string())}});
+        }
+        /* 图片块要齐两样才认。缺一样就整块走占位——替它猜一个 media_type，
+         * 猜错了端点报的错比「缺字段」难查得多。对同一个块只有一种态度。 */
+        else if (type == "image" && b.contains("data") && b.contains("mimeType"))
+        {
+            out.push_back({{"type", "image"},
+                           {"source",
+                            {{"type", "base64"},
+                             {"media_type", b.at("mimeType")},
+                             {"data", b.at("data")}}}});
+        }
+        else
+        {
+            // 其余（音频、resource_link、二进制资源）没有对应的块类型，走共用的那行占位
+            out.push_back({{"type", "text"},
+                           {"text", tool_content_text(nlohmann::json::array({b}))}});
+        }
+    }
+    if (out.empty()) // 空 content 端点不收，给一句实话
+        out.push_back({{"type", "text"}, {"text", "(no output)"}});
+    return out;
+}
+
+} // namespace
 
 HttpRequest build_request(protocol::AnthropicMessages, const Config &cfg, const nlohmann::json &dialog)
 {
@@ -54,7 +100,7 @@ HttpRequest build_request(protocol::AnthropicMessages, const Config &cfg, const 
                     {
                         out_block["type"] = "tool_result";
                         out_block["tool_use_id"] = b.at("tool_use_id");
-                        out_block["content"] = b.at("content");
+                        out_block["content"] = to_tool_content(b.at("content"));
                         if (b.value("is_error", false)) out_block["is_error"] = true;
                     }
                     else if (bt == "thinking")
